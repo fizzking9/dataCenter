@@ -17,6 +17,11 @@ export function canonicalJson(value: unknown): string {
   return encoded;
 }
 
+/** The content address of a governed value: identical content, identical digest. */
+export function canonicalDigest(value: unknown): string {
+  return createHash('sha256').update(canonicalJson(value)).digest('hex');
+}
+
 export function publicKeyFromFile(path: string): KeyObject {
   return createPublicKey(readFileSync(path, 'utf8'));
 }

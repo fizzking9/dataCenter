@@ -1,5 +1,14 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import type {
+  AcquisitionRunRecord,
+  DataProductArtifact,
+  DatasetArtifact,
+  IntegrationBatchRecord,
+  IntegrationConfigurationArtifact,
+  RawAcquisitionRecord,
+  SourceRecord,
+} from './catalog.js';
 import { readJsonFile, writeJsonFile } from './state.js';
 import type { WrappedValue } from './keys.js';
 
@@ -8,6 +17,7 @@ export type DeploymentRole = 'Deployment Administrator';
 export type WorkspaceRole = 'Workspace Administrator' | 'Consumer';
 
 export const DEPLOYMENT_CONTEXT_ARTIFACT = 'deployment-business-context';
+export const CURRENT_SCHEMA_VERSION = 2;
 export const USERNAME_PATTERN = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,189}$/;
 
 export interface UserRecord {
@@ -76,6 +86,13 @@ export interface PlatformState {
   memberships: MembershipRecord[];
   sessions: SessionRecord[];
   context_artifacts: ContextArtifact[];
+  sources: SourceRecord[];
+  integration_configurations: IntegrationConfigurationArtifact[];
+  raw_acquisitions: RawAcquisitionRecord[];
+  acquisition_runs: AcquisitionRunRecord[];
+  integration_batches: IntegrationBatchRecord[];
+  datasets: DatasetArtifact[];
+  data_products: DataProductArtifact[];
 }
 
 /** Every human identity is stated as one account identifier of the form name@domain. */
@@ -97,17 +114,34 @@ function platformPath(root: string): string {
 
 export function readPlatform(root: string): PlatformState {
   const path = platformPath(root);
-  if (!existsSync(path)) {
-    return {
-      schema_version: 1,
-      users: [],
-      workspaces: [],
-      memberships: [],
-      sessions: [],
-      context_artifacts: [],
-    };
-  }
-  return readJsonFile<PlatformState>(path);
+  const state: PlatformState = existsSync(path)
+    ? readJsonFile<PlatformState>(path)
+    : {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        users: [],
+        workspaces: [],
+        memberships: [],
+        sessions: [],
+        context_artifacts: [],
+        sources: [],
+        integration_configurations: [],
+        raw_acquisitions: [],
+        acquisition_runs: [],
+        integration_batches: [],
+        datasets: [],
+        data_products: [],
+      };
+  // A Deployment installed under an earlier schema keeps working: the added
+  // Collections start empty rather than failing the read closed.
+  state.schema_version = CURRENT_SCHEMA_VERSION;
+  state.sources ??= [];
+  state.integration_configurations ??= [];
+  state.raw_acquisitions ??= [];
+  state.acquisition_runs ??= [];
+  state.integration_batches ??= [];
+  state.datasets ??= [];
+  state.data_products ??= [];
+  return state;
 }
 
 export function writePlatform(root: string, state: PlatformState): void {

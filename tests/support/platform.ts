@@ -174,7 +174,66 @@ export function createWorkspace(
 
 /** Writes a Business Context entry snapshot and returns its path. */
 export function contextEntries(fixture: PlatformFixture, name: string, entries: unknown[]): string {
+  return jsonFile(fixture, name, entries);
+}
+
+/** Writes a JSON document the commands read, and returns its path. */
+export function jsonFile(fixture: PlatformFixture, name: string, value: unknown): string {
   const path = join(fixture.scratch, `${name}.json`);
-  writeFileSync(path, `${JSON.stringify(entries, null, 2)}\n`);
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
   return path;
+}
+
+/** Writes a byte-exact fixture file, and returns its path. */
+export function textFile(fixture: PlatformFixture, name: string, content: string): string {
+  const path = join(fixture.scratch, name);
+  writeFileSync(path, content);
+  return path;
+}
+
+/** Grants an existing User one Workspace-scoped Role. */
+export function grantRole(
+  fixture: PlatformFixture,
+  token: string,
+  workspaceId: string,
+  username: string,
+  role: 'Workspace Administrator' | 'Consumer',
+): void {
+  const result = command(
+    fixture,
+    ['membership', 'grant', '--workspace', workspaceId, '--username', username, '--role', role],
+    { token },
+  );
+  if (result.status !== 0) {
+    throw new Error(`membership grant failed for ${username}: ${result.stderr}`);
+  }
+  registerTotp(fixture, username, result.output['totp_secret']);
+}
+
+export interface WorkspaceFixture {
+  fixture: PlatformFixture;
+  workspaceId: string;
+  deploymentAdministratorToken: string;
+  workspaceAdministratorToken: string;
+  consumerToken: string;
+}
+
+/**
+ * One Workspace holding a Workspace Administrator and a Consumer, which is the
+ * shape every governed Workspace Artifact lifecycle needs.
+ */
+export function workspaceFixture(): WorkspaceFixture {
+  const fixture = initializePlatform();
+  const deploymentAdministratorToken = sessionFor(
+    fixture,
+    fixture.administrator.username,
+    fixture.administrator.password,
+  );
+  createUser(fixture, deploymentAdministratorToken, 'operations@example.invalid', 'operations-administrator');
+  const workspaceId = createWorkspace(fixture, deploymentAdministratorToken, 'Operations', 'operations@example.invalid');
+  const workspaceAdministratorToken = sessionFor(fixture, 'operations@example.invalid', 'operations-administrator');
+  createUser(fixture, deploymentAdministratorToken, 'analyst@example.invalid', 'analyst-consumer');
+  grantRole(fixture, workspaceAdministratorToken, workspaceId, 'analyst@example.invalid', 'Consumer');
+  const consumerToken = sessionFor(fixture, 'analyst@example.invalid', 'analyst-consumer');
+  return { fixture, workspaceId, deploymentAdministratorToken, workspaceAdministratorToken, consumerToken };
 }

@@ -1,17 +1,26 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
+import { uploadAcquisition } from './acquisition.js';
 import { listAuditEvents } from './audit-view.js';
 import { login, logout } from './auth.js';
 import { publishCommonContext, publishWorkspaceContext, showContext } from './context.js';
+import { releaseDataset, showDataset } from './datasets.js';
 import { OperatorError } from './errors.js';
 import { initializeDeployment } from './initialize.js';
 import { installDeployment } from './install.js';
+import { adoptIntegrationConfiguration, publishIntegrationConfiguration } from './integration.js';
 import { importLicense } from './license.js';
+import { queryDataProduct } from './product-query.js';
+import { listDataProducts, publishDataProduct } from './products.js';
+import { createSource } from './sources.js';
 import { deploymentStatus } from './status.js';
 import { createUser, deactivateUser, listUsers, transferOwnership } from './users.js';
 import { createWorkspace, grantMembership, listWorkspaces, revokeMembership } from './workspaces.js';
 
-const GROUPED_COMMANDS = new Set(['user', 'workspace', 'membership', 'ownership', 'context', 'audit']);
+const GROUPED_COMMANDS = new Set([
+  'user', 'workspace', 'membership', 'ownership', 'context', 'audit',
+  'source', 'integration', 'acquisition', 'dataset', 'product',
+]);
 const BOOLEAN_FLAGS = new Set(['admin-password-stdin', 'password-stdin', 'deployment-administrator']);
 
 interface Invocation {
@@ -221,6 +230,72 @@ async function main(): Promise<void> {
     emit(listAuditEvents({
       ...governed(options),
       ...(options.has('workspace') ? { workspaceId: required(options, 'workspace') } : {}),
+    }));
+    return;
+  }
+  if (command === 'source' && subcommand === 'create') {
+    emit(createSource({
+      ...governed(options),
+      workspaceId: required(options, 'workspace'),
+      name: required(options, 'name'),
+      type: required(options, 'type'),
+    }));
+    return;
+  }
+  if (command === 'integration' && subcommand === 'publish') {
+    emit(publishIntegrationConfiguration({
+      ...governed(options),
+      sourceId: required(options, 'source'),
+      configPath: required(options, 'config'),
+    }));
+    return;
+  }
+  if (command === 'integration' && subcommand === 'adopt') {
+    emit(adoptIntegrationConfiguration({
+      ...governed(options),
+      sourceId: required(options, 'source'),
+      version: Number(required(options, 'version')),
+    }));
+    return;
+  }
+  if (command === 'acquisition' && subcommand === 'upload') {
+    emit(uploadAcquisition({
+      ...governed(options),
+      sourceId: required(options, 'source'),
+      file: required(options, 'file'),
+    }));
+    return;
+  }
+  if (command === 'dataset' && subcommand === 'release') {
+    emit(releaseDataset({ ...governed(options), sourceId: required(options, 'source') }));
+    return;
+  }
+  if (command === 'dataset' && subcommand === 'show') {
+    emit(showDataset({
+      ...governed(options),
+      sourceId: required(options, 'source'),
+      ...(options.has('release') ? { release: Number(required(options, 'release')) } : {}),
+    }));
+    return;
+  }
+  if (command === 'product' && subcommand === 'publish') {
+    emit(publishDataProduct({
+      ...governed(options),
+      sourceId: required(options, 'source'),
+      name: required(options, 'name'),
+      contractPath: required(options, 'contract'),
+    }));
+    return;
+  }
+  if (command === 'product' && subcommand === 'list') {
+    emit(listDataProducts({ ...governed(options), workspaceId: required(options, 'workspace') }));
+    return;
+  }
+  if (command === 'product' && subcommand === 'query') {
+    emit(queryDataProduct({
+      ...governed(options),
+      dataProductId: required(options, 'product'),
+      requestPath: required(options, 'request'),
     }));
     return;
   }
