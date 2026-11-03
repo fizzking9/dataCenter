@@ -5,6 +5,7 @@ import { bootstrapAdministrator } from './admin.js';
 import { assertCondition } from './errors.js';
 import { readMountedMasterKey, wrapNewDataKey } from './keys.js';
 import { validateLicense } from './license.js';
+import { readPlatform, writePlatform } from './platform.js';
 import { startPinnedServices } from './runtime.js';
 import {
   readDeployment,
@@ -27,7 +28,9 @@ export async function initializeDeployment(options: {
   validateLicense(options.root, licensePath);
   const masterKey = readMountedMasterKey(options.root, options.masterKey);
   const { dataKey, wrapped } = wrapNewDataKey(masterKey);
-  const secrets = await bootstrapAdministrator(options.root, options.adminUsername, options.adminPassword, dataKey);
+  const bootstrap = await bootstrapAdministrator(options.adminUsername, options.adminPassword, dataKey);
+  const platform = readPlatform(options.root);
+  writePlatform(options.root, { ...platform, users: [bootstrap.user] });
   mkdirSync(join(options.root, 'config'), { recursive: true, mode: 0o700 });
   writeJsonFile(join(options.root, 'config', 'wrapped-data-key.json'), wrapped);
   writeDeployment(options.root, {
@@ -61,7 +64,8 @@ export async function initializeDeployment(options: {
       master_key_external: true,
       runtime_services: services,
       evidence_id: evidenceId,
-      ...secrets,
+      admin_username: bootstrap.user.username,
+      ...bootstrap.secrets,
     };
   } catch (error) {
     writeDeployment(options.root, {

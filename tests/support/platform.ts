@@ -1,0 +1,180 @@
+import { randomBytes } from 'node:crypto';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createBundleFixture } from './bundle.js';
+import { fakeDockerEnvironment } from './fake-docker.js';
+import { issueLicense } from './license.js';
+import { runOperator, type OperatorResult } from './operator.js';
+import { totpCode } from './totp.js';
+
+export interface AdministratorCredentials {
+  username: string;
+  password: string;
+  totp_secret: string;
+  recovery_codes: string[];
+}
+
+export interface PlatformFixture {
+  root: string;
+  masterKey: string;
+  docker: NodeJS.ProcessEnv;
+  scratch: string;
+  administrator: AdministratorCredentials;
+}
+
+export interface CommandOptions {
+  input?: string;
+  token?: string;
+}
+
+const enrolmentSecrets = new Map<string, string>();
+
+/** Records the enrollment secret returned once when an administrator is enrolled. */
+export function registerTotp(fixture: PlatformFixture, username: string, secret: unknown): void {
+  if (typeof secret === 'string') enrolmentSecrets.set(`${fixture.root}|${username}`, secret);
+}
+
+/**
+ * Installs, licenses, and initializes a Deployment through the Operator
+ * lifecycle commands, leaving one bootstrapped Deployment Administrator.
+ */
+export function initializePlatform(options: { administratorPassword?: string } = {}): PlatformFixture {
+  const scratch = mkdtempSync(join(tmpdir(), 'dc-platform-'));
+  const bundle = createBundleFixture(scratch);
+  const root = join(scratch, 'deployment');
+  const docker = fakeDockerEnvironment(scratch);
+  const masterKey = join(scratch, 'mounted-master-key');
+  writeFileSync(masterKey, randomBytes(32), { mode: 0o600 });
+
+  const installed = runOperator([
+    'install', '--bundle', bundle.directory, '--root', root,
+    '--release-key', bundle.releasePublicKeyPath,
+    '--confirm-release-key-fingerprint', bundle.releaseFingerprint,
+    '--operator', 'certification@example.invalid',
+  ]);
+  if (installed.status !== 0) {
+    throw new Error(`install failed: ${installed.stderr}`);
+  }
+  const request = JSON.parse(readFileSync(String(installed.output.license_request), 'utf8')) as {
+    request_id: string;
+    deployment_id: string;
+    release: string;
+  };
+  const licensePath = join(scratch, 'deployment-license.json');
+  issueLicense(licensePath, bundle, request);
+  const imported = runOperator(['import-license', '--root', root, '--license', licensePath, '--operator', 'certification@example.invalid']);
+  if (imported.status !== 0) {
+    throw new Error(`import-license failed: ${imported.stderr}`);
+  }
+
+  const password = options.administratorPassword ?? 'bootstrap-administrator-password';
+  const initialized = runOperator([
+    'initialize', '--root', root, '--master-key', masterKey,
+    '--admin-username', 'bootstrap@example.invalid', '--admin-password-stdin',
+    '--operator', 'certification@example.invalid',
+  ], { input: `${password}\n`, env: docker });
+  if (initialized.status !== 0) {
+    throw new Error(`initialize failed: ${initialized.stderr}`);
+  }
+  const fixture: PlatformFixture = {
+    root,
+    masterKey,
+    docker,
+    scratch,
+    administrator: {
+      username: String(initialized.output.admin_username ?? 'bootstrap@example.invalid'),
+      password,
+      totp_secret: String(initialized.output.totp_secret),
+      recovery_codes: initialized.output.recovery_codes as string[],
+    },
+  };
+  registerTotp(fixture, fixture.administrator.username, fixture.administrator.totp_secret);
+  return fixture;
+}
+
+/** Runs one governed command against the installed Deployment. */
+export function command(
+  fixture: PlatformFixture,
+  args: string[],
+  options: CommandOptions = {},
+): OperatorResult {
+  const full = [...args, '--root', fixture.root, '--master-key', fixture.masterKey];
+  if (options.token) full.push('--session-token', options.token);
+  return runOperator(full, {
+    ...(options.input === undefined ? {} : { input: options.input }),
+    env: fixture.docker,
+  });
+}
+
+/**
+ * Authenticates a User. Administrators were enrolled at provisioning time, so
+ * their enrollment secret is already recorded; ordinary Users authenticate with
+ * a password alone.
+ */
+export function signIn(fixture: PlatformFixture, username: string, password: string): OperatorResult {
+  const secret = enrolmentSecrets.get(`${fixture.root}|${username}`);
+  return command(
+    fixture,
+    ['login', '--username', username, '--password-stdin', ...(secret === undefined ? [] : ['--totp', totpCode(secret)])],
+    { input: `${password}\n` },
+  );
+}
+
+/** Logs in and returns the issued session token. */
+export function sessionFor(fixture: PlatformFixture, username: string, password: string): string {
+  const result = signIn(fixture, username, password);
+  if (result.status !== 0) {
+    throw new Error(`login failed for ${username}: ${result.stderr}`);
+  }
+  return String(result.output.session_token);
+}
+
+/** Creates a User, optionally with the Deployment Administrator Role. */
+export function createUser(
+  fixture: PlatformFixture,
+  administratorToken: string,
+  username: string,
+  password: string,
+  deploymentAdministrator = false,
+): OperatorResult {
+  const result = command(
+    fixture,
+    [
+      'user', 'create', '--username', username, '--password-stdin',
+      ...(deploymentAdministrator ? ['--deployment-administrator'] : []),
+    ],
+    { token: administratorToken, input: `${password}\n` },
+  );
+  if (result.status !== 0) {
+    throw new Error(`user create failed for ${username}: ${result.stderr}`);
+  }
+  registerTotp(fixture, username, result.output['totp_secret']);
+  return result;
+}
+
+/** Creates a Workspace whose only Workspace Administrator is the named User. */
+export function createWorkspace(
+  fixture: PlatformFixture,
+  administratorToken: string,
+  name: string,
+  administrator: string,
+): string {
+  const result = command(
+    fixture,
+    ['workspace', 'create', '--name', name, '--administrator', administrator],
+    { token: administratorToken },
+  );
+  if (result.status !== 0) {
+    throw new Error(`workspace create failed for ${name}: ${result.stderr}`);
+  }
+  registerTotp(fixture, administrator, result.output['totp_secret']);
+  return String(result.output.workspace_id);
+}
+
+/** Writes a Business Context entry snapshot and returns its path. */
+export function contextEntries(fixture: PlatformFixture, name: string, entries: unknown[]): string {
+  const path = join(fixture.scratch, `${name}.json`);
+  writeFileSync(path, `${JSON.stringify(entries, null, 2)}\n`);
+  return path;
+}
