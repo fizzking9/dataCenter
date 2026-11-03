@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { actorLabel, deny, type ActionContext, type Actor } from './authz.js';
 import { recoveryCodeHash } from './enrollment.js';
 import { OperatorError } from './errors.js';
@@ -11,22 +11,13 @@ import {
   type UserRecord,
 } from './platform.js';
 import { openPlatform, type PlatformSession } from './session.js';
+import { constantTimeEquals, hashToken } from './tokens.js';
 import { verifyTotp } from './totp.js';
 
 const SESSION_LIFETIME_MS = 15 * 60 * 1000;
 const MAX_CONSECUTIVE_FAILURES = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
 const GENERIC_FAILURE = 'Authentication failed.';
-
-function hashToken(token: string): string {
-  return createHash('sha256').update(token).digest('hex');
-}
-
-function matches(left: string, right: string): boolean {
-  const leftBytes = Buffer.from(left, 'utf8');
-  const rightBytes = Buffer.from(right, 'utf8');
-  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
-}
 
 function auditFailed(session: PlatformSession, context: ActionContext, reason: string): never {
   session.save();
@@ -46,7 +37,7 @@ function consumeRecoveryCode(session: PlatformSession, user: UserRecord, code: s
   const mfa = user.mfa;
   if (!mfa) return false;
   const candidate = recoveryCodeHash(session.dataKey, code);
-  const index = mfa.recovery_codes.findIndex((stored) => matches(stored, candidate));
+  const index = mfa.recovery_codes.findIndex((stored) => constantTimeEquals(stored, candidate));
   if (index === -1) return false;
   mfa.recovery_codes.splice(index, 1);
   return true;
@@ -139,7 +130,7 @@ export async function login(options: LoginOptions): Promise<Record<string, unkno
 
 function activeActor(session: PlatformSession, token: string): Actor | undefined {
   const tokenHash = hashToken(token);
-  const record = session.state.sessions.find((candidate) => matches(candidate.token_hash, tokenHash));
+  const record = session.state.sessions.find((candidate) => constantTimeEquals(candidate.token_hash, tokenHash));
   if (!record || record.revoked_at !== null) return undefined;
   if (Date.parse(record.expires_at) <= Date.now()) return undefined;
   const user = findUserById(session.state, record.user_id);

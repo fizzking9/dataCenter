@@ -8,7 +8,7 @@ import {
   requireWorkspaceAdministrator,
   type ActionContext,
 } from './authz.js';
-import { enrolAdministrator } from './enrollment.js';
+import { enrolMfa } from './enrollment.js';
 import {
   isDeploymentAdministrator,
   isWorkspaceRole,
@@ -80,7 +80,7 @@ export function createWorkspace(options: {
     role: 'Workspace Administrator',
     granted_at: workspace.created_at,
   });
-  const enrollment = administrator.mfa === null ? enrolAdministrator(administrator.username, session.dataKey) : undefined;
+  const enrollment = administrator.mfa === null ? enrolMfa(administrator.username, session.dataKey) : undefined;
   if (enrollment) administrator.mfa = enrollment.mfa;
   session.audit({
     ...context,
@@ -144,7 +144,7 @@ export function grantMembership(options: {
     });
   }
   const enrollment = options.role === 'Workspace Administrator' && member.mfa === null
-    ? enrolAdministrator(member.username, session.dataKey)
+    ? enrolMfa(member.username, session.dataKey)
     : undefined;
   if (enrollment) member.mfa = enrollment.mfa;
   session.audit({ ...context, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { role: options.role } });

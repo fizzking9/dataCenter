@@ -24,6 +24,10 @@ _Avoid_: Custom role, arbitrary ACL
 A host-level actor with root-equivalent control who installs, upgrades, backs up, and restores a Deployment; fully trusted and outside the platform authorization boundary, not a platform User or Role.
 _Avoid_: Deployment Administrator, global superuser
 
+**Operator Console**:
+A separately authenticated browser surface for an Operator's post-installation Deployment lifecycle work, distinct from platform User sessions and role-based navigation.
+_Avoid_: Administrator dashboard, User settings
+
 **Deployment Administrator**:
 A User who manages deployment settings, workspaces, deployment-wide Business Context, and audit access without receiving implicit workspace content access.
 _Avoid_: Tenant Administrator, Operator, Workspace Administrator

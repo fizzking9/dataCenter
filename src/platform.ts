@@ -9,8 +9,8 @@ import type {
   RawAcquisitionRecord,
   SourceRecord,
 } from './catalog.js';
+import type { MfaRecord } from './enrollment.js';
 import { readJsonFile, writeJsonFile } from './state.js';
-import type { WrappedValue } from './keys.js';
 
 /** A Role is assigned at Deployment or Workspace scope; only administrators hold one at Deployment scope. */
 export type DeploymentRole = 'Deployment Administrator';
@@ -26,7 +26,7 @@ export interface UserRecord {
   password_hash: string;
   status: 'active' | 'deactivated';
   deployment_role: DeploymentRole | null;
-  mfa: { type: 'TOTP'; secret: WrappedValue; recovery_codes: string[] } | null;
+  mfa: MfaRecord | null;
   failure_count: number;
   locked_until: string | null;
   created_at: string;

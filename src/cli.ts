@@ -1,25 +1,29 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { uploadAcquisition } from './acquisition.js';
 import { listAuditEvents } from './audit-view.js';
 import { login, logout } from './auth.js';
+import { issueOperatorEnrollment, revokeOperator, revokeOperatorEnrollment } from './operators.js';
+import { startConsoleServer } from './console-server.js';
 import { publishCommonContext, publishWorkspaceContext, showContext } from './context.js';
 import { releaseDataset, showDataset } from './datasets.js';
 import { OperatorError } from './errors.js';
 import { initializeDeployment } from './initialize.js';
 import { installDeployment } from './install.js';
 import { adoptIntegrationConfiguration, publishIntegrationConfiguration } from './integration.js';
-import { importLicense } from './license.js';
+import { importLicense, readLicenseSummary } from './license.js';
 import { queryDataProduct } from './product-query.js';
 import { listDataProducts, publishDataProduct } from './products.js';
 import { createSource } from './sources.js';
 import { deploymentStatus } from './status.js';
+import { readDeployment } from './state.js';
 import { createUser, deactivateUser, listUsers, transferOwnership } from './users.js';
 import { createWorkspace, grantMembership, listWorkspaces, revokeMembership } from './workspaces.js';
 
 const GROUPED_COMMANDS = new Set([
   'user', 'workspace', 'membership', 'ownership', 'context', 'audit',
-  'source', 'integration', 'acquisition', 'dataset', 'product',
+  'source', 'integration', 'acquisition', 'dataset', 'product', 'console',
 ]);
 const BOOLEAN_FLAGS = new Set(['admin-password-stdin', 'password-stdin', 'deployment-administrator']);
 
@@ -296,6 +300,55 @@ async function main(): Promise<void> {
       ...governed(options),
       dataProductId: required(options, 'product'),
       requestPath: required(options, 'request'),
+    }));
+    return;
+  }
+  if (command === 'console' && subcommand === 'serve') {
+    const port = Number(required(options, 'port'));
+    if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+      throw new Error('--port must be a whole number from 0 to 65535.');
+    }
+    const started = await startConsoleServer({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      port,
+    });
+    emit({ listening: true, url: started.url, port: started.port });
+    return;
+  }
+  if (command === 'console' && subcommand === 'license') {
+    const root = required(options, 'root');
+    const deployment = readDeployment(root);
+    emit({
+      ...readLicenseSummary(root, join(root, 'license.json')),
+      release: deployment.release,
+      deployment_id: deployment.deployment_id,
+      state: deployment.state,
+    });
+    return;
+  }
+  if (command === 'console' && subcommand === 'enroll') {
+    emit(issueOperatorEnrollment({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      operator: required(options, 'operator'),
+      ...(options.has('ttl-minutes') ? { ttlMinutes: Number(required(options, 'ttl-minutes')) } : {}),
+    }));
+    return;
+  }
+  if (command === 'console' && subcommand === 'revoke-enrollment') {
+    emit(revokeOperatorEnrollment({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      enrollmentId: required(options, 'enrollment'),
+    }));
+    return;
+  }
+  if (command === 'console' && subcommand === 'revoke') {
+    emit(revokeOperator({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      operator: required(options, 'operator'),
     }));
     return;
   }

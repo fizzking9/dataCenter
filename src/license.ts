@@ -71,6 +71,24 @@ export function validateLicense(root: string, licensePath: string): SignedLicens
   return license;
 }
 
+export interface LicenseSummary {
+  license_id: string;
+  not_before: string;
+  expires_at: string;
+  highest_eligible_release: string;
+}
+
+/** The license view the Operator Console may show: no signature, no request internals. */
+export function readLicenseSummary(root: string, licensePath: string): LicenseSummary {
+  const license = validateLicense(root, licensePath);
+  return {
+    license_id: license.payload.license_id,
+    not_before: license.payload.not_before,
+    expires_at: license.payload.expires_at,
+    highest_eligible_release: license.payload.highest_eligible_release,
+  };
+}
+
 export function importLicense(options: {
   root: string;
   license: string;

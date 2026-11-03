@@ -1,12 +1,18 @@
 import { createHmac } from 'node:crypto';
-import { encryptSecret } from './keys.js';
-import type { UserRecord } from './platform.js';
+import { encryptSecret, type WrappedValue } from './keys.js';
 import { newRecoveryCode, newTotpSecret } from './totp.js';
 
 const RECOVERY_CODE_COUNT = 8;
 
+/** The MFA credentials every human identity may hold, at Deployment or Console scope. */
+export interface MfaRecord {
+  type: 'TOTP';
+  secret: WrappedValue;
+  recovery_codes: string[];
+}
+
 export interface Enrollment {
-  mfa: NonNullable<UserRecord['mfa']>;
+  mfa: MfaRecord;
   secrets: {
     totp_secret: string;
     recovery_codes: string[];
@@ -20,10 +26,10 @@ export function recoveryCodeHash(dataKey: Buffer, code: string): string {
 }
 
 /**
- * Enrols an administrator for mandatory TOTP MFA. The plaintext secret and the
+ * Enrols any identity for mandatory TOTP MFA. The plaintext secret and the
  * recovery codes are returned exactly once, at provisioning time.
  */
-export function enrolAdministrator(username: string, dataKey: Buffer): Enrollment {
+export function enrolMfa(username: string, dataKey: Buffer): Enrollment {
   const totpSecret = newTotpSecret();
   const recoveryCodes = Array.from({ length: RECOVERY_CODE_COUNT }, newRecoveryCode);
   return {

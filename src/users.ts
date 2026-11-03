@@ -8,7 +8,7 @@ import {
   requireDeploymentAdministrator,
   type ActionContext,
 } from './authz.js';
-import { enrolAdministrator } from './enrollment.js';
+import { enrolMfa } from './enrollment.js';
 import { hashPassword } from './password.js';
 import {
   findUser,
@@ -67,7 +67,7 @@ export async function createUser(options: {
     reject(session, actorLabel(actor.user), context, 'PASSWORD_INVALID', `A password must contain at least ${MINIMUM_PASSWORD_LENGTH} characters.`);
   }
 
-  const enrollment = options.deploymentAdministrator ? enrolAdministrator(username, session.dataKey) : undefined;
+  const enrollment = options.deploymentAdministrator ? enrolMfa(username, session.dataKey) : undefined;
   const user: UserRecord = {
     user_id: randomUUID(),
     username,
