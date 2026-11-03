@@ -8,6 +8,10 @@
 /** First release acquisition types; business APIs and scrapers arrive later. */
 export type SourceType = 'file';
 
+/** The exact textual shapes a canonical `date` and `timestamp` value holds. */
+export const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+export const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
 export interface SourceRecord {
   source_id: string;
   workspace_id: string;
@@ -17,7 +21,7 @@ export interface SourceRecord {
   created_at: string;
 }
 
-export type DatasetFieldType = 'string' | 'integer' | 'number' | 'date';
+export type DatasetFieldType = 'string' | 'integer' | 'number' | 'date' | 'timestamp';
 
 export interface DatasetSchemaField {
   name: string;
@@ -157,18 +161,59 @@ export interface DatasetArtifact {
   releases: DatasetReleaseRecord[];
 }
 
+export type MetricAggregation = 'count' | 'sum' | 'min' | 'max' | 'avg';
+
+/** How a Consumer reads the values a metric produces. */
+export type MetricValueType = 'integer' | 'decimal' | 'money' | 'date' | 'timestamp';
+
+/** One governed metric a Data Product Contract publishes for Consumers to request. */
+export interface DataProductMetric {
+  name: string;
+  description?: string;
+  aggregation: MetricAggregation;
+  /** The Dataset Schema field the metric aggregates; a record count has none. */
+  field?: string;
+  value_type: MetricValueType;
+  unit?: string;
+  currency?: string;
+  /** The dimensions this metric may be grouped by; absent permits every declared dimension. */
+  dimensions?: string[];
+}
+
+/** The time field a Contract resolves windows against and the precision it declares. */
+export interface DataProductTime {
+  field: string;
+  precision: 'date' | 'timestamp';
+  time_zone: string;
+}
+
+/** The resource envelope one Data Product Query may consume. */
+export interface DataProductQueryLimits {
+  max_scanned_records: number;
+  max_groups: number;
+  max_execution_ms: number;
+}
+
 /**
  * The Consumer-facing Contract of a Data Product. It names the fields a Consumer
- * may read and the filters they may state, and nothing about the Dataset behind
- * them.
+ * may read, the dimensions they may group by, the metrics they may request, the
+ * record grain, and the time field, and nothing about the Dataset behind them.
  */
 export interface DataProductContract {
   title: string;
   description?: string;
   fields: Array<{ name: string; description?: string }>;
+  dimensions: string[];
+  metrics: DataProductMetric[];
+  /** The Dataset Schema fields that identify one record. */
+  grain: string[];
+  time?: DataProductTime;
   filters: string[];
+  /** The most results one page may hold. */
   default_limit: number;
   max_limit: number;
+  /** The resource envelope one query may consume, distinct from its page size. */
+  limits: DataProductQueryLimits;
 }
 
 export interface DataProductVersion {

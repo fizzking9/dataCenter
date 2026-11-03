@@ -16,7 +16,7 @@ import { DEPLOYMENT_CONTEXT_ARTIFACT, latestVersion, findContextArtifact, worksp
 import { openPlatform, type PlatformSession } from './session.js';
 import { requireAdministeredSource } from './sources.js';
 
-const FIELD_TYPES: DatasetFieldType[] = ['string', 'integer', 'number', 'date'];
+const FIELD_TYPES: DatasetFieldType[] = ['string', 'integer', 'number', 'date', 'timestamp'];
 const CLEANING_RULES: CleaningRuleName[] = ['trim', 'uppercase', 'lowercase', 'default', 'require_non_empty'];
 const FIELD_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 

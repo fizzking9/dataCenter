@@ -13,106 +13,18 @@ import {
   type DatasetSchemaField,
 } from './catalog.js';
 import { canonicalDigest } from './crypto.js';
-import { isRecord, readJsonDocument } from './documents.js';
+import type { Fail } from './errors.js';
 import { workspaceRoleOf } from './platform.js';
+import { readContract } from './product-contract.js';
 import { openPlatform, type PlatformSession } from './session.js';
 import { requireAdministeredSource } from './sources.js';
 
-const TITLE_MINIMUM = 2;
-const TITLE_MAXIMUM = 128;
-const DEFAULT_LIMIT = 100;
-const MAX_LIMIT = 1000;
-const LIMIT_CEILING = 10000;
+const NAME_MINIMUM = 2;
+const NAME_MAXIMUM = 128;
 
 /** The stable logical path a published Data Product serves; no endpoint is generated. */
 function apiPath(workspaceId: string, dataProductId: string): string {
   return `/api/workspaces/${workspaceId}/data-products/${dataProductId}/query`;
-}
-
-/**
- * Reads the Consumer-facing Contract and proves it only names Dataset Schema
- * fields. A Contract never restates the Dataset Schema; it selects from it.
- */
-function readContract(
-  session: PlatformSession,
-  actor: string,
-  context: ActionContext,
-  path: string,
-  schema: DatasetSchemaField[],
-): DataProductContract {
-  const parsed = readJsonDocument(
-    path,
-    (code, message) => reject(session, actor, context, code, message),
-    'DATA_PRODUCT_CONTRACT_UNREADABLE',
-    'The Data Product Contract file must contain valid JSON.',
-  );
-  if (!isRecord(parsed)) {
-    reject(session, actor, context, 'DATA_PRODUCT_CONTRACT_INVALID', 'A Data Product Contract must be a JSON object.');
-  }
-  const title = typeof parsed['title'] === 'string' ? parsed['title'].trim() : '';
-  if (title.length < TITLE_MINIMUM || title.length > TITLE_MAXIMUM) {
-    reject(session, actor, context, 'DATA_PRODUCT_CONTRACT_INVALID', 'A Data Product Contract title must contain 2 to 128 characters.');
-  }
-  const description = parsed['description'];
-  if (description !== undefined && typeof description !== 'string') {
-    reject(session, actor, context, 'DATA_PRODUCT_CONTRACT_INVALID', 'A Data Product Contract description must be a string.');
-  }
-
-  const fields = parsed['fields'];
-  if (!Array.isArray(fields) || fields.length === 0) {
-    reject(session, actor, context, 'DATA_PRODUCT_CONTRACT_INVALID', 'A Data Product Contract must expose at least one field.');
-  }
-  const declared: DataProductContract['fields'] = [];
-  for (const candidate of fields) {
-    if (!isRecord(candidate) || typeof candidate['name'] !== 'string') {
-      reject(session, actor, context, 'DATA_PRODUCT_CONTRACT_INVALID', 'Each Data Product Contract field must name a Dataset Schema field.');
-    }
-    const name = candidate['name'];
-    if (!schema.some((field) => field.name === name)) {
-      reject(session, actor, context, 'DATA_PRODUCT_CONTRACT_INVALID', `${name} is not a field of this Dataset Schema.`);
-    }
-    if (declared.some((field) => field.name === name)) {
-      reject(session, actor, context, 'DATA_PRODUCT_CONTRACT_INVALID', 'Each Data Product Contract field must appear once.');
-    }
-    const fieldDescription = candidate['description'];
-    declared.push({
-      name,
-      ...(typeof fieldDescription === 'string' ? { description: fieldDescription } : {}),
-    });
-  }
-
-  const rawFilters = parsed['filters'] ?? [];
-  if (!Array.isArray(rawFilters)) {
-    reject(session, actor, context, 'DATA_PRODUCT_CONTRACT_INVALID', 'Contract filters must be an array of exposed field names.');
-  }
-  const filters: string[] = [];
-  for (const candidate of rawFilters) {
-    if (typeof candidate !== 'string' || !declared.some((field) => field.name === candidate)) {
-      reject(session, actor, context, 'DATA_PRODUCT_CONTRACT_INVALID', 'Each Contract filter must name an exposed field.');
-    }
-    if (!filters.includes(candidate)) filters.push(candidate);
-  }
-
-  const limits = parsed['limit'] ?? {};
-  if (!isRecord(limits)) {
-    reject(session, actor, context, 'DATA_PRODUCT_CONTRACT_INVALID', 'Contract limits must be an object.');
-  }
-  const defaultLimit = limits['default'] ?? DEFAULT_LIMIT;
-  const maxLimit = limits['max'] ?? MAX_LIMIT;
-  if (!Number.isInteger(defaultLimit) || !Number.isInteger(maxLimit)
-    || (defaultLimit as number) < 1 || (maxLimit as number) < 1
-    || (maxLimit as number) > LIMIT_CEILING || (defaultLimit as number) > (maxLimit as number)) {
-    reject(session, actor, context, 'DATA_PRODUCT_CONTRACT_INVALID', `Contract limits must be whole numbers between 1 and ${LIMIT_CEILING}, with a default no larger than the maximum.`);
-  }
-
-  return {
-    title,
-    ...(typeof description === 'string' ? { description } : {}),
-    fields: declared,
-    filters,
-    default_limit: defaultLimit as number,
-    max_limit: maxLimit as number,
-  };
 }
 
 /**
@@ -149,16 +61,16 @@ export function publishDataProduct(options: {
     );
   }
   const name = options.name.trim();
-  if (name.length < TITLE_MINIMUM || name.length > TITLE_MAXIMUM) {
+  if (name.length < NAME_MINIMUM || name.length > NAME_MAXIMUM) {
     reject(session, actorLabel(actor.user), scoped, 'DATA_PRODUCT_NAME_INVALID', 'A Data Product name must contain 2 to 128 characters.');
   }
+  const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), scoped, code, message, nextStep);
   const contract = readContract(
-    session,
-    actorLabel(actor.user),
-    scoped,
+    fail,
     options.contractPath,
     schemaOf(session, actorLabel(actor.user), scoped, source.source_id, datasetRelease),
   );
+  requireServeableGrain(session, actorLabel(actor.user), scoped, contract, datasetRelease);
 
   let product = session.state.data_products.find(
     (candidate) => candidate.workspace_id === source.workspace_id && candidate.name.toLowerCase() === name.toLowerCase(),
@@ -234,6 +146,36 @@ export function publishDataProduct(options: {
   };
 }
 
+/**
+ * Proves the Contract's declared grain really identifies each record of the
+ * Release it is published over. A coarser grain would let one record stand for
+ * several and double count every metric, so the Publication is refused instead.
+ */
+function requireServeableGrain(
+  session: PlatformSession,
+  actor: string,
+  context: ActionContext,
+  contract: DataProductContract,
+  release: DatasetReleaseRecord,
+): void {
+  if (contract.grain.length === 0) return;
+  const seen = new Set<string>();
+  for (const record of release.records) {
+    const key = JSON.stringify(contract.grain.map((field) => record.values[field] ?? null));
+    if (seen.has(key)) {
+      reject(
+        session,
+        actor,
+        context,
+        'DATA_PRODUCT_GRAIN_NOT_UNIQUE',
+        `The ${contract.grain.join(', ')} grain does not identify each record of this Dataset Release, so its metrics would double count.`,
+        'Declare the grain the Dataset holds one record at.',
+      );
+    }
+    seen.add(key);
+  }
+}
+
 function schemaOf(
   session: PlatformSession,
   actor: string,
@@ -279,6 +221,17 @@ export function listDataProducts(options: {
         api_path: product.api_path,
         title: version.contract.title,
         fields: version.contract.fields.map((field) => field.name),
+        dimensions: [...version.contract.dimensions],
+        metrics: version.contract.metrics.map((metric) => ({
+          name: metric.name,
+          aggregation: metric.aggregation,
+          value_type: metric.value_type,
+          unit: metric.unit ?? null,
+          currency: metric.currency ?? null,
+          dimensions: metric.dimensions === undefined ? [...version.contract.dimensions] : [...metric.dimensions],
+        })),
+        grain: [...version.contract.grain],
+        time: version.contract.time === undefined ? null : { ...version.contract.time },
         filters: [...version.contract.filters],
         data_product_version: version.version,
         data_product_release: release.release,

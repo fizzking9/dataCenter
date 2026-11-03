@@ -5,82 +5,191 @@ import {
   latestDataProductRelease,
   latestDataProductVersion,
   type DataProductContract,
+  type DataProductMetric,
+  type DataProductTime,
+  type DatasetRecordRow,
   type DatasetReleaseRecord,
   type DatasetSchemaField,
 } from './catalog.js';
-import { isRecord, readJsonDocument } from './documents.js';
+import type { Fail } from './errors.js';
 import { workspaceRoleOf } from './platform.js';
+import { evaluateAggregate, orderGroups, type EvaluatedGroup, type MetricValue } from './product-aggregate.js';
+import { readQueryDocument, type QueryOperator, type Window } from './product-query-document.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
-interface QueryFilter {
-  field: string;
-  op: 'equals';
-  value: string | number;
+/** Applies a typed operator the way the field's own type is compared. */
+function matches(actual: string | number | null, op: QueryOperator, expected: string | number | null): boolean {
+  if (op === 'is_null') return actual === null;
+  if (op === 'is_not_null') return actual !== null;
+  if (actual === null) return false;
+  if (op === 'equals') return actual === expected;
+  if (op === 'not_equals') return actual !== expected;
+  if (typeof actual === 'number' && typeof expected === 'number') {
+    if (op === 'less_than') return actual < expected;
+    if (op === 'less_or_equal') return actual <= expected;
+    if (op === 'greater_than') return actual > expected;
+    return actual >= expected;
+  }
+  const left = String(actual);
+  const right = String(expected);
+  if (op === 'less_than') return left < right;
+  if (op === 'less_or_equal') return left <= right;
+  if (op === 'greater_than') return left > right;
+  return left >= right;
 }
 
-/** Which JavaScript value a Dataset Schema field can be compared against. */
-function acceptsValue(field: DatasetSchemaField, value: unknown): value is string | number {
-  return field.type === 'integer' || field.type === 'number'
-    ? typeof value === 'number' && Number.isFinite(value)
-    : typeof value === 'string';
+/** Reads one record's time value as the comparable key its Contract precision implies. */
+function timeKey(value: string | number | null, precision: DataProductTime['precision']): number | string | null {
+  if (value === null) return null;
+  return precision === 'date' ? String(value) : Date.parse(String(value));
+}
+
+function withinWindow(record: DatasetRecordRow, time: DataProductTime, window: Window): boolean {
+  const value = timeKey(record.values[time.field] ?? null, time.precision);
+  if (value === null) return false;
+  return value >= timeKey(window.start, time.precision)! && value <= timeKey(window.end, time.precision)!;
 }
 
 /**
- * Reads the Data Product Query document a Consumer composes against the Contract.
- *
- * A filter must name a declared filter field and state a value the field's type
- * can hold, so a string standing in for a number never silently matches nothing.
+ * Selects the records one side of a query reads: its dimension filters first,
+ * then its window. Both the queried and the compared window read through this
+ * same predicate, so a comparison never measures a different population.
  */
-function readQuery(
-  session: PlatformSession,
-  actor: string,
-  context: ActionContext,
-  path: string,
+function selectRecords(
+  records: DatasetRecordRow[],
   contract: DataProductContract,
-  schema: DatasetSchemaField[],
-): { filters: QueryFilter[]; limit: number } {
-  const parsed = readJsonDocument(
-    path,
-    (code, message) => reject(session, actor, context, code, message),
-    'DATA_PRODUCT_QUERY_INVALID',
-    'The Data Product Query document must contain valid JSON.',
+  filters: Array<{ field: string; op: QueryOperator; value: string | number | null }>,
+  window: Window | undefined,
+): DatasetRecordRow[] {
+  return records.filter(
+    (record) => filters.every((filter) => matches(record.values[filter.field] ?? null, filter.op, filter.value))
+      && (window === undefined || contract.time === undefined || withinWindow(record, contract.time, window)),
   );
-  if (!isRecord(parsed)) {
-    reject(session, actor, context, 'DATA_PRODUCT_QUERY_INVALID', 'A Data Product Query must be a JSON object.');
-  }
-  if (parsed['kind'] !== 'records') {
-    reject(session, actor, context, 'DATA_PRODUCT_QUERY_INVALID', 'This release answers record queries only.');
-  }
+}
 
-  const rawFilters = parsed['filters'] ?? [];
-  if (!Array.isArray(rawFilters)) {
-    reject(session, actor, context, 'DATA_PRODUCT_QUERY_INVALID', 'Query filters must be an array.');
+/** The range the pinned Release actually covers, so a partial window is never read as complete. */
+function coverageOf(
+  records: DatasetRecordRow[],
+  time: DataProductTime,
+): { start: string; end: string } | null {
+  let lowest: { key: number | string; raw: string } | null = null;
+  let highest: { key: number | string; raw: string } | null = null;
+  for (const record of records) {
+    const raw = record.values[time.field] ?? null;
+    const key = timeKey(raw, time.precision);
+    if (key === null) continue;
+    if (lowest === null || key < lowest.key) lowest = { key, raw: String(raw) };
+    if (highest === null || key > highest.key) highest = { key, raw: String(raw) };
   }
-  const filters: QueryFilter[] = [];
-  for (const candidate of rawFilters) {
-    if (!isRecord(candidate) || typeof candidate['field'] !== 'string' || candidate['op'] !== 'equals') {
-      reject(session, actor, context, 'DATA_PRODUCT_QUERY_INVALID', 'Each query filter must state a field and the equals operator.');
-    }
-    const field = candidate['field'];
-    if (!contract.filters.includes(field)) {
-      reject(session, actor, context, 'DATA_PRODUCT_QUERY_INVALID', `${field} is not a filter the Data Product Contract permits.`);
-    }
-    const schemaField = schema.find((candidateField) => candidateField.name === field)!;
-    const value = candidate['value'];
-    if (!acceptsValue(schemaField, value)) {
-      reject(session, actor, context, 'DATA_PRODUCT_QUERY_INVALID', `The ${field} filter must state a ${schemaField.type} value.`);
-    }
-    filters.push({ field, op: 'equals', value });
-  }
+  return lowest === null || highest === null ? null : { start: lowest.raw, end: highest.raw };
+}
 
-  const limit = parsed['limit'] ?? contract.default_limit;
-  if (!Number.isInteger(limit) || (limit as number) < 1) {
-    reject(session, actor, context, 'DATA_PRODUCT_QUERY_INVALID', 'A query limit must be a whole number of at least 1.');
+function windowView(
+  time: DataProductTime,
+  window: Window,
+  coverage: { start: string; end: string } | null,
+): Record<string, unknown> {
+  const uncovered = coverage === null
+    || timeKey(coverage.start, time.precision)! > timeKey(window.start, time.precision)!
+    || timeKey(coverage.end, time.precision)! < timeKey(window.end, time.precision)!;
+  return {
+    field: time.field,
+    precision: time.precision,
+    time_zone: time.time_zone,
+    start: window.start,
+    end: window.end,
+    coverage,
+    partial: uncovered,
+  };
+}
+
+/** The value a group holds when it exists in only one of the two compared windows. */
+function absentValue(metric: DataProductMetric): MetricValue {
+  if (metric.aggregation === 'count') return 0;
+  if (metric.aggregation === 'sum') return metric.value_type === 'integer' ? 0 : (0).toFixed(2);
+  return null;
+}
+
+function numericOf(value: MetricValue): number | null {
+  if (value === null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Compares one metric against its comparison window: the change is always
+ * numeric, and a zero or missing comparison value yields an explicit
+ * non-numeric outcome rather than an invented percentage.
+ */
+function compareMetric(
+  metric: DataProductMetric,
+  base: MetricValue,
+  compared: MetricValue,
+): Record<string, unknown> {
+  if (metric.value_type === 'date' || metric.value_type === 'timestamp') {
+    return { value: compared, change: null, change_percent: null, change_percent_reason: 'not_numeric' };
   }
-  if ((limit as number) > contract.max_limit) {
-    reject(session, actor, context, 'DATA_PRODUCT_QUERY_LIMIT_EXCEEDED', `A query limit cannot exceed ${contract.max_limit}.`);
+  const baseNumber = numericOf(base);
+  const comparedNumber = numericOf(compared);
+  if (baseNumber === null || comparedNumber === null) {
+    return { value: compared, change: null, change_percent: null, change_percent_reason: 'value_missing' };
   }
-  return { filters, limit: limit as number };
+  const change = baseNumber - comparedNumber;
+  const rendered = metric.value_type === 'integer' ? Math.trunc(change) : change.toFixed(2);
+  if (comparedNumber === 0) {
+    return { value: compared, change: rendered, change_percent: null, change_percent_reason: 'zero_base' };
+  }
+  return { value: compared, change: rendered, change_percent: ((change / Math.abs(comparedNumber)) * 100).toFixed(2) };
+}
+
+interface MergedGroup extends EvaluatedGroup {
+  comparison: Record<string, Record<string, unknown>> | null;
+}
+
+/** Merges the two windows on their dimension tuple so a compared group appears once. */
+function mergeWindows(
+  metrics: DataProductMetric[],
+  base: EvaluatedGroup[],
+  comparison: EvaluatedGroup[] | null,
+): MergedGroup[] {
+  const baseByKey = new Map(base.map((entry) => [JSON.stringify(entry.dimension_order), entry]));
+  const comparedByKey = new Map((comparison ?? []).map((entry) => [JSON.stringify(entry.dimension_order), entry]));
+  const keys = [...new Set([...baseByKey.keys(), ...comparedByKey.keys()])];
+  return keys.map((key) => {
+    const baseEntry = baseByKey.get(key);
+    const comparedEntry = comparedByKey.get(key);
+    const template = baseEntry ?? comparedEntry!;
+    const metrics$: Record<string, MetricValue> = {};
+    const order: Record<string, number | null> = {};
+    const compared: Record<string, Record<string, unknown>> = {};
+    for (const metric of metrics) {
+      const baseValue = baseEntry === undefined ? absentValue(metric) : baseEntry.metrics[metric.name]!;
+      metrics$[metric.name] = baseValue;
+      order[metric.name] = baseEntry === undefined ? null : baseEntry.metric_order[metric.name]!;
+      if (comparison !== null) {
+        const comparedValue = comparedEntry === undefined ? absentValue(metric) : comparedEntry.metrics[metric.name]!;
+        compared[metric.name] = compareMetric(metric, baseValue, comparedValue);
+      }
+    }
+    return {
+      group: template.group,
+      null_dimensions: template.null_dimensions,
+      metrics: metrics$,
+      comparison: comparison === null ? null : compared,
+      dimension_order: template.dimension_order,
+      metric_order: order,
+    };
+  });
+}
+
+function metricView(metric: DataProductMetric): Record<string, unknown> {
+  return {
+    name: metric.name,
+    aggregation: metric.aggregation,
+    value_type: metric.value_type,
+    unit: metric.unit ?? null,
+    currency: metric.currency ?? null,
+  };
 }
 
 /**
@@ -98,6 +207,7 @@ export function queryDataProduct(options: {
   dataProductId: string;
   requestPath: string;
 }): Record<string, unknown> {
+  const startedAt = Date.now();
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'data_product_query', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
@@ -123,51 +233,153 @@ export function queryDataProduct(options: {
   if (!dataset || !datasetRelease) {
     reject(session, actorLabel(actor.user), scoped, 'DATASET_RELEASE_NOT_FOUND', 'The Dataset Release this Data Product pins is not available.');
   }
+  const contract = version.contract;
   const schema = session.state.integration_configurations
     .find((artifact) => artifact.source_id === dataset.source_id)
     ?.versions.find((candidate) => candidate.version === datasetRelease.integration_configuration_version)
     ?.schema ?? [];
   const source = session.state.sources.find((candidate) => candidate.source_id === dataset.source_id);
 
-  const query = readQuery(session, actorLabel(actor.user), scoped, options.requestPath, version.contract, schema);
-  const matched = datasetRelease.records.filter((record) => query.filters.every(
-    (filter) => record.values[filter.field] === filter.value,
-  ));
-  const projected = matched.slice(0, query.limit).map((record) => {
-    const values: Record<string, string | number | null> = {};
-    for (const field of version.contract.fields) {
-      values[field.name] = record.values[field.name] ?? null;
-    }
-    return values;
-  });
+  const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), scoped, code, message, nextStep);
+  const query = readQueryDocument(options.requestPath, contract, schema, fail);
 
-  session.audit({
-    ...scoped,
-    actor: actorLabel(actor.user),
-    outcome: 'succeeded',
-    detail: { data_product_release: release.release, matched_count: matched.length, returned: projected.length },
-  });
-  return {
+  const scanned = datasetRelease.records.length;
+  if (scanned > contract.limits.max_scanned_records) {
+    fail(
+      'DATA_PRODUCT_QUERY_TOO_COMPLEX',
+      `This query would scan ${scanned} records, beyond the ${contract.limits.max_scanned_records} the Contract permits.`,
+      'Publish the Data Product over a smaller Dataset Release, or raise max_scanned_records for a Contract that is meant to serve it.',
+    );
+  }
+
+  const provenance = {
+    source: { source_id: dataset.source_id, name: source?.name ?? null },
+    dataset_release: datasetRelease.release,
+    integration_configuration_version: datasetRelease.integration_configuration_version,
+    business_context: { ...datasetRelease.pins },
+    record_count: datasetRelease.record_count,
+    acquired_at: datasetRelease.provenance.acquired_at,
+    integrated_at: datasetRelease.provenance.integrated_at,
+    released_at: datasetRelease.created_at,
+  };
+  const identity = {
     data_product_id: product.data_product_id,
     name: product.name,
     api_path: product.api_path,
     data_product_version: version.version,
     data_product_release: release.release,
     contract_hash: version.contract_hash,
-    records: projected,
-    matched_count: matched.length,
-    returned: projected.length,
-    truncated: matched.length > projected.length,
-    limit: query.limit,
-    provenance: {
-      source: { source_id: dataset.source_id, name: source?.name ?? null },
-      dataset_release: datasetRelease.release,
-      integration_configuration_version: datasetRelease.integration_configuration_version,
-      business_context: { ...datasetRelease.pins },
-      record_count: datasetRelease.record_count,
-      acquired_at: datasetRelease.provenance.acquired_at,
-      integrated_at: datasetRelease.provenance.integrated_at,
-      released_at: datasetRelease.created_at,
+  };
+  const coverage = contract.time === undefined ? null : coverageOf(datasetRelease.records, contract.time);
+
+  /** Holds every answer to the execution budget the Contract declares. */
+  const requireBudget = (): void => {
+    const elapsed = Date.now() - startedAt;
+    if (scanned > 0 && elapsed >= contract.limits.max_execution_ms) {
+      fail(
+        'DATA_PRODUCT_QUERY_TIMEOUT',
+        `This query took ${elapsed}ms, beyond the ${contract.limits.max_execution_ms}ms the Contract permits.`,
+        'Narrow the query with filters or a time window.',
+      );
+    }
+  };
+
+  if (query.kind === 'records') {
+    const selected = selectRecords(datasetRelease.records, contract, query.filters, query.window);
+    const projected = selected.slice(0, query.limit).map((record) => {
+      const values: Record<string, string | number | null> = {};
+      for (const field of contract.fields) {
+        values[field.name] = record.values[field.name] ?? null;
+      }
+      return values;
+    });
+    requireBudget();
+    session.audit({
+      ...scoped,
+      actor: actorLabel(actor.user),
+      outcome: 'succeeded',
+      detail: { data_product_release: release.release, matched_count: selected.length, returned: projected.length },
+    });
+    return {
+      ...identity,
+      kind: 'records',
+      records: projected,
+      matched_count: selected.length,
+      returned: projected.length,
+      truncated: selected.length > projected.length,
+      limit: query.limit,
+      scanned_records: scanned,
+      ...(query.window === undefined || contract.time === undefined
+        ? { window: null }
+        : { window: windowView(contract.time, query.window, coverage) }),
+      provenance,
+    };
+  }
+
+  const spec = { groupBy: query.groupBy, metrics: query.metrics, schema };
+  const base = evaluateAggregate(selectRecords(datasetRelease.records, contract, query.filters, query.window), spec);
+  const compared = query.comparison === undefined || contract.time === undefined
+    ? null
+    : evaluateAggregate(selectRecords(datasetRelease.records, contract, query.filters, query.comparison), spec);
+  const merged = mergeWindows(query.metrics, base.groups, compared?.groups ?? null)
+    .filter((entry) => query.metricFilters.every(
+      (filter) => matches(entry.metrics[filter.metric] ?? null, filter.op, filter.value),
+    ));
+  if (merged.length > contract.limits.max_groups) {
+    fail(
+      'DATA_PRODUCT_QUERY_RESULT_TOO_LARGE',
+      `This query forms ${merged.length} groups, beyond the ${contract.limits.max_groups} the Contract permits.`,
+      'Group by fewer dimensions or narrow the query.',
+    );
+  }
+  const returned = orderGroups(merged, query.sort).slice(0, query.limit);
+  requireBudget();
+
+  session.audit({
+    ...scoped,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: {
+      data_product_release: release.release,
+      group_count: merged.length,
+      returned: returned.length,
     },
+  });
+  return {
+    ...identity,
+    kind: 'aggregate',
+    grouped_by: [...query.groupBy],
+    metrics: query.metrics.map(metricView),
+    groups: returned.map((entry) => ({
+      group: { ...entry.group },
+      null_dimensions: [...entry.null_dimensions],
+      metrics: { ...entry.metrics },
+      ...(entry.comparison === null ? {} : { comparison: entry.comparison }),
+    })),
+    totals: query.includeTotals
+      ? {
+        metrics: { ...base.totals },
+        ...(compared === null
+          ? {}
+          : {
+            comparison: Object.fromEntries(query.metrics.map((metric) => [
+              metric.name,
+              compareMetric(metric, base.totals[metric.name] ?? null, compared.totals[metric.name] ?? null),
+            ])),
+          }),
+      }
+      : null,
+    groups_total: merged.length,
+    returned: returned.length,
+    truncated: merged.length > returned.length,
+    limit: query.limit,
+    scanned_records: scanned,
+    ...(query.window === undefined || contract.time === undefined
+      ? { window: null }
+      : { window: windowView(contract.time, query.window, coverage) }),
+    ...(query.comparison === undefined || contract.time === undefined
+      ? { comparison_window: null }
+      : { comparison_window: windowView(contract.time, query.comparison, coverage) }),
+    provenance,
   };
 }

@@ -6,6 +6,7 @@ import { actorLabel, reject, type ActionContext, type Actor } from './authz.js';
 import {
   findDataset,
   findIntegrationConfiguration,
+  ISO_TIMESTAMP,
   latestDatasetRelease,
   latestIntegrationBatch,
   type CleaningRule,
@@ -50,12 +51,17 @@ function applyCleaning(rules: CleaningRule[], field: string, value: string): { v
   return { value: cleaned };
 }
 
+/**
+ * Coerces one cleaned source cell into its canonical value. A cell that holds
+ * nothing becomes a null value whatever the field type, so a missing value is
+ * always the same governed fact rather than an empty string in some columns.
+ */
 function coerce(
   field: DatasetSchemaField,
   value: string,
 ): { value: string | number | null } | { rejected: string } {
-  if (field.type === 'string') return { value };
   if (value === '') return { value: null };
+  if (field.type === 'string') return { value };
   if (field.type === 'integer') {
     return /^-?\d+$/.test(value) ? { value: Number(value) } : { rejected: 'NOT_INTEGER' };
   }
@@ -63,8 +69,12 @@ function coerce(
     const parsed = Number(value);
     return Number.isFinite(parsed) ? { value: parsed } : { rejected: 'NOT_NUMBER' };
   }
-  const parsed = Date.parse(value);
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(parsed)
+  if (field.type === 'timestamp') {
+    return ISO_TIMESTAMP.test(value) && Number.isFinite(Date.parse(value))
+      ? { value }
+      : { rejected: 'NOT_TIMESTAMP' };
+  }
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value))
     ? { value }
     : { rejected: 'NOT_DATE' };
 }

@@ -243,7 +243,7 @@ test('a Consumer reads published Data Products only inside an administered Works
     { token: consumerToken },
   );
   assert.equal(undeclaredFilter.status, 2);
-  assert.equal(undeclaredFilter.error.code, 'DATA_PRODUCT_QUERY_INVALID');
+  assert.equal(undeclaredFilter.error.code, 'DATA_PRODUCT_QUERY_REFUSED');
 
   const overLimit = command(
     fixture,
@@ -264,7 +264,7 @@ test('a Consumer reads published Data Products only inside an administered Works
     { token: consumerToken },
   );
   assert.equal(aggregate.status, 2);
-  assert.equal(aggregate.error.code, 'DATA_PRODUCT_QUERY_INVALID');
+  assert.equal(aggregate.error.code, 'DATA_PRODUCT_QUERY_REFUSED');
 });
 
 test('a published name cannot be moved to another Source and filter values keep their declared type', () => {
@@ -293,5 +293,5 @@ test('a published name cannot be moved to another Source and filter values keep 
     { token: consumerToken },
   );
   assert.equal(mistyped.status, 2);
-  assert.equal(mistyped.error.code, 'DATA_PRODUCT_QUERY_INVALID');
+  assert.equal(mistyped.error.code, 'DATA_PRODUCT_QUERY_REFUSED');
 });

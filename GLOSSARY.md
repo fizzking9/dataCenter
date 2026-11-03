@@ -148,6 +148,14 @@ _Avoid_: Dataset, Raw Acquisition, saved query, cross-workspace data product
 The versioned Consumer-facing schema, semantic mapping, and supported query capabilities of a Data Product, explicitly separated from source representations and Dataset Schemas.
 _Avoid_: Dataset Schema, source-derived implicit API, fixed query template
 
+**Dimension**:
+A field a Data Product Contract publishes for grouping its metrics by, so a Consumer can aggregate without restating the Dataset Schema.
+_Avoid_: free-form grouping, unpublished column
+
+**Record Grain**:
+The published Dataset Schema fields that identify exactly one Dataset record, so every metric counts a record once and grouped results reconcile with their totals.
+_Avoid_: implicit grain, guessed row key
+
 **Data Product Release**:
 An immutable Workspace-scoped result binding an exact Data Product Version, consistent Dataset Releases, Metric Definitions, and Business Context versions.
 _Avoid_: Mutable latest product, per-run Approval
@@ -159,6 +167,10 @@ _Avoid_: LLM-generated endpoint code, unrestricted Dataset API, saved-query-only
 **Data Product Query**:
 A dynamically composed request for curated records or documents, or for governed metrics grouped by dimensions, evaluated within an exact Data Product Contract against one consistent Data Product Release.
 _Avoid_: Saved query, arbitrary SQL, ungoverned Dataset query
+
+**Comparison Window**:
+A time window a Data Product Query evaluates beside the window it queries, yielding the comparison value and the change against it.
+_Avoid_: Ad-hoc baseline, second ungoverned query
 
 **Report Template**:
 A versioned Workspace Artifact defining one parameterized business question and the grounded-answer prompt template from which Reports are generated.

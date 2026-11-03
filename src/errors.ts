@@ -9,6 +9,12 @@ export class OperatorError extends Error {
   }
 }
 
+/**
+ * How a command reports its own structured failure, so a reader keeps choosing
+ * the error codes its own contract publishes rather than inheriting another's.
+ */
+export type Fail = (code: string, message: string, nextStep?: string) => never;
+
 export function assertCondition(
   condition: unknown,
   code: string,
