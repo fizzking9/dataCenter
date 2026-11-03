@@ -6,3 +6,7 @@
 
 # Local-only business context material; never committed here.
 /extra_materials/
+
+# Node.js build and dependency output.
+/node_modules/
+/dist/
