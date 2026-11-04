@@ -44,6 +44,98 @@ export interface LicenseView {
   state: string;
 }
 
+/** A platform User session, which is a different channel from the Operator one. */
+export interface PlatformSessionView {
+  username: string;
+  deployment_role: string | null;
+  mfa_enrolled: boolean;
+  session_expires_at: string;
+}
+
+export type WorkspaceRoleValue = 'Workspace Administrator' | 'Consumer';
+
+/** One authorized Workspace, with the Role the actor holds in it. */
+export interface AuthorizedWorkspace {
+  workspace_id: string;
+  name: string;
+  role: WorkspaceRoleValue;
+}
+
+/** A stable ASCII navigation key; the Chinese label lives in the text catalog. */
+export interface NavigationEntry {
+  key: string;
+}
+
+export interface ActivityEntry {
+  activity_id: string;
+  kind: string;
+  state: string;
+  since: string;
+}
+
+export interface ActivityCentreView {
+  background: ActivityEntry[];
+  attention: ActivityEntry[];
+}
+
+/**
+ * The authorized shell. A Workspace the actor may not enter answers exactly like
+ * one that does not exist: `workspace_id` stays null and the tree stays empty.
+ */
+export interface NavigationView {
+  username: string;
+  deployment_role: string | null;
+  session_expires_at: string;
+  deployment: NavigationEntry[];
+  workspace_id: string | null;
+  workspace_name: string | null;
+  workspace_role: WorkspaceRoleValue | null;
+  workspace: NavigationEntry[];
+  workspaces: AuthorizedWorkspace[];
+  activity: ActivityCentreView;
+}
+
+export interface DeploymentWorkspace {
+  workspace_id: string;
+  name: string;
+  created_at: string;
+  role: string;
+}
+
+export interface DataProductSummary {
+  data_product_id: string;
+  name: string;
+  api_path: string;
+  title: string;
+  data_product_version: number;
+  data_product_release: string;
+  contract_version: { major: number; minor: number };
+}
+
+export interface DataProductList {
+  workspace_id: string;
+  data_products: DataProductSummary[];
+}
+
+export interface ContextEntryView {
+  key: string;
+  kind: string;
+  value: string;
+  unit?: string;
+  description?: string;
+  source: 'common' | 'workspace';
+}
+
+export interface ContextView {
+  scope: 'deployment' | 'workspace';
+  workspace_id: string | null;
+  artifact_id: string;
+  owner: string | null;
+  business_context_version: number;
+  content_hash: string;
+  entries: ContextEntryView[];
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<ApiResult<T>> {
   let response: Response;
   try {
@@ -70,6 +162,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<ApiResu
   return { ok: true, data: payload as T };
 }
 
+function workspaceQuery(workspaceId: string): string {
+  return `?workspace_id=${encodeURIComponent(workspaceId)}`;
+}
+
 /**
  * The browser holds no governed rules: it only calls the authenticated HTTP
  * application APIs that back the same modules the lifecycle CLI uses.
@@ -83,4 +179,24 @@ export const consoleApi = {
     request<Credentials>('/api/operator/enrollment', { method: 'POST', body: JSON.stringify(body) }),
   health: () => request<HealthView>('/api/operator/health'),
   license: () => request<LicenseView>('/api/operator/license'),
+};
+
+/**
+ * The platform User channel: a separate sign-in from the Operator Console, and
+ * every Workspace-scoped call names the one active Workspace it reads.
+ */
+export const platformApi = {
+  session: () => request<PlatformSessionView>('/api/session'),
+  signIn: (body: { username: string; password: string; totp?: string; recovery_code?: string }) =>
+    request<PlatformSessionView>('/api/session', { method: 'POST', body: JSON.stringify(body) }),
+  signOut: () => request<{ revoked: boolean }>('/api/session', { method: 'DELETE' }),
+  navigation: (workspaceId?: string) =>
+    request<NavigationView>(
+      workspaceId === undefined ? '/api/navigation' : `/api/navigation${workspaceQuery(workspaceId)}`,
+    ),
+  deploymentWorkspaces: () => request<{ workspaces: DeploymentWorkspace[] }>('/api/deployment/workspaces'),
+  dataProducts: (workspaceId: string) =>
+    request<DataProductList>(`/api/workspace/data-products${workspaceQuery(workspaceId)}`),
+  context: (workspaceId: string) =>
+    request<ContextView>(`/api/workspace/context${workspaceQuery(workspaceId)}`),
 };
