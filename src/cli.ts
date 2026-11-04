@@ -5,6 +5,7 @@ import { uploadAcquisition } from './acquisition.js';
 import {
   acquisitionCheckpoint,
   acquisitionQueue,
+  cancelAcquisition,
   enqueueAcquisition,
   listSourceAcquisition,
   resetAcquisitionCheckpoint,
@@ -338,6 +339,10 @@ async function main(): Promise<void> {
       sourceId: required(options, 'source'),
       ...(options.has('at') ? { at: required(options, 'at') } : {}),
     }));
+    return;
+  }
+  if (command === 'acquisition' && subcommand === 'cancel') {
+    emit(cancelAcquisition({ ...governed(options), runId: required(options, 'run') }));
     return;
   }
   if (command === 'acquisition' && subcommand === 'queue') {

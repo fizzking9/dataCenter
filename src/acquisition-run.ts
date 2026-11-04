@@ -170,6 +170,65 @@ export function enqueueAcquisition(options: {
   };
 }
 
+/**
+ * Cancels one Run that has not started reading.
+ *
+ * A cancelled Run leaves its Connection's durable queue immediately, emits no
+ * Plan, no Integration Batch, and no Dataset Release, and reads nothing from the
+ * endpoint. It stays in the Run ledger as the reason the work never happened.
+ */
+export function cancelAcquisition(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  runId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'acquisition_cancel', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const run = session.state.acquisition_runs.find(
+    (candidate) => candidate.acquisition_run_id === options.runId,
+  );
+  if (!run) {
+    reject(session, actorLabel(actor.user), context, 'ACQUISITION_RUN_NOT_FOUND', 'No Acquisition Run has this identifier.');
+  }
+  const source = requireAdministeredSource(session, actor, context, run.source_id);
+  const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
+  if (run.status !== 'queued') {
+    reject(
+      session,
+      actorLabel(actor.user),
+      scoped,
+      'ACQUISITION_RUN_NOT_CANCELLABLE',
+      'Only a Run that has not started reading may be cancelled.',
+      'Inspect the Run; a started attempt either completes its Plan or fails on its own.',
+    );
+  }
+  const acquisition = adoptedAcquisition(session, source.source_id);
+  const connection = acquisition === undefined
+    ? undefined
+    : session.state.acquisition_connections.find((candidate) => candidate.connection_id === acquisition.connection_id);
+  if (connection !== undefined) {
+    releaseRun({ session, connection, run, at: new Date().toISOString() });
+  }
+  run.status = 'cancelled';
+  run.error_code = 'ACQUISITION_RUN_CANCELLED';
+  run.completed_at = new Date().toISOString();
+  session.audit({
+    ...scoped,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: { acquisition_run_id: run.acquisition_run_id, status: run.status },
+  });
+  session.save();
+  return {
+    acquisition_run_id: run.acquisition_run_id,
+    source_id: source.source_id,
+    status: run.status,
+    error_code: run.error_code,
+  };
+}
+
 /** Reports how much queued work one Source is holding, so nothing is dropped silently. */
 export function acquisitionQueue(options: {
   root: string;

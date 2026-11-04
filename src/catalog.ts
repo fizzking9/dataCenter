@@ -99,7 +99,7 @@ export interface AcquisitionRunRecord {
   backfill: { start: string; end: string } | null;
   integration_configuration_version: number | null;
   attempts: number;
-  status: 'queued' | 'running' | 'complete' | 'failed';
+  status: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled';
   queued_at: string;
   started_at: string | null;
   completed_at: string | null;
