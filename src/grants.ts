@@ -3,7 +3,8 @@ import { resolveActor } from './auth.js';
 import { actorLabel, deny, reject, type ActionContext } from './authz.js';
 import {
   activeGrants,
-  findDataProduct,
+  ISO_DATE,
+  ISO_TIMESTAMP,
   latestDataProductRelease,
   latestDataProductVersion,
   type DataProductArtifact,
@@ -15,7 +16,8 @@ import {
 import { canonicalDigest } from './crypto.js';
 import { isRecord, readJsonDocument } from './documents.js';
 import type { Fail } from './errors.js';
-import { findUser, workspaceRoleOf, type UserRecord } from './platform.js';
+import { findUser, workspaceRoleOf } from './platform.js';
+import { requireAdministeredProduct } from './products.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
 /** The typed row predicate operators a Grant may state, matching the query language. */
@@ -24,8 +26,6 @@ const OPERATORS: GrantRowFilter['op'][] = [
   'greater_than', 'greater_or_equal', 'is_null', 'is_not_null',
 ];
 const NULL_TESTS: GrantRowFilter['op'][] = ['is_null', 'is_not_null'];
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/;
 
 /**
  * What one actor may read of one Data Product Release, derived fresh on every
@@ -69,30 +69,47 @@ export function grantScopeOf(
 }
 
 /**
- * Resolves the scope a request reads under. Nothing is inferred from a previous
- * request: the Grant set, the membership, and the identity are all read again.
+ * Resolves the scope a request reads under, answering null when the Grant set
+ * cannot be applied to the Contract line the request reads.
+ *
+ * Nothing is inferred from a previous request: the Grant set, the membership,
+ * and the identity are all read again.
  */
+export function readableGrantScope(
+  session: PlatformSession,
+  userId: string,
+  role: string | null,
+  product: DataProductArtifact,
+  contract: DataProductContract,
+): GrantScope | null {
+  const grants = activeGrants(session.state.data_product_grants, product.data_product_id, userId);
+  const scope = grantScopeOf(grants, contract, role !== 'Workspace Administrator');
+  // A Grant names filters of the Contract it was published against. If a later
+  // line no longer publishes one, the narrowing cannot be applied, so the read
+  // is refused rather than silently reading wider.
+  const inapplicable = scope.rowFilters.find((filter) => !contract.filters.includes(filter.field));
+  return inapplicable === undefined ? scope : null;
+}
+
+/** Resolves the scope a governed read must honour, failing closed when it cannot. */
 export function resolveGrantScope(
   session: PlatformSession,
-  user: UserRecord,
+  userId: string,
   role: string | null,
   product: DataProductArtifact,
   contract: DataProductContract,
   fail: Fail,
 ): GrantScope {
-  const grants = activeGrants(session.state.data_product_grants, product.data_product_id, user.user_id);
-  const scope = grantScopeOf(grants, contract, role !== 'Workspace Administrator');
-  // A Grant names filters of the Contract it was published against. If a later
-  // major line no longer publishes one, the narrowing cannot be applied, so the
-  // read fails closed rather than silently reading wider.
-  for (const filter of scope.rowFilters) {
-    if (!contract.filters.includes(filter.field)) {
-      fail(
-        'DATA_PRODUCT_QUERY_REFUSED',
-        `A Grant on ${filter.field} does not apply to this Contract line, so the read is refused.`,
-        'Republish the Grant against the Contract line its Consumers read.',
-      );
-    }
+  const scope = readableGrantScope(session, userId, role, product, contract);
+  if (scope === null) {
+    const stale = activeGrants(session.state.data_product_grants, product.data_product_id, userId)
+      .flatMap((grant) => grant.row_filters)
+      .find((filter) => !contract.filters.includes(filter.field));
+    fail(
+      'DATA_PRODUCT_QUERY_REFUSED',
+      `A Grant on ${stale?.field ?? 'a withdrawn filter'} does not apply to this Contract line, so the read is refused.`,
+      'Republish the Grant against the Contract line its Consumers read.',
+    );
   }
   return scope;
 }
@@ -225,13 +242,7 @@ export function publishGrant(options: {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'data_product_grant_publication', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
-  const product = findDataProduct(session.state.data_products, options.dataProductId);
-  const role = product === undefined
-    ? null
-    : workspaceRoleOf(session.state, actor.user.user_id, product.workspace_id);
-  if (!product || role !== 'Workspace Administrator') {
-    deny(session, actorLabel(actor.user), context, 'DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product is not available to this actor.');
-  }
+  const product = requireAdministeredProduct(session, actor, context, options.dataProductId);
   const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
   const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), scoped, code, message, nextStep);
   const { contract, schema } = currentContract(session, product, fail);
@@ -264,7 +275,7 @@ export function publishGrant(options: {
     grant_id: randomUUID(),
     workspace_id: product.workspace_id,
     data_product_id: product.data_product_id,
-    grantee: { type: 'user', id: grantee.user_id },
+    grantee_user_id: grantee.user_id,
     columns,
     row_filters: rowFilters,
     created_at: new Date().toISOString(),
@@ -288,7 +299,7 @@ export function publishGrant(options: {
     grant_id: grant.grant_id,
     workspace_id: grant.workspace_id,
     data_product_id: grant.data_product_id,
-    grantee: { type: grant.grantee.type, username: grantee.username },
+    grantee: { type: 'user', username: grantee.username },
     columns,
     row_filters: rowFilters.map((filter) => ({ ...filter })),
     created_at: grant.created_at,
@@ -305,19 +316,13 @@ export function listGrants(options: {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'data_product_grant_listing', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
-  const product = findDataProduct(session.state.data_products, options.dataProductId);
-  const role = product === undefined
-    ? null
-    : workspaceRoleOf(session.state, actor.user.user_id, product.workspace_id);
-  if (!product || role !== 'Workspace Administrator') {
-    deny(session, actorLabel(actor.user), context, 'DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product is not available to this actor.');
-  }
+  const product = requireAdministeredProduct(session, actor, context, options.dataProductId);
   const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
   const grants = session.state.data_product_grants
     .filter((grant) => grant.data_product_id === product.data_product_id && grant.revoked_at === null)
     .map((grant) => ({
       grant_id: grant.grant_id,
-      grantee: { type: grant.grantee.type, username: findUserById(session, grant.grantee.id) },
+      grantee: { type: 'user', username: findUserById(session, grant.grantee_user_id) },
       columns: grant.columns === null ? null : [...grant.columns],
       row_filters: grant.row_filters.map((filter) => ({ ...filter })),
       created_at: grant.created_at,

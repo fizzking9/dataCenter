@@ -128,9 +128,10 @@ interface Page {
   groups?: Array<Record<string, unknown>>;
   matched_count?: number;
   returned: number;
+  scanned_records: number;
   next_cursor: string | null;
   cache: { reused: boolean };
-  provenance: { dataset_release: number };
+  provenance: { dataset_release: number; record_count: number | null; permitted_record_count?: number };
 }
 
 function query(
@@ -172,6 +173,9 @@ test('a Grant narrows rows and columns before records, aggregates, counts, and r
   assert.deepEqual(records.records.map((record) => record['sn']), ['SN-001', 'SN-003', 'SN-005']);
   assert.deepEqual(Object.keys(records.records[0]!), ['sn', 'city']);
   assert.equal(records.matched_count, 3, 'the row filter caps the counted population');
+  assert.equal(records.scanned_records, 3, 'the reported scan never discloses the rows the Grant withholds');
+  assert.equal(records.provenance.record_count, null, 'the Release total is withheld from a narrowed reader');
+  assert.equal(records.provenance.permitted_record_count, 3);
 
   const grouped = query(fixture, consumerToken, productId, {
     kind: 'aggregate',
@@ -217,6 +221,7 @@ test('a Grant narrows rows and columns before records, aggregates, counts, and r
 
   const administrator = query(fixture, workspaceAdministratorToken, productId, { kind: 'records' });
   assert.equal(administrator.matched_count, 5, 'a Workspace Administrator is not narrowed by a Consumer Grant');
+  assert.equal(administrator.provenance.record_count, 5, 'an unrestricted reader still reads the Release provenance');
   assert.deepEqual(Object.keys(administrator.records[0]!).sort(), ['city', 'handled_count', 'owner', 'sn']);
 });
 
@@ -369,6 +374,71 @@ test('exports are encrypted, audited, and downloaded through short-lived reautho
     'EXPORT_NO_LONGER_AUTHORIZED',
     'a narrowed Grant refuses a download it no longer permits',
   );
+});
+
+test('an export reads every page of the governed answer it was asked for', () => {
+  const { fixture, productId, consumerToken, workspaceAdministratorToken } = readyProduct();
+  void publishGrant(fixture, workspaceAdministratorToken, productId, { columns: ['sn'], row_filters: [] });
+
+  // One page is all the governed read promises, so a paged answer must still be
+  // exported whole rather than silently cut at the first page.
+  const exported = command(
+    fixture,
+    ['export', 'create', '--product', productId, '--request', jsonFile(fixture, 'export-paged', { kind: 'records', limit: 2 })],
+    { token: consumerToken },
+  );
+  assert.equal(exported.status, 0, exported.stderr);
+  assert.equal(exported.output.row_count, 5, 'every matched row is exported, not only the first page');
+
+  const downloaded = command(fixture, ['export', 'download', '--export', String(exported.output.export_id)], {
+    token: consumerToken,
+  });
+  assert.equal(downloaded.status, 0, downloaded.stderr);
+  const csv = Buffer.from(String(downloaded.output.content), 'base64').toString('utf8');
+  assert.equal(csv, 'sn\nSN-001\nSN-002\nSN-003\nSN-004\nSN-005\n');
+});
+
+test('a Grant narrowed after an export refuses its download, and a widening permits it', () => {
+  const { fixture, productId, consumerToken, workspaceAdministratorToken } = readyProduct();
+  void publishGrant(fixture, workspaceAdministratorToken, productId, {
+    columns: ['sn', 'city'],
+    row_filters: [{ field: 'city', op: 'equals', value: '杭州' }],
+  });
+
+  const exported = command(
+    fixture,
+    ['export', 'create', '--product', productId, '--request', jsonFile(fixture, 'export-request', { kind: 'records' })],
+    { token: consumerToken },
+  );
+  assert.equal(exported.status, 0, exported.stderr);
+  const exportId = String(exported.output.export_id);
+
+  // A second Grant narrows the same reader further: the export still carries
+  // rows that Grant now withholds, so the download must be refused.
+  void publishGrant(fixture, workspaceAdministratorToken, productId, {
+    columns: ['sn', 'city'],
+    row_filters: [{ field: 'owner', op: 'equals', value: '张三' }],
+  });
+  assert.equal(
+    refusal(fixture, consumerToken, ['export', 'download', '--export', exportId]),
+    'EXPORT_NO_LONGER_AUTHORIZED',
+    'a row filter added after the export refuses its download',
+  );
+
+  // Revoking both Grants restores the Workspace baseline, which is wider than
+  // the scope the export was produced under, so the same download is permitted.
+  const grants = command(fixture, ['grant', 'list', '--product', productId], { token: workspaceAdministratorToken });
+  assert.equal(grants.status, 0, grants.stderr);
+  for (const grant of grants.output['grants'] as Array<Record<string, unknown>>) {
+    const revoked = command(fixture, ['grant', 'revoke', '--grant', String(grant['grant_id'])], {
+      token: workspaceAdministratorToken,
+    });
+    assert.equal(revoked.status, 0, revoked.stderr);
+  }
+  const permitted = command(fixture, ['export', 'download', '--export', exportId], { token: consumerToken });
+  assert.equal(permitted.status, 0, permitted.stderr);
+  const csv = Buffer.from(String(permitted.output.content), 'base64').toString('utf8');
+  assert.equal(csv, 'sn,city\nSN-001,杭州\nSN-003,杭州\nSN-005,杭州\n');
 });
 
 test('cross-Workspace substitution and raw or configuration export attempts reveal no existence', () => {

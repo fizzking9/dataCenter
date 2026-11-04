@@ -181,13 +181,10 @@ export async function workAcquisition(options: {
       'Publish an acquisition configuration for the Source and adopt the exact version.',
     );
   }
-  const connection = session.state.acquisition_connections.find(
-    (candidate) => candidate.connection_id === acquisition.connection_id,
-  );
-  const connectionVersion: AcquisitionConnectionVersion | undefined = connection?.versions.find(
-    (candidate) => candidate.version === acquisition.connection_version,
-  );
-  if (!connection || !connectionVersion) {
+  const connectionVersion: AcquisitionConnectionVersion | undefined = session.state.acquisition_connections
+    .find((candidate) => candidate.connection_id === acquisition.connection_id)
+    ?.versions.find((candidate) => candidate.version === acquisition.connection_version);
+  if (!connectionVersion) {
     fail(
       'CONNECTION_VERSION_NOT_FOUND',
       'The Connection Version this acquisition configuration pins is not available.',
@@ -212,7 +209,7 @@ export async function workAcquisition(options: {
     acquisition_run_id: run.acquisition_run_id,
     trigger: run.trigger,
     connector: { ...acquisition.connector },
-    connection_id: connection.connection_id,
+    connection_id: acquisition.connection_id,
     connection_version: connectionVersion.version,
     acquisition_configuration_version: acquisition.version,
     integration_configuration_version: integration.version,
@@ -230,7 +227,6 @@ export async function workAcquisition(options: {
   const outcome = await runConnector({
     session,
     plan,
-    connection,
     connectionVersion,
     acquisition,
   });
@@ -346,10 +342,9 @@ export function tickSchedules(options: {
 
     const acquisition = adoptedAcquisition(session, source.source_id);
     if (!acquisition) continue;
-    const connection = session.state.acquisition_connections.find(
-      (candidate) => candidate.connection_id === acquisition.connection_id,
-    );
-    const connectionVersion = connection?.versions.find((candidate) => candidate.version === acquisition.connection_version);
+    const connectionVersion = session.state.acquisition_connections
+      .find((candidate) => candidate.connection_id === acquisition.connection_id)
+      ?.versions.find((candidate) => candidate.version === acquisition.connection_version);
     const schedule = connectionVersion?.schedule ?? null;
     if (schedule === null) continue;
 

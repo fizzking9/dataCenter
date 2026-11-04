@@ -1,17 +1,10 @@
 import { resolveActor } from './auth.js';
-import { actorLabel, deny, reject, type ActionContext } from './authz.js';
+import { actorLabel, reject, type ActionContext } from './authz.js';
 import {
-  activeMajorLine,
-  findDataProduct,
-  findDataProductRelease,
-  findDataProductVersion,
-  majorLine,
   type DataProductArtifact,
   type DataProductContract,
   type DataProductMetric,
-  type DataProductRelease,
   type DataProductTime,
-  type DataProductVersion,
   type DatasetRecordRow,
   type DatasetReleaseRecord,
   type DatasetSchemaField,
@@ -25,6 +18,8 @@ import { evaluateAggregate, orderGroups, type EvaluatedGroup, type MetricValue }
 import { queryCacheKey, readCachedPage, writeCachedPage } from './product-cache.js';
 import { decodeCursor, encodeCursor } from './product-cursor.js';
 import { readQuery, readQueryTarget, type ParsedQuery, type QueryOperator, type QueryTarget, type Window } from './product-query-document.js';
+import { resolveRelease, type ResolvedRelease } from './product-release.js';
+import { requireReadableProduct } from './products.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
 /** Applies a typed operator the way the field's own type is compared. */
@@ -230,89 +225,6 @@ function orderRecords(records: DatasetRecordRow[], contract: DataProductContract
   });
 }
 
-interface ResolvedRelease {
-  version: DataProductVersion;
-  release: DataProductRelease;
-  major: number;
-}
-
-/**
- * Resolves the Release a query reads. A named Release is answered exactly, a
- * named major line reads that line's own current Release, and a bare query
- * reads the newest line still serving — never silently the newest data.
- */
-function resolveRelease(product: DataProductArtifact, target: QueryTarget, fail: Fail): ResolvedRelease {
-  const atRelease = (release: DataProductRelease): ResolvedRelease => {
-    const version = findDataProductVersion(product, release.data_product_version);
-    if (!version) {
-      fail(
-        'DATA_PRODUCT_VERSION_NOT_FOUND',
-        'The Data Product Version this Release pins is no longer available.',
-        'Read the Releases the Data Product publishes.',
-      );
-    }
-    if (version.withdrawn_at !== null) {
-      fail(
-        'DATA_PRODUCT_VERSION_WITHDRAWN',
-        `Data Product Release ${release.release} was withdrawn, so it may not execute a new query.`,
-        'Query the newest active major line instead.',
-      );
-    }
-    return { version, release, major: version.contract_version.major };
-  };
-
-  if (target.release !== undefined) {
-    const release = findDataProductRelease(product, target.release);
-    if (!release) {
-      fail(
-        'DATA_PRODUCT_RELEASE_NOT_FOUND',
-        `This Data Product has no Release ${target.release}.`,
-        'Read the Releases the Data Product publishes.',
-      );
-    }
-    const resolved = atRelease(release);
-    if (target.major !== undefined && resolved.major !== target.major) {
-      fail(
-        'DATA_PRODUCT_RELEASE_NOT_FOUND',
-        `Data Product Release ${target.release} does not belong to Contract major ${target.major}.`,
-        'Query the Release under the major line it was published in.',
-      );
-    }
-    return resolved;
-  }
-
-  const line = target.major === undefined ? undefined : majorLine(product, target.major);
-  if (target.major !== undefined) {
-    if (!line) {
-      fail(
-        'DATA_PRODUCT_MAJOR_NOT_FOUND',
-        `This Data Product has no Contract major ${target.major}.`,
-        'Read the Releases the Data Product publishes to see its Contract lines.',
-      );
-    }
-    if (line.withdrawn_at !== null) {
-      fail(
-        'DATA_PRODUCT_MAJOR_WITHDRAWN',
-        `Contract major ${line.major} was withdrawn, so it serves no new query.`,
-        'Query an active major line or an exact historical Release.',
-      );
-    }
-  }
-  const serving = line ?? activeMajorLine(product);
-  if (!serving) {
-    fail(
-      'DATA_PRODUCT_NOT_PUBLISHED',
-      'The Data Product has no active Publication to query.',
-      'Publish the Data Product again to open a Contract line.',
-    );
-  }
-  const release = findDataProductRelease(product, serving.current_release);
-  if (!release) {
-    fail('DATA_PRODUCT_RELEASE_NOT_FOUND', `This Data Product has no Release ${serving.current_release}.`);
-  }
-  return atRelease(release);
-}
-
 /** The query itself, minus the page position, so a cursor pins what it answered. */
 function normalizeQuery(
   query: ParsedQuery,
@@ -433,13 +345,8 @@ export function queryDataProduct(options: {
   const context: ActionContext = { action: 'data_product_query', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
 
-  const product = findDataProduct(session.state.data_products, options.dataProductId);
-  const role = product === undefined
-    ? null
-    : workspaceRoleOf(session.state, actor.user.user_id, product.workspace_id);
-  if (!product || role === null) {
-    deny(session, actorLabel(actor.user), context, 'DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product is not available to this actor.');
-  }
+  const product = requireReadableProduct(session, actor, context, options.dataProductId);
+  const role = workspaceRoleOf(session.state, actor.user.user_id, product.workspace_id);
   const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
 
   const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), scoped, code, message, nextStep);
@@ -472,7 +379,7 @@ export function queryDataProduct(options: {
   const source = session.state.sources.find((candidate) => candidate.source_id === dataset.source_id);
 
   const query = readQuery(request as Record<string, unknown>, contract, schema, fail);
-  const scope = resolveGrantScope(session, actor.user, role, product, contract, fail);
+  const scope = resolveGrantScope(session, actor.user.user_id, role, product, contract, fail);
   requireGrantPermits(query, scope, fail);
   const queryHash = canonicalDigest(normalizeQuery(query, release.release, major, scope.fingerprint));
   const queryFilters = [...scope.rowFilters, ...query.filters];
@@ -489,6 +396,14 @@ export function queryDataProduct(options: {
   });
 
   const scanned = datasetRelease.records.length;
+  // A narrowed reader must not learn the size of the population they cannot
+  // see, so the reported scan, the time coverage, and the Release provenance
+  // describe only the rows their Grants permit. The declared limits still
+  // measure the work actually done.
+  const permittedRows = scope.restricted
+    ? selectRecords(datasetRelease.records, contract, scope.rowFilters, undefined)
+    : datasetRelease.records;
+  const permitted = permittedRows.length;
   if (scanned > contract.limits.max_scanned_records) {
     fail(
       'DATA_PRODUCT_QUERY_TOO_COMPLEX',
@@ -502,7 +417,8 @@ export function queryDataProduct(options: {
     dataset_release: datasetRelease.release,
     integration_configuration_version: datasetRelease.integration_configuration_version,
     business_context: { ...datasetRelease.pins },
-    record_count: datasetRelease.record_count,
+    record_count: scope.restricted ? null : datasetRelease.record_count,
+    ...(scope.restricted ? { permitted_record_count: permitted } : {}),
     acquired_at: datasetRelease.provenance.acquired_at,
     integrated_at: datasetRelease.provenance.integrated_at,
     released_at: datasetRelease.created_at,
@@ -516,7 +432,7 @@ export function queryDataProduct(options: {
     contract_version: { ...version.contract_version },
     contract_hash: version.contract_hash,
   };
-  const coverage = contract.time === undefined ? null : coverageOf(datasetRelease.records, contract.time);
+  const coverage = contract.time === undefined ? null : coverageOf(permittedRows, contract.time);
 
   /** Holds every answer to the execution budget the Contract declares. */
   const requireBudget = (): void => {
@@ -589,7 +505,7 @@ export function queryDataProduct(options: {
         })
         : null,
       limit: query.limit,
-      scanned_records: scanned,
+      scanned_records: permitted,
       ...(query.window === undefined || contract.time === undefined
         ? { window: null }
         : { window: windowView(contract.time, query.window, coverage) }),
@@ -678,7 +594,7 @@ export function queryDataProduct(options: {
       })
       : null,
     limit: query.limit,
-    scanned_records: scanned,
+    scanned_records: permitted,
     ...(query.window === undefined || contract.time === undefined
       ? { window: null }
       : { window: windowView(contract.time, query.window, coverage) }),

@@ -6,14 +6,11 @@ import {
 } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
+import type { SealedSecret } from './catalog.js';
 import { assertCondition } from './errors.js';
 
-export interface WrappedValue {
-  algorithm: 'AES-256-GCM';
-  iv: string;
-  ciphertext: string;
-  tag: string;
-}
+/** An encrypted value is the domain's sealed secret, produced and opened here only. */
+export type WrappedValue = SealedSecret;
 
 export interface WrappedDataKey extends WrappedValue {
   master_key_fingerprint: string;
@@ -33,10 +30,11 @@ export function readMountedMasterKey(root: string, path: string): Buffer {
   return decoded;
 }
 
-function encrypt(key: Buffer, value: Buffer): WrappedValue {
+/** Encrypts governed bytes under the Deployment data key, so no plaintext is ever stored. */
+export function encryptValue(key: Buffer, plaintext: Buffer): WrappedValue {
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
-  const ciphertext = Buffer.concat([cipher.update(value), cipher.final()]);
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   return {
     algorithm: 'AES-256-GCM',
     iv: iv.toString('base64'),
@@ -51,9 +49,9 @@ export function decrypt(key: Buffer, value: WrappedValue): Buffer {
   return Buffer.concat([decipher.update(Buffer.from(value.ciphertext, 'base64')), decipher.final()]);
 }
 
-/** Encrypts governed bytes under the Deployment data key, so no plaintext is ever stored. */
-export function encryptValue(key: Buffer, plaintext: Buffer): WrappedValue {
-  return encrypt(key, plaintext);
+/** Seals one textual secret under the Deployment data key, as a credential is stored. */
+export function encryptSecret(dataKey: Buffer, value: string): WrappedValue {
+  return encryptValue(dataKey, Buffer.from(value, 'utf8'));
 }
 
 export function wrapNewDataKey(masterKey: Buffer): { dataKey: Buffer; wrapped: WrappedDataKey } {
@@ -61,7 +59,7 @@ export function wrapNewDataKey(masterKey: Buffer): { dataKey: Buffer; wrapped: W
   return {
     dataKey,
     wrapped: {
-      ...encrypt(masterKey, dataKey),
+      ...encryptValue(masterKey, dataKey),
       master_key_fingerprint: createHash('sha256').update(masterKey).digest('hex'),
     },
   };
@@ -70,8 +68,4 @@ export function wrapNewDataKey(masterKey: Buffer): { dataKey: Buffer; wrapped: W
 export function unwrapDataKey(masterKey: Buffer, wrapped: WrappedDataKey): Buffer {
   assertCondition(createHash('sha256').update(masterKey).digest('hex') === wrapped.master_key_fingerprint, 'MASTER_KEY_MISMATCH', 'The mounted master key does not match this Deployment.');
   return decrypt(masterKey, wrapped);
-}
-
-export function encryptSecret(dataKey: Buffer, value: string): WrappedValue {
-  return encrypt(dataKey, Buffer.from(value, 'utf8'));
 }

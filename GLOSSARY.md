@@ -188,6 +188,10 @@ _Avoid_: Arbitrary SQL generation, cross-workspace search, LLM-authorized query
 A Workspace-scoped authorization configuration allowing an actor to query a published Data Product subject to permitted columns and declarative row filters, enforced at the server-side data-access boundary.
 _Avoid_: LLM-enforced permission, per-prompt access, unrestricted Dataset access
 
+**Export**:
+A short-lived, encrypted curated result produced by running a Data Product Query under the requesting Consumer's Grants, downloadable only by that Consumer and only while the Grants that produced it still permit it.
+_Avoid_: Raw Acquisition download, ungoverned spreadsheet, permanent extract
+
 **Metric Definition**:
 A versioned Business Context entry defining business meaning independently of a Source; common metrics cannot refer to Workspace-specific objects.
 _Avoid_: Source cleaning rule, Workspace shadow of a common metric

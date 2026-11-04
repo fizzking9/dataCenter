@@ -15,10 +15,8 @@ import { issueOperatorEnrollment, revokeOperator, revokeOperatorEnrollment } fro
 import { startConsoleServer } from './console-server.js';
 import {
   adoptConnection,
-  adoptSourceAcquisition,
   listConnections,
   publishConnection,
-  publishSourceAcquisition,
 } from './connections.js';
 import { publishCommonContext, publishWorkspaceContext, showContext } from './context.js';
 import { releaseDataset, showDataset } from './datasets.js';
@@ -32,6 +30,7 @@ import { importLicense, readLicenseSummary } from './license.js';
 import { queryDataProduct } from './product-query.js';
 import { listDataProductReleases, listDataProducts, publishDataProduct, withdrawDataProductVersion } from './products.js';
 import { createSource } from './sources.js';
+import { adoptSourceAcquisition, publishSourceAcquisition } from './source-acquisition.js';
 import { deploymentStatus } from './status.js';
 import { readDeployment } from './state.js';
 import { createUser, deactivateUser, listUsers, transferOwnership } from './users.js';

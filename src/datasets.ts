@@ -20,6 +20,7 @@ import {
 } from './catalog.js';
 import { parseCsv } from './csv.js';
 import { canonicalDigest } from './crypto.js';
+import { isRecord, valueAtPath } from './documents.js';
 import { openPlatform, type PlatformSession } from './session.js';
 import { requireAdministeredSource } from './sources.js';
 
@@ -42,17 +43,6 @@ interface FragmentTable {
 
 function digest(value: unknown): string {
   return canonicalDigest(value);
-}
-
-/** Reads the array of records out of a JSON response body at its configured path. */
-function recordsAt(body: unknown, recordPath: string | null): unknown {
-  if (recordPath === null) return body;
-  let current: unknown = body;
-  for (const segment of recordPath.split('.')) {
-    if (typeof current !== 'object' || current === null || Array.isArray(current)) return undefined;
-    current = (current as Record<string, unknown>)[segment];
-  }
-  return current;
 }
 
 function cellOf(value: unknown): string {
@@ -94,11 +84,20 @@ function fragmentTable(
   } catch {
     reject(session, actorLabel(actor.user), context, 'INTEGRATION_FRAGMENT_MALFORMED', 'A connector Raw Acquisition does not hold the JSON its Plan read.');
   }
-  const records = recordsAt(body, acquisition?.record_path ?? null);
+  const records = valueAtPath(body, acquisition?.record_path ?? null);
   if (!Array.isArray(records)) {
     reject(session, actorLabel(actor.user), context, 'INTEGRATION_FRAGMENT_MALFORMED', 'A connector Raw Acquisition holds no records array at its configured path.');
   }
-  const header = Object.keys(version.mapping);
+  // The columns are the ones the records actually carry, so a mapping that names
+  // a column the endpoint never sends is refused here exactly as it is for CSV.
+  // An empty page names no columns and has no rows to lose, so it keeps the
+  // mapped ones and lets the mapping check pass on evidence it does not have.
+  const header = records.length === 0
+    ? Object.keys(version.mapping)
+    : [...new Set(records.flatMap((record) => (isRecord(record) ? Object.keys(record) : [])))];
+  if (records.length > 0 && header.length === 0) {
+    reject(session, actorLabel(actor.user), context, 'INTEGRATION_FRAGMENT_MALFORMED', 'A connector Raw Acquisition holds records that are not objects.');
+  }
   return {
     header,
     rows: records.map((record, index) => ({

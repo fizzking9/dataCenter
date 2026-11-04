@@ -126,8 +126,10 @@ export interface AcquisitionConnectionVersion {
   published_at: string;
   published_by: string;
   base_url: string;
-  /** The name of the stored credential, never the credential itself. */
+  /** The name of this Version's stored credential, which its content hash pins. */
   credential_ref: string;
+  /** The sealed credential itself; a later Version never rewrites this one's. */
+  credential: SealedSecret | null;
   pagination: ConnectionPagination;
   schedule: { every_minutes: number } | null;
   content_hash: string;
@@ -142,7 +144,6 @@ export interface AcquisitionConnectionArtifact {
   created_at: string;
   adopted_version: number | null;
   versions: AcquisitionConnectionVersion[];
-  credential: SealedSecret | null;
 }
 
 /** One immutable per-Source acquisition configuration, pinning its Connection. */
@@ -382,7 +383,8 @@ export interface DataProductGrantRecord {
   grant_id: string;
   workspace_id: string;
   data_product_id: string;
-  grantee: { type: 'user' | 'agent_identity'; id: string };
+  /** The member whose reads this Grant narrows. */
+  grantee_user_id: string;
   /** Permitted Contract fields; every field the Contract publishes when unstated. */
   columns: string[] | null;
   row_filters: GrantRowFilter[];
@@ -402,6 +404,8 @@ export interface ExportRecord {
   expires_at: string;
   row_count: number;
   columns: string[];
+  /** The row predicates the export was produced under, so a narrower Grant refuses it. */
+  row_filters: GrantRowFilter[];
   content_hash: string;
   /** The ciphertext object, relative to the Deployment root. */
   object_path: string;
@@ -529,11 +533,11 @@ export function findDataProductRelease(
 export function activeGrants(
   grants: DataProductGrantRecord[],
   dataProductId: string,
-  granteeId: string,
+  granteeUserId: string,
 ): DataProductGrantRecord[] {
   return grants.filter(
     (grant) => grant.data_product_id === dataProductId
-      && grant.grantee.id === granteeId
+      && grant.grantee_user_id === granteeUserId
       && grant.revoked_at === null,
   );
 }

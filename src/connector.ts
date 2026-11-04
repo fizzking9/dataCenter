@@ -2,12 +2,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type {
-  AcquisitionConnectionArtifact,
   AcquisitionConnectionVersion,
   AcquisitionPlanRecord,
   RawAcquisitionRecord,
   SourceAcquisitionVersion,
 } from './catalog.js';
+import { valueAtPath } from './documents.js';
 import { decrypt } from './keys.js';
 import type { PlatformSession } from './session.js';
 
@@ -18,17 +18,6 @@ export interface ConnectorOutcome {
   complete: boolean;
   errorCode: string | null;
   rawIds: string[];
-}
-
-/** Reads the array of records out of a response body at the configured path. */
-function recordsAt(body: unknown, recordPath: string | null): unknown {
-  if (recordPath === null) return body;
-  let current: unknown = body;
-  for (const segment of recordPath.split('.')) {
-    if (typeof current !== 'object' || current === null || Array.isArray(current)) return undefined;
-    current = (current as Record<string, unknown>)[segment];
-  }
-  return current;
 }
 
 function isDone(
@@ -68,16 +57,17 @@ function pageUrl(
 export async function runConnector(options: {
   session: PlatformSession;
   plan: AcquisitionPlanRecord;
-  connection: AcquisitionConnectionArtifact;
   connectionVersion: AcquisitionConnectionVersion;
   acquisition: SourceAcquisitionVersion;
 }): Promise<ConnectorOutcome> {
-  const { session, plan, connection, connectionVersion, acquisition } = options;
+  const { session, plan, connectionVersion, acquisition } = options;
   const rawIds: string[] = [];
   let previousHash: string | null = null;
-  const credential = connection.credential === null
+  // The credential is read from the Connection Version this Plan pinned, so
+  // rotating a token never changes what an already-pinned read sends.
+  const credential = connectionVersion.credential === null
     ? null
-    : decrypt(session.dataKey, connection.credential).toString('utf8');
+    : decrypt(session.dataKey, connectionVersion.credential).toString('utf8');
   const stop = (errorCode: string): ConnectorOutcome => ({ complete: false, errorCode, rawIds });
 
   for (let index = 0; index < connectionVersion.pagination.max_pages; index += 1) {
@@ -130,7 +120,7 @@ export async function runConnector(options: {
       session.save();
       return stop('ACQUISITION_RESPONSE_MALFORMED');
     }
-    const records = recordsAt(body, acquisition.record_path);
+    const records = valueAtPath(body, acquisition.record_path);
     if (!Array.isArray(records)) {
       plan.pages.push({ page, raw_id: rawId, outcome: 'failed', record_count: null, error_code: 'ACQUISITION_RESPONSE_MALFORMED' });
       session.save();

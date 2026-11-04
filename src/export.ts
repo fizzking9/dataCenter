@@ -1,24 +1,27 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { resolveActor } from './auth.js';
 import { actorLabel, deny, reject, type ActionContext } from './authz.js';
 import {
   findDataProduct,
-  findDataProductRelease,
-  findDataProductVersion,
   type ExportRecord,
 } from './catalog.js';
 import { toCsv } from './csv.js';
+import { isRecord, readJsonDocument } from './documents.js';
 import type { Fail } from './errors.js';
 import { resolveGrantScope, type GrantScope } from './grants.js';
 import { decrypt, encryptValue, type WrappedValue } from './keys.js';
-import { workspaceRoleOf, type UserRecord } from './platform.js';
+import { workspaceRoleOf } from './platform.js';
 import { queryDataProduct } from './product-query.js';
+import { releasedVersion } from './product-release.js';
+import { requireReadableProduct } from './products.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
 /** A curated export is readable only through a reauthorized, short-lived download. */
 const EXPORT_LIFETIME_MS = 5 * 60 * 1000;
+/** No export may assemble more rows than this, so one request cannot exhaust storage. */
+const EXPORT_ROW_CEILING = 100_000;
 
 function objectPathOf(exportId: string): string {
   return `exports/${exportId}.json`;
@@ -57,6 +60,83 @@ function tableOf(response: Record<string, unknown>): CuratedTable {
   };
 }
 
+/** The Grant scope in force for one actor on one published Release. */
+function scopeOfRelease(
+  session: PlatformSession,
+  userId: string,
+  dataProductId: string,
+  releaseNumber: number,
+  fail: Fail,
+): GrantScope {
+  const product = findDataProduct(session.state.data_products, dataProductId);
+  const pinned = releasedVersion(product, releaseNumber);
+  if (!product || pinned === undefined) {
+    fail('EXPORT_NOT_AVAILABLE', 'The export is not available to this actor.');
+  }
+  const role = workspaceRoleOf(session.state, userId, product.workspace_id);
+  if (role === null) {
+    fail('EXPORT_NOT_AVAILABLE', 'The export is not available to this actor.');
+  }
+  return resolveGrantScope(session, userId, role, product, pinned.version.contract, fail);
+}
+
+/**
+ * Reads every page of one governed answer.
+ *
+ * A page is all the governed read promises, so an export that stopped at the
+ * first one would silently drop the rows it did not read and report the partial
+ * count as the whole. Each page is requested through the same governed read, so
+ * no page escapes the Grants, the row filters, or the Release the first one
+ * pinned.
+ */
+function readEveryPage(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  dataProductId: string;
+  requestPath: string;
+  request: Record<string, unknown>;
+  scratchDirectory: string;
+}): { header: string[]; rows: Array<Array<string | number | null>>; pages: number; release: number } {
+  let header: string[] | null = null;
+  const rows: Array<Array<string | number | null>> = [];
+  let cursor: string | null = null;
+  let pages = 0;
+  let release = 0;
+
+  for (;;) {
+    const requestPath = cursor === null
+      ? options.requestPath
+      : (() => {
+        const pagePath = join(options.scratchDirectory, `page-${pages}.json`);
+        writeFileSync(pagePath, `${JSON.stringify({ ...options.request, cursor })}\n`, { mode: 0o600 });
+        return pagePath;
+      })();
+    const answer = queryDataProduct({
+      root: options.root,
+      masterKey: options.masterKey,
+      token: options.token,
+      dataProductId: options.dataProductId,
+      requestPath,
+    });
+    const table = tableOf(answer);
+    if (header === null) header = table.header;
+    else if (JSON.stringify(header) !== JSON.stringify(table.header)) {
+      throw new Error('EXPORT_PAGES_DISAGREE');
+    }
+    rows.push(...table.rows);
+    pages += 1;
+    release = Number(answer['data_product_release']);
+    if (rows.length > EXPORT_ROW_CEILING) throw new Error('EXPORT_ROW_CEILING_REACHED');
+    if (answer['truncated'] !== true) break;
+    const next = answer['next_cursor'];
+    if (typeof next !== 'string') throw new Error('EXPORT_PAGE_UNREACHABLE');
+    cursor = next;
+  }
+
+  return { header: header ?? [], rows, pages, release };
+}
+
 /**
  * Produces one encrypted, audited, Workspace-scoped curated-result export by
  * running the same governed query a Consumer would read, so every Grant, row
@@ -69,32 +149,68 @@ export function createExport(options: {
   dataProductId: string;
   requestPath: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const authorizer = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'data_product_export', scope: 'workspace' };
-  const actor = resolveActor(session, options.token, context);
-  const product = findDataProduct(session.state.data_products, options.dataProductId);
-  const role = product === undefined
-    ? null
-    : workspaceRoleOf(session.state, actor.user.user_id, product.workspace_id);
-  if (!product || role === null) {
-    deny(session, actorLabel(actor.user), context, 'DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product is not available to this actor.');
-  }
+  const actor = resolveActor(authorizer, options.token, context);
+  const product = requireReadableProduct(authorizer, actor, context, options.dataProductId);
   const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
-
-  // The governed read is what proves authorization, applies Grants, and pins the
-  // Release; an export never assembles a table by any other route.
-  const answer = queryDataProduct({
-    root: options.root,
-    masterKey: options.masterKey,
-    token: options.token,
-    dataProductId: options.dataProductId,
-    requestPath: options.requestPath,
-  });
-  const table = tableOf(answer);
-  const csv = toCsv(table.header, table.rows);
-  const bytes = Buffer.from(csv, 'utf8');
+  const fail: Fail = (code, message, nextStep) => reject(authorizer, actorLabel(actor.user), scoped, code, message, nextStep);
+  const request = readJsonDocument(
+    options.requestPath,
+    fail,
+    'DATA_PRODUCT_QUERY_INVALID',
+    'The Data Product Query document must contain valid JSON.',
+  );
+  if (!isRecord(request)) {
+    fail('DATA_PRODUCT_QUERY_INVALID', 'A Data Product Query must be a JSON object.');
+  }
 
   const exportId = randomUUID();
+  const scratch = join(authorizer.root, 'tmp', `export-${exportId}`);
+  mkdirSync(scratch, { recursive: true, mode: 0o700 });
+  let table: { header: string[]; rows: Array<Array<string | number | null>>; pages: number; release: number };
+  try {
+    table = readEveryPage({
+      root: options.root,
+      masterKey: options.masterKey,
+      token: options.token,
+      dataProductId: options.dataProductId,
+      requestPath: options.requestPath,
+      request,
+      scratchDirectory: scratch,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'EXPORT_ROW_CEILING_REACHED') {
+      fail(
+        'EXPORT_TOO_LARGE',
+        `This export would carry more than ${EXPORT_ROW_CEILING} rows.`,
+        'Narrow the query with filters or a time window before exporting it.',
+      );
+    }
+    if (error instanceof Error && error.message === 'EXPORT_PAGES_DISAGREE') {
+      fail(
+        'EXPORT_INCOMPLETE',
+        'The pages of this export do not share the same columns.',
+        'Export the Data Product again without changing its Contract while it is read.',
+      );
+    }
+    if (error instanceof Error && error.message === 'EXPORT_PAGE_UNREACHABLE') {
+      fail(
+        'EXPORT_INCOMPLETE',
+        'The export stopped before every matched row was read.',
+        'Export the Data Product again with a narrower query.',
+      );
+    }
+    throw error;
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+
+  // The pages each saved their own audit row, so the recording session is opened
+  // afterwards and never overwrites what the governed reads wrote.
+  const session = openPlatform(options.root, options.masterKey);
+  const csv = toCsv(table.header, table.rows);
+  const bytes = Buffer.from(csv, 'utf8');
   const objectPath = objectPathOf(exportId);
   const absolute = join(session.root, objectPath);
   mkdirSync(dirname(absolute), { recursive: true, mode: 0o700 });
@@ -105,12 +221,15 @@ export function createExport(options: {
     export_id: exportId,
     workspace_id: product.workspace_id,
     data_product_id: product.data_product_id,
-    data_product_release: Number(answer['data_product_release']),
+    data_product_release: table.release,
     actor_user_id: actor.user.user_id,
     created_at: new Date().toISOString(),
     expires_at: new Date(Date.now() + EXPORT_LIFETIME_MS).toISOString(),
     row_count: table.rows.length,
     columns: [...table.header],
+    row_filters: scopeOfRelease(session, actor.user.user_id, product.data_product_id, table.release, fail)
+      .rowFilters
+      .map((filter) => ({ ...filter })),
     content_hash: createHash('sha256').update(bytes).digest('hex'),
     object_path: objectPath,
     downloaded_at: null,
@@ -125,6 +244,7 @@ export function createExport(options: {
       data_product_release: record.data_product_release,
       row_count: record.row_count,
       column_count: record.columns.length,
+      pages_read: table.pages,
     },
   });
   session.save();
@@ -143,31 +263,26 @@ export function createExport(options: {
   };
 }
 
-/** The Contract and Grant scope still in force for one exported Release. */
-function currentScope(
-  session: PlatformSession,
-  user: UserRecord,
-  record: ExportRecord,
-  fail: Fail,
-): GrantScope {
-  const product = findDataProduct(session.state.data_products, record.data_product_id);
-  const release = findDataProductRelease(product, record.data_product_release);
-  const version = release === undefined
-    ? undefined
-    : findDataProductVersion(product, release.data_product_version);
-  if (!product || version === undefined) {
-    fail('EXPORT_NOT_AVAILABLE', 'The export is not available to this actor.');
-  }
-  const role = workspaceRoleOf(session.state, user.user_id, record.workspace_id);
-  if (role === null) {
-    fail('EXPORT_NOT_AVAILABLE', 'The export is not available to this actor.');
-  }
-  return resolveGrantScope(session, user, role, product, version.contract, fail);
+/**
+ * True when the current scope still permits every row the export carries.
+ *
+ * Filters narrow, so the rows an export was produced under remain permitted
+ * only while the scope in force is at least as wide as the one recorded: an
+ * unrestricted scope covers everything, and a restricted one must apply no
+ * filter the export was not already produced under.
+ */
+function coversExport(recorded: ExportRecord['row_filters'], scope: GrantScope): boolean {
+  if (!scope.restricted) return true;
+  return scope.rowFilters.every(
+    (current) => recorded.some(
+      (filter) => filter.field === current.field && filter.op === current.op && filter.value === current.value,
+    ),
+  );
 }
 
 /**
  * Reauthorizes and decrypts one export. Authorization is recomputed from the
- * current Workspace membership and Grants, so a narrowed Grant refuses a
+ * current Workspace membership and Grants, so a narrower Grant refuses a
  * download it no longer permits, and access expires on its own.
  */
 export function downloadExport(options: {
@@ -196,12 +311,19 @@ export function downloadExport(options: {
       'Produce the export again to receive a fresh short-lived download.',
     );
   }
-  const scope = currentScope(session, actor.user, record, fail);
+  const scope = scopeOfRelease(session, actor.user.user_id, record.data_product_id, record.data_product_release, fail);
   const withheld = record.columns.filter((column) => !scope.columns.includes(column));
   if (withheld.length > 0) {
     fail(
       'EXPORT_NO_LONGER_AUTHORIZED',
       `This export carries ${withheld.join(', ')}, which the current Grant does not permit.`,
+      'Produce the export again under the current Grant.',
+    );
+  }
+  if (!coversExport(record.row_filters, scope)) {
+    fail(
+      'EXPORT_NO_LONGER_AUTHORIZED',
+      'This export was produced under row filters that the current Grant narrows.',
       'Produce the export again under the current Grant.',
     );
   }

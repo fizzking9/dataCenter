@@ -35,13 +35,21 @@ interface Ready {
   sourceId: string;
   connectionId: string;
   workspaceAdministratorToken: string;
+  connectionVersion: number;
   close(): Promise<void>;
 }
 
 /** One HTTP Source whose Connection, Acquisition Configuration, and Integration are adopted. */
 async function readySource(
   source: HttpSource,
-  options: { completion?: Record<string, unknown>; credential?: string; size?: number; maxPages?: number; everyMinutes?: number } = {},
+  options: {
+    completion?: Record<string, unknown>;
+    credential?: string;
+    size?: number;
+    maxPages?: number;
+    everyMinutes?: number;
+    integration?: Record<string, unknown>;
+  } = {},
 ): Promise<Ready> {
   const { fixture, workspaceId, workspaceAdministratorToken }: WorkspaceFixture = workspaceFixture();
   const created = command(
@@ -70,7 +78,7 @@ async function readySource(
   );
   assert.equal(connection.status, 0, connection.stderr);
   const connectionId = String(connection.output.connection_id);
-  assert.equal(connection.output.credential_ref, 'bearer');
+  assert.match(String(connection.output.credential_ref), /^bearer:[0-9a-f]{16}$/, 'the Version names the credential it pins');
   assert.equal(JSON.stringify(connection.output).includes('source-access-token'), false, 'a credential is never returned');
 
   const adoptedConnection = command(
@@ -101,7 +109,7 @@ async function readySource(
 
   const integration = command(
     fixture,
-    ['integration', 'publish', '--source', sourceId, '--config', jsonFile(fixture, 'integration', INTEGRATION)],
+    ['integration', 'publish', '--source', sourceId, '--config', jsonFile(fixture, 'integration', options.integration ?? INTEGRATION)],
     { token: workspaceAdministratorToken },
   );
   assert.equal(integration.status, 0, integration.stderr);
@@ -116,6 +124,7 @@ async function readySource(
     workspaceId,
     sourceId,
     connectionId,
+    connectionVersion: Number(connection.output.connection_version),
     workspaceAdministratorToken,
     close: () => source.close(),
   };
@@ -362,6 +371,114 @@ test('a Source without adopted acquisition artifacts refuses to run and pins not
   );
   assert.equal(connection.status, 2);
   assert.equal(connection.error.code, 'CONNECTION_CREDENTIAL_REQUIRED', 'bearer authentication requires a stored credential');
+  await source.close();
+});
+
+test('a Connection Version pins the credential it authenticates with', async () => {
+  const source = await startHttpSource({
+    replies: [{ body: pageBody(DEVICES.slice(0, 1)) }, { body: pageBody([]) }],
+  });
+  const ready = await readySource(source, { completion: { kind: 'empty_page' }, credential: 'first-token' });
+  const { fixture, workspaceId, workspaceAdministratorToken } = ready;
+
+  enqueue(fixture, workspaceAdministratorToken, ready.sourceId);
+  work(fixture, workspaceAdministratorToken, ready.sourceId);
+  assert.deepEqual(
+    source.requests().map((request) => request.authorization),
+    ['Bearer first-token', 'Bearer first-token'],
+    'the pinned Version supplies the credential',
+  );
+
+  // Rotating the credential publishes a new Version; the Version the Source
+  // already pinned keeps sending the credential it was published with.
+  const rotated = command(
+    fixture,
+    ['connection', 'publish', '--workspace', workspaceId, '--name', '设备系统', '--config', jsonFile(fixture, 'connection-rotated', {
+      base_url: source.url,
+      auth: { scheme: 'bearer' },
+      pagination: { parameter: 'page', size_parameter: 'page_size', start: 1, size: 2, max_pages: 5 },
+    }), '--credential-stdin'],
+    { token: workspaceAdministratorToken, input: 'rotated-token\n' },
+  );
+  assert.equal(rotated.status, 0, rotated.stderr);
+  assert.equal(rotated.output.connection_version, ready.connectionVersion + 1);
+  assert.match(String(rotated.output.credential_ref), /^bearer:[0-9a-f]{16}$/);
+
+  enqueue(fixture, workspaceAdministratorToken, ready.sourceId);
+  const pinnedAgain = work(fixture, workspaceAdministratorToken, ready.sourceId);
+  assert.equal(pinnedAgain.plan.connection_version, ready.connectionVersion, 'the Source still pins its adopted Version');
+  const afterRotation = source.requests().slice(2);
+  assert.ok(afterRotation.length > 0);
+  assert.deepEqual(
+    [...new Set(afterRotation.map((request) => request.authorization))],
+    ['Bearer first-token'],
+    'rotating a credential never rewrites what an already-pinned Version sends',
+  );
+
+  // Repointing the Source at the new Version is what makes the new credential
+  // take effect, and that is an explicit Publication plus Adoption.
+  const repointed = command(
+    fixture,
+    ['acquisition-config', 'publish', '--source', ready.sourceId, '--config', jsonFile(fixture, 'acquisition-config-rotated', {
+      connection: ready.connectionId,
+      connection_version: rotated.output.connection_version,
+      path: '/api/devices',
+      record_path: 'data.records',
+      completion: { kind: 'empty_page' },
+    })],
+    { token: workspaceAdministratorToken },
+  );
+  assert.equal(repointed.status, 0, repointed.stderr);
+  const adopted = command(
+    fixture,
+    ['acquisition-config', 'adopt', '--source', ready.sourceId, '--version', String(repointed.output.acquisition_configuration_version)],
+    { token: workspaceAdministratorToken },
+  );
+  assert.equal(adopted.status, 0, adopted.stderr);
+
+  enqueue(fixture, workspaceAdministratorToken, ready.sourceId);
+  const repointedRun = work(fixture, workspaceAdministratorToken, ready.sourceId);
+  assert.equal(repointedRun.plan.connection_version, ready.connectionVersion + 1);
+  const afterRepoint = source.requests().slice(2 + afterRotation.length);
+  assert.ok(afterRepoint.length > 0);
+  assert.deepEqual(
+    [...new Set(afterRepoint.map((request) => request.authorization))],
+    ['Bearer rotated-token'],
+    'an adopted Version uses the credential it was published with',
+  );
+
+  const listed = command(fixture, ['connection', 'list', '--workspace', workspaceId], { token: workspaceAdministratorToken });
+  assert.equal(listed.status, 0, listed.stderr);
+  const connections = listed.output['connections'] as Array<Record<string, unknown>>;
+  const versions = connections[0]?.['versions'] as Array<Record<string, unknown>>;
+  assert.equal(versions.length, 2, 'each rotation is its own immutable Version');
+  assert.notEqual(versions[0]?.['credential_ref'], versions[1]?.['credential_ref'], 'each Version names its own credential');
+  assert.equal(JSON.stringify(listed.output).includes('rotated-token'), false, 'no listing ever returns a credential');
+  await source.close();
+});
+
+test('a mapping that names a column the JSON never sends is refused', async () => {
+  const source = await startHttpSource({ replies: [{ body: pageBody(DEVICES.slice(0, 1)) }] });
+  const ready = await readySource(source, {
+    integration: {
+      identity: ['sn'],
+      schema: [
+        { name: 'sn', type: 'string' },
+        { name: 'city', type: 'string' },
+        { name: 'handled_count', type: 'integer' },
+        { name: 'owner', type: 'string' },
+      ],
+      cleaning: [{ rule: 'trim', field: 'sn' }],
+      mapping: { device_sn: 'sn', city: 'city', handled_count: 'handled_count', owner: 'owner' },
+    },
+  });
+  enqueue(ready.fixture, ready.workspaceAdministratorToken, ready.sourceId);
+  const integrated = command(ready.fixture, ['acquisition', 'work', '--source', ready.sourceId], {
+    token: ready.workspaceAdministratorToken,
+  });
+  assert.equal(integrated.status, 2);
+  assert.equal(integrated.error.code, 'INTEGRATION_MAPPING_UNKNOWN_COLUMN', 'a JSON fragment is mapped exactly as strictly as a CSV one');
+  assert.equal(source.requests().length, 1, 'the page was read once and the mapping refused it');
   await source.close();
 });
 

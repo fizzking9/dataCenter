@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { resolveActor } from './auth.js';
-import { actorLabel, deny, reject, type ActionContext } from './authz.js';
+import { actorLabel, deny, reject, type ActionContext, type Actor } from './authz.js';
 import {
   findDataProduct,
   findDataProductVersion,
@@ -9,6 +9,7 @@ import {
   latestDataProductVersion,
   latestDatasetRelease,
   majorLine,
+  type DataProductArtifact,
   type DataProductContract,
   type DataProductMajorLine,
   type DataProductRelease,
@@ -21,7 +22,7 @@ import type { Fail } from './errors.js';
 import { workspaceRoleOf } from './platform.js';
 import { readContract } from './product-contract.js';
 import { nextContractVersion } from './product-version.js';
-import { resolveGrantScope } from './grants.js';
+import { readableGrantScope } from './grants.js';
 import { openPlatform, type PlatformSession } from './session.js';
 import { requireAdministeredSource } from './sources.js';
 
@@ -259,8 +260,11 @@ export function listDataProducts(options: {
       const release = latestDataProductRelease(product);
       if (!version || !release) return [];
       // Discovery is narrowed the same way a read is, so a Grant never hides a
-      // value while still disclosing that it exists.
-      const scope = resolveGrantScope(session, actor.user, role, product, version.contract, fail);
+      // value while still disclosing that it exists. A Grant that no longer
+      // applies to its Contract line hides only its own Product instead of
+      // refusing the whole Workspace listing.
+      const scope = readableGrantScope(session, actor.user.user_id, role, product, version.contract);
+      if (scope === null) return [];
       return [{
         data_product_id: product.data_product_id,
         name: product.name,
@@ -297,18 +301,39 @@ export function listDataProducts(options: {
  * Resolves a Data Product the actor may read in its own Workspace. A Data
  * Product in another Workspace answers exactly like one that does not exist.
  */
-function requireReadableProduct(
+export function requireReadableProduct(
   session: PlatformSession,
-  actor: { user: { user_id: string; username: string } },
+  actor: Actor,
   context: ActionContext,
   dataProductId: string,
-) {
+): DataProductArtifact {
   const product = findDataProduct(session.state.data_products, dataProductId);
   const role = product === undefined
     ? null
     : workspaceRoleOf(session.state, actor.user.user_id, product.workspace_id);
   if (!product || role === null) {
-    deny(session, actor.user.username, context, 'DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product is not available to this actor.');
+    deny(session, actorLabel(actor.user), context, 'DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product is not available to this actor.');
+  }
+  return product;
+}
+
+/**
+ * Resolves a Data Product only a Workspace Administrator may administer. A
+ * member who may merely read it answers exactly like a stranger, so the
+ * existence of the Artifact is never confirmed to an actor who may not govern it.
+ */
+export function requireAdministeredProduct(
+  session: PlatformSession,
+  actor: Actor,
+  context: ActionContext,
+  dataProductId: string,
+): DataProductArtifact {
+  const product = findDataProduct(session.state.data_products, dataProductId);
+  const role = product === undefined
+    ? null
+    : workspaceRoleOf(session.state, actor.user.user_id, product.workspace_id);
+  if (!product || role !== 'Workspace Administrator') {
+    deny(session, actorLabel(actor.user), context, 'DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product is not available to this actor.');
   }
   return product;
 }
@@ -361,13 +386,7 @@ export function withdrawDataProductVersion(options: {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'data_product_withdrawal', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
-  const product = findDataProduct(session.state.data_products, options.dataProductId);
-  const role = product === undefined
-    ? null
-    : workspaceRoleOf(session.state, actor.user.user_id, product.workspace_id);
-  if (!product || role !== 'Workspace Administrator') {
-    deny(session, actorLabel(actor.user), context, 'DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product is not available to this actor.');
-  }
+  const product = requireAdministeredProduct(session, actor, context, options.dataProductId);
   const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
   const version = findDataProductVersion(product, options.version);
   if (!version) {
