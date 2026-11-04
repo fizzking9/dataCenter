@@ -218,10 +218,36 @@ export interface DataProductContract {
 
 export interface DataProductVersion {
   version: number;
+  /** The Contract line this Version belongs to: a major line never changes shape. */
+  contract_version: DataProductContractVersion;
   published_at: string;
   published_by: string;
   contract: DataProductContract;
   contract_hash: string;
+  /** Set when the Version may no longer execute, while its history stays readable. */
+  withdrawn_at: string | null;
+}
+
+/**
+ * The Consumer-facing version of a Contract: a major line only ever grows
+ * additively, so a Consumer pinned to it keeps working as Releases advance.
+ */
+export interface DataProductContractVersion {
+  major: number;
+  minor: number;
+}
+
+/**
+ * One active major Contract line and the Release it currently serves. Each line
+ * advances its own pointer, so publishing a new major never moves a Consumer
+ * pinned to the previous one.
+ */
+export interface DataProductMajorLine {
+  major: number;
+  current_version: number;
+  current_release: number;
+  opened_at: string;
+  withdrawn_at: string | null;
 }
 
 /** One immutable result binding an exact Data Product Version to a Dataset Release. */
@@ -243,6 +269,8 @@ export interface DataProductArtifact {
   created_at: string;
   versions: DataProductVersion[];
   releases: DataProductRelease[];
+  /** One entry per major Contract line ever opened. */
+  lines: DataProductMajorLine[];
 }
 
 export function findSource(sources: SourceRecord[], sourceId: string): SourceRecord | undefined {
@@ -306,4 +334,35 @@ export function latestDataProductRelease(
   product: DataProductArtifact | undefined,
 ): DataProductRelease | undefined {
   return product?.releases[product.releases.length - 1];
+}
+
+/** The major line a query reads when it names none: the newest one still serving. */
+export function activeMajorLine(product: DataProductArtifact | undefined): DataProductMajorLine | undefined {
+  let active: DataProductMajorLine | undefined;
+  for (const line of product?.lines ?? []) {
+    if (line.withdrawn_at !== null) continue;
+    if (active === undefined || line.major > active.major) active = line;
+  }
+  return active;
+}
+
+export function majorLine(
+  product: DataProductArtifact | undefined,
+  major: number,
+): DataProductMajorLine | undefined {
+  return (product?.lines ?? []).find((line) => line.major === major);
+}
+
+export function findDataProductVersion(
+  product: DataProductArtifact | undefined,
+  version: number,
+): DataProductVersion | undefined {
+  return product?.versions.find((candidate) => candidate.version === version);
+}
+
+export function findDataProductRelease(
+  product: DataProductArtifact | undefined,
+  release: number,
+): DataProductRelease | undefined {
+  return product?.releases.find((candidate) => candidate.release === release);
 }

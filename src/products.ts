@@ -2,11 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { resolveActor } from './auth.js';
 import { actorLabel, deny, reject, type ActionContext } from './authz.js';
 import {
+  findDataProduct,
+  findDataProductVersion,
   findDataset,
   latestDataProductRelease,
   latestDataProductVersion,
   latestDatasetRelease,
+  majorLine,
   type DataProductContract,
+  type DataProductMajorLine,
   type DataProductRelease,
   type DataProductVersion,
   type DatasetReleaseRecord,
@@ -16,6 +20,7 @@ import { canonicalDigest } from './crypto.js';
 import type { Fail } from './errors.js';
 import { workspaceRoleOf } from './platform.js';
 import { readContract } from './product-contract.js';
+import { nextContractVersion } from './product-version.js';
 import { openPlatform, type PlatformSession } from './session.js';
 import { requireAdministeredSource } from './sources.js';
 
@@ -99,15 +104,19 @@ export function publishDataProduct(options: {
       created_at: new Date().toISOString(),
       versions: [],
       releases: [],
+      lines: [],
     };
     session.state.data_products.push(product);
   }
+  const contractVersion = nextContractVersion(latestDataProductVersion(product), contract);
   const version: DataProductVersion = {
     version: (latestDataProductVersion(product)?.version ?? 0) + 1,
+    contract_version: contractVersion,
     published_at: new Date().toISOString(),
     published_by: actor.user.user_id,
     contract,
     contract_hash: canonicalDigest(contract),
+    withdrawn_at: null,
   };
   const release: DataProductRelease = {
     release: (latestDataProductRelease(product)?.release ?? 0) + 1,
@@ -119,6 +128,7 @@ export function publishDataProduct(options: {
   };
   product.versions.push(version);
   product.releases.push(release);
+  advanceLine(product, version, release);
 
   session.audit({
     ...scoped,
@@ -129,6 +139,8 @@ export function publishDataProduct(options: {
       data_product_version: version.version,
       data_product_release: release.release,
       dataset_release: release.dataset_release,
+      contract_major: contractVersion.major,
+      contract_minor: contractVersion.minor,
     },
   });
   session.save();
@@ -140,10 +152,38 @@ export function publishDataProduct(options: {
     data_product_version: version.version,
     data_product_release: release.release,
     dataset_release: release.dataset_release,
+    contract_version: { ...contractVersion },
     contract_hash: version.contract_hash,
     published_at: version.published_at,
     released_at: release.created_at,
   };
+}
+
+/**
+ * Advances the major line this Publication belongs to. A line opened by a
+ * breaking change starts its own pointer; the previous line keeps serving the
+ * Release its own Consumers already pin.
+ */
+function advanceLine(
+  product: { lines: DataProductMajorLine[] },
+  version: DataProductVersion,
+  release: DataProductRelease,
+): void {
+  const major = version.contract_version.major;
+  const line = product.lines.find((candidate) => candidate.major === major);
+  if (line === undefined) {
+    product.lines.push({
+      major,
+      current_version: version.version,
+      current_release: release.release,
+      opened_at: release.created_at,
+      withdrawn_at: null,
+    });
+    return;
+  }
+  line.current_version = version.version;
+  line.current_release = release.release;
+  line.withdrawn_at = null;
 }
 
 /**
@@ -236,8 +276,123 @@ export function listDataProducts(options: {
         data_product_version: version.version,
         data_product_release: release.release,
         dataset_release: release.dataset_release,
+        contract_version: { ...version.contract_version },
       }];
     });
   session.audit({ ...context, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { products_returned: visible.length } });
   return { workspace_id: options.workspaceId, data_products: visible };
+}
+
+/**
+ * Resolves a Data Product the actor may read in its own Workspace. A Data
+ * Product in another Workspace answers exactly like one that does not exist.
+ */
+function requireReadableProduct(
+  session: PlatformSession,
+  actor: { user: { user_id: string; username: string } },
+  context: ActionContext,
+  dataProductId: string,
+) {
+  const product = findDataProduct(session.state.data_products, dataProductId);
+  const role = product === undefined
+    ? null
+    : workspaceRoleOf(session.state, actor.user.user_id, product.workspace_id);
+  if (!product || role === null) {
+    deny(session, actor.user.username, context, 'DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product is not available to this actor.');
+  }
+  return product;
+}
+
+/** Lists every Release a Consumer may read, with the Contract line each one served. */
+export function listDataProductReleases(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  dataProductId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'data_product_release_listing', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const product = requireReadableProduct(session, actor, context, options.dataProductId);
+  const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
+  const releases = product.releases.map((release) => {
+    const version = findDataProductVersion(product, release.data_product_version);
+    return {
+      release: release.release,
+      data_product_version: release.data_product_version,
+      contract_version: version === undefined ? null : { ...version.contract_version },
+      withdrawn: version?.withdrawn_at !== null && version?.withdrawn_at !== undefined,
+      dataset_release: release.dataset_release,
+      created_at: release.created_at,
+    };
+  });
+  session.audit({ ...scoped, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { releases_returned: releases.length } });
+  return {
+    data_product_id: product.data_product_id,
+    name: product.name,
+    api_path: product.api_path,
+    lines: product.lines.map((line) => ({ ...line })),
+    releases,
+  };
+}
+
+/**
+ * Withdraws one Data Product Version. A withdrawn Version serves no new query
+ * and, where it was the head of its major line, that line stops advancing until
+ * a later Publication claims it again. History and provenance are preserved.
+ */
+export function withdrawDataProductVersion(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  dataProductId: string;
+  version: number;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'data_product_withdrawal', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const product = findDataProduct(session.state.data_products, options.dataProductId);
+  const role = product === undefined
+    ? null
+    : workspaceRoleOf(session.state, actor.user.user_id, product.workspace_id);
+  if (!product || role !== 'Workspace Administrator') {
+    deny(session, actorLabel(actor.user), context, 'DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product is not available to this actor.');
+  }
+  const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
+  const version = findDataProductVersion(product, options.version);
+  if (!version) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      scoped,
+      'DATA_PRODUCT_VERSION_NOT_FOUND',
+      `This Data Product has no Version ${options.version}.`,
+      'List the Releases the Data Product published before withdrawing one.',
+    );
+  }
+  if (version.withdrawn_at !== null) {
+    return { data_product_id: product.data_product_id, data_product_version: version.version, withdrawn_at: version.withdrawn_at, already_withdrawn: true };
+  }
+  version.withdrawn_at = new Date().toISOString();
+  const line: DataProductMajorLine | undefined = majorLine(product, version.contract_version.major);
+  if (line !== undefined && line.current_version === version.version) {
+    line.withdrawn_at = version.withdrawn_at;
+  }
+  session.audit({
+    ...scoped,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: {
+      data_product_version: version.version,
+      contract_major: version.contract_version.major,
+      line_withdrawn: line?.withdrawn_at === version.withdrawn_at,
+    },
+  });
+  session.save();
+  return {
+    data_product_id: product.data_product_id,
+    data_product_version: version.version,
+    withdrawn_at: version.withdrawn_at,
+    contract_version: { ...version.contract_version },
+  };
 }

@@ -6,7 +6,7 @@ import {
   type DataProductTime,
   type DatasetSchemaField,
 } from './catalog.js';
-import { isRecord, readJsonDocument } from './documents.js';
+import { isRecord } from './documents.js';
 import type { Fail } from './errors.js';
 
 export type QueryOperator =
@@ -32,10 +32,10 @@ const REFUSED_KEYS = [
   'relationship', 'relationships', 'select', 'where', 'having',
 ];
 
-const RECORD_KEYS = ['kind', 'filters', 'limit', 'window'];
+const RECORD_KEYS = ['kind', 'filters', 'limit', 'window', 'cursor', 'release', 'major'];
 const AGGREGATE_KEYS = [
   'kind', 'group_by', 'metrics', 'filters', 'metric_filters',
-  'include_totals', 'sort', 'limit', 'window', 'comparison',
+  'include_totals', 'sort', 'limit', 'window', 'comparison', 'cursor', 'release', 'major',
 ];
 
 /** A request the Query document itself cannot express, whatever the Contract says. */
@@ -63,6 +63,17 @@ export interface Window {
 export interface SortClause {
   by: string;
   direction: 'asc' | 'desc';
+}
+
+/**
+ * Which Release a query reads, and where inside its page sequence it continues.
+ * The Release is resolved before the query is read, because the Contract the
+ * query must satisfy is the one that Release was published with.
+ */
+export interface QueryTarget {
+  release?: number;
+  major?: number;
+  cursor?: string;
 }
 
 export type ParsedQuery =
@@ -335,25 +346,43 @@ function readAggregate(
 }
 
 /**
+ * Reads which Release the query names, and the cursor it continues from. These
+ * are read before the Contract, so a historical Release is answered under its
+ * own Contract rather than under the newest one.
+ */
+export function readQueryTarget(parsed: Record<string, unknown>, fail: Fail): QueryTarget {
+  const positive = (name: 'release' | 'major'): number | undefined => {
+    const raw = parsed[name];
+    if (raw === undefined) return undefined;
+    if (!Number.isInteger(raw) || (raw as number) < 1) {
+      fail(MALFORMED, `A query ${name} must be a whole number of at least 1.`);
+    }
+    return raw as number;
+  };
+  const cursor = parsed['cursor'];
+  if (cursor !== undefined && (typeof cursor !== 'string' || cursor.length === 0)) {
+    fail(MALFORMED, 'A query cursor must be the opaque value a previous page returned.');
+  }
+  const release = positive('release');
+  const major = positive('major');
+  return {
+    ...(release === undefined ? {} : { release }),
+    ...(major === undefined ? {} : { major }),
+    ...(cursor === undefined ? {} : { cursor: cursor as string }),
+  };
+}
+
+/**
  * Reads the Data Product Query a Consumer composes against the Contract. Every
  * surface it names — fields, dimensions, metrics, operators, and windows — must
  * be one the Contract publishes, so nothing ungoverned can reach the records.
  */
-export function readQueryDocument(
-  path: string,
+export function readQuery(
+  parsed: Record<string, unknown>,
   contract: DataProductContract,
   schema: DatasetSchemaField[],
   fail: Fail,
 ): ParsedQuery {
-  const parsed = readJsonDocument(
-    path,
-    fail,
-    MALFORMED,
-    'The Data Product Query document must contain valid JSON.',
-  );
-  if (!isRecord(parsed)) {
-    fail(MALFORMED, 'A Data Product Query must be a JSON object.');
-  }
   const kind = parsed['kind'];
   if (kind === 'records') {
     readShape(parsed, RECORD_KEYS, 'record', fail);

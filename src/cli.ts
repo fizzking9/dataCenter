@@ -14,7 +14,7 @@ import { installDeployment } from './install.js';
 import { adoptIntegrationConfiguration, publishIntegrationConfiguration } from './integration.js';
 import { importLicense, readLicenseSummary } from './license.js';
 import { queryDataProduct } from './product-query.js';
-import { listDataProducts, publishDataProduct } from './products.js';
+import { listDataProductReleases, listDataProducts, publishDataProduct, withdrawDataProductVersion } from './products.js';
 import { createSource } from './sources.js';
 import { deploymentStatus } from './status.js';
 import { readDeployment } from './state.js';
@@ -293,6 +293,18 @@ async function main(): Promise<void> {
   }
   if (command === 'product' && subcommand === 'list') {
     emit(listDataProducts({ ...governed(options), workspaceId: required(options, 'workspace') }));
+    return;
+  }
+  if (command === 'product' && subcommand === 'releases') {
+    emit(listDataProductReleases({ ...governed(options), dataProductId: required(options, 'product') }));
+    return;
+  }
+  if (command === 'product' && subcommand === 'withdraw') {
+    emit(withdrawDataProductVersion({
+      ...governed(options),
+      dataProductId: required(options, 'product'),
+      version: Number(required(options, 'version')),
+    }));
     return;
   }
   if (command === 'product' && subcommand === 'query') {

@@ -1,20 +1,28 @@
 import { resolveActor } from './auth.js';
 import { actorLabel, deny, reject, type ActionContext } from './authz.js';
 import {
+  activeMajorLine,
   findDataProduct,
-  latestDataProductRelease,
-  latestDataProductVersion,
+  findDataProductRelease,
+  findDataProductVersion,
+  majorLine,
+  type DataProductArtifact,
   type DataProductContract,
   type DataProductMetric,
+  type DataProductRelease,
   type DataProductTime,
+  type DataProductVersion,
   type DatasetRecordRow,
   type DatasetReleaseRecord,
   type DatasetSchemaField,
 } from './catalog.js';
+import { canonicalDigest } from './crypto.js';
+import { readJsonDocument } from './documents.js';
 import type { Fail } from './errors.js';
 import { workspaceRoleOf } from './platform.js';
 import { evaluateAggregate, orderGroups, type EvaluatedGroup, type MetricValue } from './product-aggregate.js';
-import { readQueryDocument, type QueryOperator, type Window } from './product-query-document.js';
+import { decodeCursor, encodeCursor } from './product-cursor.js';
+import { readQuery, readQueryTarget, type ParsedQuery, type QueryOperator, type QueryTarget, type Window } from './product-query-document.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
 /** Applies a typed operator the way the field's own type is compared. */
@@ -192,6 +200,171 @@ function metricView(metric: DataProductMetric): Record<string, unknown> {
   };
 }
 
+/** Compares two record values by their own type, never by a host locale. */
+function compareValues(left: string | number | null, right: string | number | null): number {
+  if (left === null && right === null) return 0;
+  if (left === null) return 1;
+  if (right === null) return -1;
+  if (typeof left === 'number' && typeof right === 'number') return left - right;
+  const leftText = String(left);
+  const rightText = String(right);
+  if (leftText === rightText) return 0;
+  return leftText < rightText ? -1 : 1;
+}
+
+/**
+ * Orders records the way a page can be walked and resumed: the Contract's own
+ * grain first, then the record's stable identity, so no two records ever trade
+ * places between pages.
+ */
+function orderRecords(records: DatasetRecordRow[], contract: DataProductContract): DatasetRecordRow[] {
+  return [...records].sort((left, right) => {
+    for (const field of contract.grain) {
+      const comparison = compareValues(left.values[field] ?? null, right.values[field] ?? null);
+      if (comparison !== 0) return comparison;
+    }
+    if (left.identity === right.identity) return 0;
+    return left.identity < right.identity ? -1 : 1;
+  });
+}
+
+interface ResolvedRelease {
+  version: DataProductVersion;
+  release: DataProductRelease;
+  major: number;
+}
+
+/**
+ * Resolves the Release a query reads. A named Release is answered exactly, a
+ * named major line reads that line's own current Release, and a bare query
+ * reads the newest line still serving — never silently the newest data.
+ */
+function resolveRelease(product: DataProductArtifact, target: QueryTarget, fail: Fail): ResolvedRelease {
+  const atRelease = (release: DataProductRelease): ResolvedRelease => {
+    const version = findDataProductVersion(product, release.data_product_version);
+    if (!version) {
+      fail(
+        'DATA_PRODUCT_VERSION_NOT_FOUND',
+        'The Data Product Version this Release pins is no longer available.',
+        'Read the Releases the Data Product publishes.',
+      );
+    }
+    if (version.withdrawn_at !== null) {
+      fail(
+        'DATA_PRODUCT_VERSION_WITHDRAWN',
+        `Data Product Release ${release.release} was withdrawn, so it may not execute a new query.`,
+        'Query the newest active major line instead.',
+      );
+    }
+    return { version, release, major: version.contract_version.major };
+  };
+
+  if (target.release !== undefined) {
+    const release = findDataProductRelease(product, target.release);
+    if (!release) {
+      fail(
+        'DATA_PRODUCT_RELEASE_NOT_FOUND',
+        `This Data Product has no Release ${target.release}.`,
+        'Read the Releases the Data Product publishes.',
+      );
+    }
+    const resolved = atRelease(release);
+    if (target.major !== undefined && resolved.major !== target.major) {
+      fail(
+        'DATA_PRODUCT_RELEASE_NOT_FOUND',
+        `Data Product Release ${target.release} does not belong to Contract major ${target.major}.`,
+        'Query the Release under the major line it was published in.',
+      );
+    }
+    return resolved;
+  }
+
+  const line = target.major === undefined ? undefined : majorLine(product, target.major);
+  if (target.major !== undefined) {
+    if (!line) {
+      fail(
+        'DATA_PRODUCT_MAJOR_NOT_FOUND',
+        `This Data Product has no Contract major ${target.major}.`,
+        'Read the Releases the Data Product publishes to see its Contract lines.',
+      );
+    }
+    if (line.withdrawn_at !== null) {
+      fail(
+        'DATA_PRODUCT_MAJOR_WITHDRAWN',
+        `Contract major ${line.major} was withdrawn, so it serves no new query.`,
+        'Query an active major line or an exact historical Release.',
+      );
+    }
+  }
+  const serving = line ?? activeMajorLine(product);
+  if (!serving) {
+    fail(
+      'DATA_PRODUCT_NOT_PUBLISHED',
+      'The Data Product has no active Publication to query.',
+      'Publish the Data Product again to open a Contract line.',
+    );
+  }
+  const release = findDataProductRelease(product, serving.current_release);
+  if (!release) {
+    fail('DATA_PRODUCT_RELEASE_NOT_FOUND', `This Data Product has no Release ${serving.current_release}.`);
+  }
+  return atRelease(release);
+}
+
+/** The query itself, minus the page position, so a cursor pins what it answered. */
+function normalizeQuery(query: ParsedQuery, release: number, major: number): Record<string, unknown> {
+  if (query.kind === 'records') {
+    return { release, major, kind: 'records', filters: query.filters, window: query.window ?? null };
+  }
+  return {
+    release,
+    major,
+    kind: 'aggregate',
+    group_by: [...query.groupBy],
+    metrics: query.metrics.map((metric) => metric.name),
+    filters: query.filters,
+    metric_filters: query.metricFilters,
+    include_totals: query.includeTotals,
+    sort: query.sort,
+    window: query.window ?? null,
+    comparison: query.comparison ?? null,
+  };
+}
+
+/**
+ * Reads how far into a query a page continues. A cursor answers only the query
+ * and Release it was issued for, and can never point past what that Release
+ * holds.
+ */
+function readOffset(
+  session: PlatformSession,
+  target: QueryTarget,
+  resolved: ResolvedRelease,
+  queryHash: string,
+  available: number,
+  fail: Fail,
+): number {
+  if (target.cursor === undefined) return 0;
+  const payload = decodeCursor(session.dataKey, target.cursor, fail);
+  if (payload.release !== resolved.release.release
+    || payload.major !== resolved.major
+    || payload.queryHash !== queryHash) {
+    fail(
+      'DATA_PRODUCT_QUERY_CURSOR_INVALID',
+      'This page cursor was issued for a different query, Release, or Contract line.',
+      'Read the query again from its first page.',
+    );
+  }
+  if (payload.offset > available) {
+    fail(
+      'DATA_PRODUCT_QUERY_CURSOR_INVALID',
+      'This page cursor points past the results this Release holds.',
+      'Read the query again from its first page.',
+    );
+  }
+  return payload.offset;
+}
+
 /**
  * Answers one Data Product Query against the Data Product Release the Contract
  * was published with, so a later Dataset Release never changes an open Contract.
@@ -221,11 +394,21 @@ export function queryDataProduct(options: {
   }
   const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
 
-  const version = latestDataProductVersion(product);
-  const release = latestDataProductRelease(product);
-  if (!version || !release) {
+  const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), scoped, code, message, nextStep);
+  const request = readJsonDocument(
+    options.requestPath,
+    fail,
+    'DATA_PRODUCT_QUERY_INVALID',
+    'The Data Product Query document must contain valid JSON.',
+  );
+  if (typeof request !== 'object' || request === null || Array.isArray(request)) {
+    fail('DATA_PRODUCT_QUERY_INVALID', 'A Data Product Query must be a JSON object.');
+  }
+  const target = readQueryTarget(request as Record<string, unknown>, fail);
+  if (product.versions.length === 0 || product.releases.length === 0) {
     reject(session, actorLabel(actor.user), scoped, 'DATA_PRODUCT_NOT_PUBLISHED', 'The Data Product has no Publication to query.');
   }
+  const { version, release, major } = resolveRelease(product, target, fail);
   const dataset = session.state.datasets.find((candidate) => candidate.dataset_id === release.dataset_id);
   const datasetRelease: DatasetReleaseRecord | undefined = dataset?.releases.find(
     (candidate) => candidate.release === release.dataset_release,
@@ -240,8 +423,8 @@ export function queryDataProduct(options: {
     ?.schema ?? [];
   const source = session.state.sources.find((candidate) => candidate.source_id === dataset.source_id);
 
-  const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), scoped, code, message, nextStep);
-  const query = readQueryDocument(options.requestPath, contract, schema, fail);
+  const query = readQuery(request as Record<string, unknown>, contract, schema, fail);
+  const queryHash = canonicalDigest(normalizeQuery(query, release.release, major));
 
   const scanned = datasetRelease.records.length;
   if (scanned > contract.limits.max_scanned_records) {
@@ -268,6 +451,7 @@ export function queryDataProduct(options: {
     api_path: product.api_path,
     data_product_version: version.version,
     data_product_release: release.release,
+    contract_version: { ...version.contract_version },
     contract_hash: version.contract_hash,
   };
   const coverage = contract.time === undefined ? null : coverageOf(datasetRelease.records, contract.time);
@@ -285,14 +469,20 @@ export function queryDataProduct(options: {
   };
 
   if (query.kind === 'records') {
-    const selected = selectRecords(datasetRelease.records, contract, query.filters, query.window);
-    const projected = selected.slice(0, query.limit).map((record) => {
+    const selected = orderRecords(
+      selectRecords(datasetRelease.records, contract, query.filters, query.window),
+      contract,
+    );
+    const offset = readOffset(session, target, { version, release, major }, queryHash, selected.length, fail);
+    const page = selected.slice(offset, offset + query.limit);
+    const projected = page.map((record) => {
       const values: Record<string, string | number | null> = {};
       for (const field of contract.fields) {
         values[field.name] = record.values[field.name] ?? null;
       }
       return values;
     });
+    const more = offset + projected.length < selected.length;
     requireBudget();
     session.audit({
       ...scoped,
@@ -306,7 +496,15 @@ export function queryDataProduct(options: {
       records: projected,
       matched_count: selected.length,
       returned: projected.length,
-      truncated: selected.length > projected.length,
+      truncated: more,
+      next_cursor: more
+        ? encodeCursor(session.dataKey, {
+          release: release.release,
+          major,
+          queryHash,
+          offset: offset + projected.length,
+        })
+        : null,
       limit: query.limit,
       scanned_records: scanned,
       ...(query.window === undefined || contract.time === undefined
@@ -332,7 +530,10 @@ export function queryDataProduct(options: {
       'Group by fewer dimensions or narrow the query.',
     );
   }
-  const returned = orderGroups(merged, query.sort).slice(0, query.limit);
+  const ordered = orderGroups(merged, query.sort);
+  const offset = readOffset(session, target, { version, release, major }, queryHash, ordered.length, fail);
+  const returned = ordered.slice(offset, offset + query.limit);
+  const more = offset + returned.length < ordered.length;
   requireBudget();
 
   session.audit({
@@ -371,7 +572,15 @@ export function queryDataProduct(options: {
       : null,
     groups_total: merged.length,
     returned: returned.length,
-    truncated: merged.length > returned.length,
+    truncated: more,
+    next_cursor: more
+      ? encodeCursor(session.dataKey, {
+        release: release.release,
+        major,
+        queryHash,
+        offset: offset + returned.length,
+      })
+      : null,
     limit: query.limit,
     scanned_records: scanned,
     ...(query.window === undefined || contract.time === undefined
