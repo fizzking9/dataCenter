@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { consoleApi, type SessionView } from './api.js';
 import { t } from './i18n/zh-CN.js';
+import { PlatformApp } from './PlatformApp.js';
 import { ConsoleScreen } from './screens/ConsoleScreen.js';
 import { EnrollmentScreen } from './screens/EnrollmentScreen.js';
 import { SignInScreen } from './screens/SignInScreen.js';
@@ -17,7 +18,17 @@ function fragmentSecret(): string {
   return window.location.hash.replace(/^#/u, '');
 }
 
+/**
+ * Two browser applications share one build and one origin: the Operator Console
+ * (a separate authentication channel) at `/`, and the platform User application
+ * at `/app`. Neither ever reads the other's session.
+ */
 export function App() {
+  const pathname = window.location.pathname.replace(/\/+$/u, '');
+  return pathname === '/app' || pathname.startsWith('/app/') ? <PlatformApp /> : <OperatorApp />;
+}
+
+function OperatorApp() {
   const [path, setPath] = useState<Path>(currentPath);
   const [fragment, setFragment] = useState<string>(fragmentSecret);
   const [session, setSession] = useState<SessionView | null>(null);

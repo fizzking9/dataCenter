@@ -529,3 +529,250 @@ body {
     transition-duration: 1ms !important;
   }
 }
+
+/* The platform User application: a persistent session bar, two separate
+   navigation trees, the active Workspace, and an activity centre. */
+
+.panel__title--page {
+  font-size: 20px;
+  letter-spacing: 0.01em;
+}
+
+.platform {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.platform-session {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+}
+
+.platform-session__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 32px;
+  margin: 0;
+}
+
+.platform-session__fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.platform-session__fact dt {
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-muted);
+}
+
+.platform-session__fact dd {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.platform-session__switch {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
+}
+
+.platform__body {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr) 250px;
+  gap: 20px;
+  align-items: start;
+}
+
+.platform__trees {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.platform-nav__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.platform-nav__link {
+  display: block;
+  padding: 6px 10px;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius);
+  color: var(--ink-soft);
+  text-decoration: none;
+  font-size: 13.5px;
+}
+
+.platform-nav__link:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.platform-nav__link--active {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.platform__content {
+  min-width: 0;
+}
+
+.platform-activity {
+  position: sticky;
+  top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+}
+
+.platform-activity__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.platform-activity__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.platform-activity__heading {
+  margin: 0 0 6px;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--ink-muted);
+}
+
+.platform-activity__empty {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--ink-muted);
+}
+
+.platform-activity__items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.platform-activity__item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.platform-activity__state {
+  font-weight: 600;
+}
+
+.platform-activity__since {
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.picker__item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.picker__role {
+  font-size: 12.5px;
+  color: var(--ink-muted);
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.data-table th {
+  padding: 10px 12px 8px 0;
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--ink-muted);
+}
+
+.data-table td {
+  padding: 9px 12px 9px 0;
+  border-bottom: 1px dotted var(--rule);
+  vertical-align: top;
+}
+
+.data-table tr:last-child td {
+  border-bottom: none;
+}
+
+.data-table__mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.context__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+  margin: 4px 0 14px;
+  font-size: 12.5px;
+  color: var(--ink-muted);
+}
+
+.context__meta code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+@media (max-width: 980px) {
+  .platform__body {
+    grid-template-columns: 1fr;
+  }
+
+  .platform-activity {
+    position: static;
+  }
+}
