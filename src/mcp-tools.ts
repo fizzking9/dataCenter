@@ -41,12 +41,15 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: 'read_data_product_contract',
     title: 'Read Data Product Contract',
-    description: 'Reads the Contract of one published Data Product: its fields, dimensions, metrics, grain, time, filters, and limits, narrowed to what this Agent Identity may read.',
+    description: 'Reads the Contract of one published Data Product in one Workspace: its fields, dimensions, metrics, grain, time, filters, and limits, narrowed to what this Agent Identity may read.',
     scopes: ['mcp:read'],
     inputSchema: {
       type: 'object',
-      properties: { data_product_id: { type: 'string', description: 'The Data Product whose Contract to read.' } },
-      required: ['data_product_id'],
+      properties: {
+        workspace_id: { type: 'string', description: 'The Workspace the Data Product belongs to.' },
+        data_product_id: { type: 'string', description: 'The Data Product whose Contract to read.' },
+      },
+      required: ['workspace_id', 'data_product_id'],
       additionalProperties: false,
     },
   },
@@ -58,10 +61,11 @@ export const MCP_TOOLS: McpTool[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        workspace_id: { type: 'string', description: 'The Workspace the Data Product belongs to.' },
         data_product_id: { type: 'string', description: 'The Data Product to query.' },
         query: { type: 'object', description: 'The Data Product Query document, exactly as the Data Product API accepts it.' },
       },
-      required: ['data_product_id', 'query'],
+      required: ['workspace_id', 'data_product_id', 'query'],
       additionalProperties: false,
     },
   },
@@ -183,7 +187,13 @@ function readContract(
   args: Record<string, unknown>,
   context: ActionContext,
 ): Record<string, unknown> {
-  const product = requireAgentProduct(session, grant, requireText(args, 'data_product_id'), context);
+  const product = requireAgentProduct(
+    session,
+    grant,
+    requireText(args, 'workspace_id'),
+    requireText(args, 'data_product_id'),
+    context,
+  );
   const version = latestDataProductVersion(product);
   const release = latestDataProductRelease(product);
   if (!version || !release) {
@@ -207,7 +217,13 @@ function query(
   args: Record<string, unknown>,
   context: ActionContext,
 ): Record<string, unknown> {
-  const product = requireAgentProduct(session, grant, requireText(args, 'data_product_id'), context);
+  const product = requireAgentProduct(
+    session,
+    grant,
+    requireText(args, 'workspace_id'),
+    requireText(args, 'data_product_id'),
+    context,
+  );
   const request = args['query'];
   if (typeof request !== 'object' || request === null || Array.isArray(request)) {
     throw new ToolError('MCP_ARGUMENT_INVALID', 'The query argument must be a Data Product Query document.', { field: 'query' });
@@ -215,25 +231,39 @@ function query(
   const fail: Fail = (code, message, nextStep) => {
     throw new ToolError(code, message, { nextStep });
   };
-  return executeDataProductQuery({ session, reader, product, context, request, fail });
+  // The governed read records itself under its own action, beside the surface
+  // event that names the tool and the OAuth client that invoked it.
+  return executeDataProductQuery({
+    session,
+    reader,
+    product,
+    context: { ...context, action: 'data_product_query' },
+    request,
+    fail,
+  });
 }
 
 /**
- * Resolves a Data Product this Agent Identity may read. An Agent Identity is not
- * a Workspace member, so a Workspace it is not bound to answers exactly like a
- * Data Product that does not exist.
+ * Resolves a Data Product this Agent Identity may read in the Workspace the call
+ * names. An Agent Identity is not a Workspace member, so a Workspace it is not
+ * bound to answers exactly like one that does not exist, and a Data Product
+ * reached through another Workspace's identifier is refused outright.
  */
 function requireAgentProduct(
   session: PlatformSession,
   grant: AccessTokenGrant,
+  workspaceId: string,
   dataProductId: string,
   context: ActionContext,
 ): DataProductArtifact {
+  context.workspace_id = workspaceId;
+  if (!grant.agent.workspace_ids.includes(workspaceId)) {
+    throw new ToolError('WORKSPACE_ACCESS_DENIED', 'The Workspace is not available to this Agent Identity.');
+  }
   const product = findDataProduct(session.state.data_products, dataProductId);
-  if (!product || !grant.agent.workspace_ids.includes(product.workspace_id)) {
+  if (!product || product.workspace_id !== workspaceId) {
     throw new ToolError('DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product is not available to this Agent Identity.');
   }
-  context.workspace_id = product.workspace_id;
   context.target = product.data_product_id;
   return product;
 }

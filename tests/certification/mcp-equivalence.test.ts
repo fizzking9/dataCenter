@@ -42,6 +42,7 @@ test('MCP answers direct Data Product Queries exactly as the Data Product API an
     const api = (query: Record<string, unknown>) => callApi(console.url, path, { body: query, token: consumerToken });
     const mcp = async (query: Record<string, unknown>) => toolPayload(
       await callTool(console.url, agentToken, 'query_data_product', {
+        workspace_id: workspaceId,
         data_product_id: product.dataProductId,
         query,
       }),
@@ -90,6 +91,7 @@ test('MCP answers direct Data Product Queries exactly as the Data Product API an
     assert.equal(apiRefused.status, 403, apiRefused.text);
     assert.equal(apiRefused.body['code'], 'DATA_PRODUCT_QUERY_REFUSED');
     const mcpRefused = await callTool(console.url, agentToken, 'query_data_product', {
+      workspace_id: workspaceId,
       data_product_id: product.dataProductId,
       query: refusedQuery,
     });
@@ -103,6 +105,7 @@ test('MCP answers direct Data Product Queries exactly as the Data Product API an
     assert.equal(apiMalformed.status, 400, apiMalformed.text);
     assert.equal(apiMalformed.body['code'], 'DATA_PRODUCT_QUERY_INVALID');
     const mcpMalformed = await callTool(console.url, agentToken, 'query_data_product', {
+      workspace_id: workspaceId,
       data_product_id: product.dataProductId,
       query: malformed,
     });

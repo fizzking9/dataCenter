@@ -48,6 +48,7 @@ test('MCP exposes generic discovery, Contract, and direct-query tools narrowed t
     assert.deepEqual(view['dimensions'], ['city']);
 
     const contract = toolPayload(await callTool(console.url, token, 'read_data_product_contract', {
+      workspace_id: workspaceId,
       data_product_id: product.dataProductId,
     }));
     assert.equal(contract['title'], '设备维修台账');
@@ -57,6 +58,7 @@ test('MCP exposes generic discovery, Contract, and direct-query tools narrowed t
     assert.deepEqual(contract['limits'], { max_scanned_records: 100_000, max_groups: 10_000, max_execution_ms: 5_000 });
 
     const answered = toolPayload(await callTool(console.url, token, 'query_data_product', {
+      workspace_id: workspaceId,
       data_product_id: product.dataProductId,
       query: { kind: 'records' },
     }));
@@ -69,6 +71,7 @@ test('MCP exposes generic discovery, Contract, and direct-query tools narrowed t
 
     // A column the Grant hides cannot even be filtered on: that would disclose it.
     const refused = await callTool(console.url, token, 'query_data_product', {
+      workspace_id: workspaceId,
       data_product_id: product.dataProductId,
       query: { kind: 'records', filters: [{ field: 'handled_count', op: 'equals', value: 3 }] },
     });
@@ -79,7 +82,10 @@ test('MCP exposes generic discovery, Contract, and direct-query tools narrowed t
     assert.equal(refusal.retryable, false);
 
     // An argument the tool cannot act on is refused by name, not guessed at.
-    const missingArgument = await callTool(console.url, token, 'query_data_product', { data_product_id: product.dataProductId });
+    const missingArgument = await callTool(console.url, token, 'query_data_product', {
+      workspace_id: workspaceId,
+      data_product_id: product.dataProductId,
+    });
     assert.equal(mcpResult(missingArgument)['isError'], true);
     assert.equal(toolFailure(missingArgument).code, 'MCP_ARGUMENT_INVALID');
     assert.equal(toolFailure(missingArgument).field, 'query');
@@ -108,6 +114,7 @@ test('MCP exposes generic discovery, Contract, and direct-query tools narrowed t
     assert.deepEqual(mcpResult(nlqListed)['tools'], []);
 
     const nlqDenied = await callTool(console.url, nlqToken, 'query_data_product', {
+      workspace_id: workspaceId,
       data_product_id: product.dataProductId,
       query: { kind: 'records' },
     });
