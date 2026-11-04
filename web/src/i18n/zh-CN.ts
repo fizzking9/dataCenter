@@ -103,6 +103,24 @@ export const catalog = {
   'error.unknown': '出现未预期的错误，请重试。',
   'error.code': '错误代码',
   'error.retry': '重试',
+  // Acquisition status the connector reports: the governed value stays ASCII in
+  // the API and the CLI, and only its disclosure is translated here.
+  'value.state.queued': '排队中',
+  'value.state.running': '采集中',
+  'value.state.complete': '已完成',
+  'value.state.failed': '失败',
+  'value.state.cancelled': '已取消',
+  'value.state.intervention_required': '需要人工干预',
+  'value.state.valid': '有效',
+  'value.state.invalid': '已失效',
+  'value.pacing.fifo': '按连接先后排队',
+  'value.pacing.serialization': '串行执行中',
+  'value.pacing.concurrency': '并发额度已满',
+  'value.pacing.interval': '最小间隔未到',
+  'value.pacing.rate': '速率额度已满',
+  'value.window.fixed': '固定窗口',
+  'value.window.incremental': '增量窗口',
+  'value.window.backfill': '手工回补',
 } as const;
 
 export type MessageKey = keyof typeof catalog;
