@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type {
+  AcquisitionConnectionArtifact,
+  AcquisitionPlanRecord,
   AcquisitionRunRecord,
   DataProductArtifact,
   DataProductGrantRecord,
@@ -9,6 +11,7 @@ import type {
   IntegrationBatchRecord,
   IntegrationConfigurationArtifact,
   RawAcquisitionRecord,
+  SourceAcquisitionArtifact,
   SourceRecord,
 } from './catalog.js';
 import type { MfaRecord } from './enrollment.js';
@@ -19,7 +22,7 @@ export type DeploymentRole = 'Deployment Administrator';
 export type WorkspaceRole = 'Workspace Administrator' | 'Consumer';
 
 export const DEPLOYMENT_CONTEXT_ARTIFACT = 'deployment-business-context';
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 export const USERNAME_PATTERN = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,189}$/;
 
 export interface UserRecord {
@@ -89,6 +92,9 @@ export interface PlatformState {
   sessions: SessionRecord[];
   context_artifacts: ContextArtifact[];
   sources: SourceRecord[];
+  acquisition_connections: AcquisitionConnectionArtifact[];
+  source_acquisitions: SourceAcquisitionArtifact[];
+  acquisition_plans: AcquisitionPlanRecord[];
   integration_configurations: IntegrationConfigurationArtifact[];
   raw_acquisitions: RawAcquisitionRecord[];
   acquisition_runs: AcquisitionRunRecord[];
@@ -128,6 +134,9 @@ export function readPlatform(root: string): PlatformState {
         sessions: [],
         context_artifacts: [],
         sources: [],
+        acquisition_connections: [],
+        source_acquisitions: [],
+        acquisition_plans: [],
         integration_configurations: [],
         raw_acquisitions: [],
         acquisition_runs: [],
@@ -141,6 +150,9 @@ export function readPlatform(root: string): PlatformState {
   // Collections start empty rather than failing the read closed.
   state.schema_version = CURRENT_SCHEMA_VERSION;
   state.sources ??= [];
+  state.acquisition_connections ??= [];
+  state.source_acquisitions ??= [];
+  state.acquisition_plans ??= [];
   state.integration_configurations ??= [];
   state.raw_acquisitions ??= [];
   state.acquisition_runs ??= [];
@@ -149,6 +161,12 @@ export function readPlatform(root: string): PlatformState {
   state.data_products ??= [];
   state.data_product_grants ??= [];
   state.exports ??= [];
+  // A Run recorded before acquisition was queued still reads as a completed
+  // manual attempt rather than a Run that never started.
+  for (const run of state.acquisition_runs) {
+    run.trigger ??= 'manual';
+    run.queued_at ??= run.started_at ?? new Date().toISOString();
+  }
   // A Data Product published before Contract lines existed belongs to the single
   // line its oldest Contract states, so an older Deployment keeps serving it.
   for (const product of state.data_products) {

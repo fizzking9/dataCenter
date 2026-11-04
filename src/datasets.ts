@@ -34,8 +34,80 @@ interface IntegrationOutcome {
   rejections: RecordRejection[];
 }
 
+/** One fragment's source records, whichever representation acquired them. */
+interface FragmentTable {
+  header: string[];
+  rows: Array<{ row: number; cells: string[] }>;
+}
+
 function digest(value: unknown): string {
   return canonicalDigest(value);
+}
+
+/** Reads the array of records out of a JSON response body at its configured path. */
+function recordsAt(body: unknown, recordPath: string | null): unknown {
+  if (recordPath === null) return body;
+  let current: unknown = body;
+  for (const segment of recordPath.split('.')) {
+    if (typeof current !== 'object' || current === null || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+function cellOf(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return JSON.stringify(value);
+}
+
+/**
+ * Reads one Raw Acquisition the way its Source was acquired: a manual upload is
+ * CSV, and a connector page is the JSON the Plan's record path names. Both become
+ * the same header-and-rows table, so one Integration Configuration applies to
+ * either without knowing which connector produced the fragment.
+ */
+function fragmentTable(
+  session: PlatformSession,
+  actor: Actor,
+  context: ActionContext,
+  version: IntegrationConfigurationVersion,
+  raw: RawAcquisitionRecord,
+  text: string,
+): FragmentTable {
+  const source = session.state.sources.find((candidate) => candidate.source_id === raw.source_id);
+  if (source?.type !== 'http_json') {
+    const document = parseCsv(text, (code, message) => reject(session, actorLabel(actor.user), context, code, message));
+    return { header: document.header, rows: document.rows };
+  }
+  const plan = session.state.acquisition_plans.find(
+    (candidate) => candidate.acquisition_run_id === raw.acquisition_run_id
+      && candidate.pages.some((page) => page.raw_id === raw.raw_id),
+  );
+  const acquisition = session.state.source_acquisitions
+    .find((candidate) => candidate.source_id === raw.source_id)
+    ?.versions.find((candidate) => candidate.version === plan?.acquisition_configuration_version);
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    reject(session, actorLabel(actor.user), context, 'INTEGRATION_FRAGMENT_MALFORMED', 'A connector Raw Acquisition does not hold the JSON its Plan read.');
+  }
+  const records = recordsAt(body, acquisition?.record_path ?? null);
+  if (!Array.isArray(records)) {
+    reject(session, actorLabel(actor.user), context, 'INTEGRATION_FRAGMENT_MALFORMED', 'A connector Raw Acquisition holds no records array at its configured path.');
+  }
+  const header = Object.keys(version.mapping);
+  return {
+    header,
+    rows: records.map((record, index) => ({
+      row: index + 1,
+      cells: header.map((column) => cellOf(
+        typeof record === 'object' && record !== null ? (record as Record<string, unknown>)[column] : undefined,
+      )),
+    })),
+  };
 }
 
 function applyCleaning(rules: CleaningRule[], field: string, value: string): { value: string } | { rejected: string } {
@@ -109,7 +181,7 @@ function integrate(
     } catch {
       reject(session, actorLabel(actor.user), context, 'RAW_ACQUISITION_UNAVAILABLE', 'A Raw Acquisition for this Batch cannot be read.');
     }
-    const document = parseCsv(text, (code, message) => reject(session, actorLabel(actor.user), context, code, message));
+    const document = fragmentTable(session, actor, context, version, raw, text);
     const unknown = mapped.map(([column]) => column).filter((column) => !document.header.includes(column));
     if (unknown.length > 0) {
       reject(

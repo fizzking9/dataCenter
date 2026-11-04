@@ -2,10 +2,24 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { uploadAcquisition } from './acquisition.js';
+import {
+  acquisitionQueue,
+  enqueueAcquisition,
+  listSourceAcquisition,
+  tickSchedules,
+  workAcquisition,
+} from './acquisition-run.js';
 import { listAuditEvents } from './audit-view.js';
 import { login, logout } from './auth.js';
 import { issueOperatorEnrollment, revokeOperator, revokeOperatorEnrollment } from './operators.js';
 import { startConsoleServer } from './console-server.js';
+import {
+  adoptConnection,
+  adoptSourceAcquisition,
+  listConnections,
+  publishConnection,
+  publishSourceAcquisition,
+} from './connections.js';
 import { publishCommonContext, publishWorkspaceContext, showContext } from './context.js';
 import { releaseDataset, showDataset } from './datasets.js';
 import { OperatorError } from './errors.js';
@@ -25,9 +39,12 @@ import { createWorkspace, grantMembership, listWorkspaces, revokeMembership } fr
 
 const GROUPED_COMMANDS = new Set([
   'user', 'workspace', 'membership', 'ownership', 'context', 'audit',
-  'source', 'integration', 'acquisition', 'dataset', 'product', 'grant', 'export', 'console',
+  'source', 'connection', 'acquisition', 'acquisition-config', 'integration', 'dataset',
+  'product', 'grant', 'export', 'console',
 ]);
-const BOOLEAN_FLAGS = new Set(['admin-password-stdin', 'password-stdin', 'deployment-administrator']);
+const BOOLEAN_FLAGS = new Set([
+  'admin-password-stdin', 'password-stdin', 'deployment-administrator', 'credential-stdin',
+]);
 
 interface Invocation {
   command: string;
@@ -245,6 +262,67 @@ async function main(): Promise<void> {
       workspaceId: required(options, 'workspace'),
       name: required(options, 'name'),
       type: required(options, 'type'),
+    }));
+    return;
+  }
+  if (command === 'source' && subcommand === 'list') {
+    emit(listSourceAcquisition({ ...governed(options), workspaceId: required(options, 'workspace') }));
+    return;
+  }
+  if (command === 'connection' && subcommand === 'publish') {
+    emit(publishConnection({
+      ...governed(options),
+      workspaceId: required(options, 'workspace'),
+      name: required(options, 'name'),
+      configPath: required(options, 'config'),
+      ...(options.get('credential-stdin') === 'true' ? { credential: readStdin() } : {}),
+    }));
+    return;
+  }
+  if (command === 'connection' && subcommand === 'adopt') {
+    emit(adoptConnection({
+      ...governed(options),
+      connectionId: required(options, 'connection'),
+      version: Number(required(options, 'version')),
+    }));
+    return;
+  }
+  if (command === 'connection' && subcommand === 'list') {
+    emit(listConnections({ ...governed(options), workspaceId: required(options, 'workspace') }));
+    return;
+  }
+  if (command === 'acquisition-config' && subcommand === 'publish') {
+    emit(publishSourceAcquisition({
+      ...governed(options),
+      sourceId: required(options, 'source'),
+      configPath: required(options, 'config'),
+    }));
+    return;
+  }
+  if (command === 'acquisition-config' && subcommand === 'adopt') {
+    emit(adoptSourceAcquisition({
+      ...governed(options),
+      sourceId: required(options, 'source'),
+      version: Number(required(options, 'version')),
+    }));
+    return;
+  }
+  if (command === 'acquisition' && subcommand === 'enqueue') {
+    emit(enqueueAcquisition({ ...governed(options), sourceId: required(options, 'source') }));
+    return;
+  }
+  if (command === 'acquisition' && subcommand === 'work') {
+    emit(await workAcquisition({ ...governed(options), sourceId: required(options, 'source') }));
+    return;
+  }
+  if (command === 'acquisition' && subcommand === 'queue') {
+    emit(acquisitionQueue({ ...governed(options), sourceId: required(options, 'source') }));
+    return;
+  }
+  if (command === 'acquisition' && subcommand === 'tick') {
+    emit(tickSchedules({
+      ...governed(options),
+      ...(options.has('at') ? { at: required(options, 'at') } : {}),
     }));
     return;
   }

@@ -5,8 +5,19 @@
  * Workspace and a missing identifier never resolves across Workspaces.
  */
 
-/** First release acquisition types; business APIs and scrapers arrive later. */
-export type SourceType = 'file';
+/** First release acquisition types: a hand-uploaded file or a declarative JSON endpoint. */
+export type SourceType = 'file' | 'http_json';
+
+/** The one connector this release ships, named and versioned so a Plan pins it. */
+export const HTTP_JSON_CONNECTOR = { name: 'http-json', version: 1 } as const;
+
+/** An encrypted secret as the Deployment stores it; the plaintext never leaves memory. */
+export interface SealedSecret {
+  algorithm: 'AES-256-GCM';
+  iv: string;
+  ciphertext: string;
+  tag: string;
+}
 
 /** The exact textual shapes a canonical `date` and `timestamp` value holds. */
 export const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -82,13 +93,110 @@ export interface AcquisitionRunRecord {
   acquisition_run_id: string;
   workspace_id: string;
   source_id: string;
-  mode: 'manual_upload';
-  integration_configuration_version: number;
+  mode: 'manual_upload' | 'connector';
+  trigger: 'manual' | 'scheduled';
+  integration_configuration_version: number | null;
   attempts: number;
-  status: 'complete' | 'failed';
-  started_at: string;
-  completed_at: string;
+  status: 'queued' | 'running' | 'complete' | 'failed';
+  queued_at: string;
+  started_at: string | null;
+  completed_at: string | null;
   raw_acquisition_ids: string[];
+  error_code?: string | null;
+}
+
+/** How a paginated endpoint signals that the last page has been read. */
+export type PaginationCompletion =
+  | { kind: 'empty_page' }
+  | { kind: 'short_page' }
+  | { kind: 'last_page_flag'; flag: string; done_value: boolean };
+
+/** How one Connection asks for its next page. */
+export interface ConnectionPagination {
+  parameter: string;
+  size_parameter: string | null;
+  start: number;
+  size: number;
+  max_pages: number;
+}
+
+/** One immutable Acquisition Connection Version: endpoint, auth scheme, and policy. */
+export interface AcquisitionConnectionVersion {
+  version: number;
+  published_at: string;
+  published_by: string;
+  base_url: string;
+  /** The name of the stored credential, never the credential itself. */
+  credential_ref: string;
+  pagination: ConnectionPagination;
+  schedule: { every_minutes: number } | null;
+  content_hash: string;
+}
+
+/** A Workspace-owned Connection shared by the Sources of one physical system. */
+export interface AcquisitionConnectionArtifact {
+  connection_id: string;
+  workspace_id: string;
+  name: string;
+  owner_user_id: string;
+  created_at: string;
+  adopted_version: number | null;
+  versions: AcquisitionConnectionVersion[];
+  credential: SealedSecret | null;
+}
+
+/** One immutable per-Source acquisition configuration, pinning its Connection. */
+export interface SourceAcquisitionVersion {
+  version: number;
+  published_at: string;
+  published_by: string;
+  connection_id: string;
+  connection_version: number;
+  connector: { name: string; version: number };
+  path: string;
+  record_path: string | null;
+  completion: PaginationCompletion;
+  content_hash: string;
+}
+
+/** A Source's acquisition configuration Artifact and the version it adopted. */
+export interface SourceAcquisitionArtifact {
+  source_id: string;
+  workspace_id: string;
+  owner_user_id: string;
+  adopted_version: number | null;
+  versions: SourceAcquisitionVersion[];
+}
+
+/** One page a Plan must complete, and what became of it. */
+export interface AcquisitionPlanPage {
+  page: number;
+  raw_id: string | null;
+  outcome: 'received' | 'empty' | 'failed';
+  record_count: number | null;
+  error_code: string | null;
+}
+
+/**
+ * The immutable set of pages one Acquisition Run attempt must complete before
+ * its result may become an Integration Batch. It is durable before the first
+ * request, so an interrupted attempt keeps the pages it really read.
+ */
+export interface AcquisitionPlanRecord {
+  plan_id: string;
+  workspace_id: string;
+  source_id: string;
+  acquisition_run_id: string;
+  trigger: 'manual' | 'scheduled';
+  connector: { name: string; version: number };
+  connection_id: string;
+  connection_version: number;
+  acquisition_configuration_version: number;
+  integration_configuration_version: number;
+  pages: AcquisitionPlanPage[];
+  status: 'planned' | 'complete' | 'partial' | 'failed';
+  created_at: string;
+  completed_at: string | null;
 }
 
 /** The complete handoff from one successful Acquisition Run to integration. */

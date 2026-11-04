@@ -38,6 +38,16 @@ export function uploadAcquisition(options: {
   const actor = resolveActor(session, options.token, context);
   const source = requireAdministeredSource(session, actor, context, options.sourceId);
   const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
+  if (source.type !== 'file') {
+    reject(
+      session,
+      actorLabel(actor.user),
+      scoped,
+      'ACQUISITION_MODE_MISMATCH',
+      'This Source is acquired by a connector, so it is never acquired by a hand upload.',
+      'Queue an Acquisition Run for the Source instead.',
+    );
+  }
 
   const configuration = adoptedIntegrationVersion(
     findIntegrationConfiguration(session.state.integration_configurations, source.source_id),
@@ -87,12 +97,15 @@ export function uploadAcquisition(options: {
     workspace_id: source.workspace_id,
     source_id: source.source_id,
     mode: 'manual_upload',
+    trigger: 'manual',
     integration_configuration_version: configuration.version,
     attempts: 1,
     status: 'complete',
+    queued_at: now,
     started_at: now,
     completed_at: now,
     raw_acquisition_ids: [rawId],
+    error_code: null,
   };
   const batch: IntegrationBatchRecord = {
     batch_id: batchId,
