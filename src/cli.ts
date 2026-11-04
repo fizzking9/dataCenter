@@ -404,7 +404,10 @@ async function main(): Promise<void> {
     emit(publishGrant({
       ...governed(options),
       dataProductId: required(options, 'product'),
-      username: required(options, 'username'),
+      // A Grant narrows exactly one principal: a Workspace member or an Agent Identity.
+      ...(options.has('agent')
+        ? { agentIdentityId: required(options, 'agent') }
+        : { username: required(options, 'username') }),
       requestPath: required(options, 'request'),
     }));
     return;

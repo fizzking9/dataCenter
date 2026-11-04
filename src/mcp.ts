@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { issueAccessToken, OAuthError, resolveAccessToken } from './agents.js';
+import { callTool, findTool, listTools } from './mcp-tools.js';
 import { openPlatform } from './session.js';
 
 /** The one protocol revision this Deployment serves; older peers cannot fall forward into it. */
@@ -277,9 +278,25 @@ async function resolveAuthenticated(
   }
   const scopes = new Set(grant.scopes);
   if (context.jsonrpcMethod === 'tools/list') {
-    return { tools: TOOLS.filter((tool) => tool.scopes.every((scope) => scopes.has(scope))).map(toolView) };
+    return { tools: listTools(scopes) };
   }
-  return callTool(session, grant, context.params);
+  const name = typeof context.params['name'] === 'string' ? context.params['name'] : '';
+  const tool = findTool(name);
+  if (tool === undefined) {
+    throw new McpFailure(400, 'MCP_TOOL_NOT_FOUND', `${name} is not a tool this Deployment publishes.`, INVALID_PARAMS);
+  }
+  // A tool the Agent Identity's scopes do not cover is not invocable at all,
+  // even if a client guesses its name.
+  if (!tool.scopes.every((scope) => scopes.has(scope))) {
+    throw new McpFailure(
+      403,
+      'MCP_SCOPE_REQUIRED',
+      `This Agent Identity does not hold the ${tool.scopes.join(', ')} scope ${tool.name} requires.`,
+      -1,
+      { required: [...tool.scopes] },
+    );
+  }
+  return callTool(session, grant, tool, context.params['arguments']);
 }
 
 /** Reads the Bearer credential a request presents, or nothing at all. */
@@ -289,60 +306,6 @@ function bearerToken(request: IncomingMessage): string | undefined {
   const match = /^Bearer +([A-Za-z0-9._~+/-]+=*)$/i.exec(header.trim());
   return match?.[1];
 }
-
-interface McpTool {
-  name: string;
-  title: string;
-  description: string;
-  scopes: string[];
-  inputSchema: Record<string, unknown>;
-}
-
-/**
- * The generic read-only tools this Deployment publishes. They are driven by the
- * Contract, so no Data Product ever gets a bespoke tool.
- */
-const TOOLS: McpTool[] = [
-  {
-    name: 'discover_data_products',
-    title: 'Discover Data Products',
-    description: 'Lists the published Data Products in one Workspace that this Agent Identity may read, with the fields, metrics, and filters its Grants permit.',
-    scopes: ['mcp:read'],
-    inputSchema: {
-      type: 'object',
-      properties: { workspace_id: { type: 'string', description: 'The Workspace whose Data Products to discover.' } },
-      required: ['workspace_id'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'read_data_product_contract',
-    title: 'Read Data Product Contract',
-    description: 'Reads the Contract of one published Data Product: its fields, dimensions, metrics, grain, time, filters, and limits, narrowed to what this Agent Identity may read.',
-    scopes: ['mcp:read'],
-    inputSchema: {
-      type: 'object',
-      properties: { data_product_id: { type: 'string', description: 'The Data Product whose Contract to read.' } },
-      required: ['data_product_id'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'query_data_product',
-    title: 'Query Data Product',
-    description: 'Answers one Data Product Query against the pinned Release, with the same records, cursors, Provenance, and errors the Data Product API answers.',
-    scopes: ['mcp:read'],
-    inputSchema: {
-      type: 'object',
-      properties: {
-        data_product_id: { type: 'string', description: 'The Data Product to query.' },
-        query: { type: 'object', description: 'The Data Product Query document, exactly as the Data Product API accepts it.' },
-      },
-      required: ['data_product_id', 'query'],
-      additionalProperties: false,
-    },
-  },
-];
 
 /**
  * The token endpoint. It mints one short-lived access token for a pre-registered
@@ -397,19 +360,6 @@ async function readForm(request: IncomingMessage): Promise<Record<string, string
     form[name] = value;
   }
   return form;
-}
-
-/** Dispatches one tool invocation; every tool answers or fails as a tool result. */
-function callTool(
-  _session: ReturnType<typeof openPlatform>,
-  _grant: { agent: { name: string }; client: { client_id: string }; scopes: string[] },
-  params: Record<string, unknown>,
-): Record<string, unknown> {
-  throw new McpFailure(400, 'MCP_TOOL_NOT_FOUND', `${String(params['name'])} is not a tool this Deployment publishes.`, INVALID_PARAMS);
-}
-
-function toolView(tool: McpTool): Record<string, unknown> {
-  return { name: tool.name, title: tool.title, description: tool.description, inputSchema: tool.inputSchema };
 }
 
 function readParams(value: unknown): Record<string, unknown> {

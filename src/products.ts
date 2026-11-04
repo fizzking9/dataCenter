@@ -22,7 +22,7 @@ import type { Fail } from './errors.js';
 import { workspaceRoleOf } from './platform.js';
 import { readContract } from './product-contract.js';
 import { nextContractVersion } from './product-version.js';
-import { readableGrantScope } from './grants.js';
+import { readableGrantScope, type GrantReader, type GrantScope } from './grants.js';
 import { openPlatform, type PlatformSession } from './session.js';
 import { requireAdministeredSource } from './sources.js';
 
@@ -232,6 +232,75 @@ function schemaOf(
     reject(session, actor, context, 'INTEGRATION_VERSION_NOT_FOUND', 'The Integration Configuration Version this Dataset Release pins no longer exists.');
   }
   return version.schema;
+}
+
+/**
+ * The Contract as one reader may see it. A Grant narrows the columns, so the
+ * fields, dimensions, metrics, and filters it hides are absent rather than
+ * empty: no surface may disclose that a withheld column exists.
+ */
+export function contractView(contract: DataProductContract, scope: GrantScope): Record<string, unknown> {
+  const dimensions = contract.dimensions.filter((dimension) => scope.columns.includes(dimension));
+  return {
+    title: contract.title,
+    fields: contract.fields
+      .filter((field) => scope.columns.includes(field.name))
+      .map((field) => ({ ...field })),
+    dimensions: [...dimensions],
+    metrics: contract.metrics
+      .filter((metric) => metric.field === undefined || scope.columns.includes(metric.field))
+      .map((metric) => ({
+        name: metric.name,
+        aggregation: metric.aggregation,
+        value_type: metric.value_type,
+        unit: metric.unit ?? null,
+        currency: metric.currency ?? null,
+        dimensions: metric.dimensions === undefined
+          ? [...dimensions]
+          : metric.dimensions.filter((dimension) => scope.columns.includes(dimension)),
+      })),
+    grain: [...contract.grain],
+    time: contract.time === undefined ? null : { ...contract.time },
+    filters: contract.filters.filter((filter) => scope.columns.includes(filter)),
+    limits: { ...contract.limits },
+  };
+}
+
+/** The identity every read of a published Data Product answers with. */
+export function productIdentity(
+  product: DataProductArtifact,
+  version: DataProductVersion,
+  release: DataProductRelease,
+): Record<string, unknown> {
+  return {
+    data_product_id: product.data_product_id,
+    name: product.name,
+    api_path: product.api_path,
+    data_product_version: version.version,
+    data_product_release: release.release,
+    dataset_release: release.dataset_release,
+    contract_version: { ...version.contract_version },
+    contract_hash: version.contract_hash,
+  };
+}
+
+/**
+ * One published Data Product as a reader may see it, or nothing at all when the
+ * reader's Grants do not apply to its current Contract line.
+ */
+export function describeDataProduct(
+  product: DataProductArtifact,
+  reader: GrantReader,
+): Record<string, unknown> | null {
+  const version = latestDataProductVersion(product);
+  const release = latestDataProductRelease(product);
+  if (!version || !release) return null;
+  const scope = reader.scopeOf(product, version.contract);
+  if (scope === null) return null;
+  return {
+    ...productIdentity(product, version, release),
+    ...contractView(version.contract, scope),
+  };
 }
 
 /** Lists only published Data Products the actor is entitled to see in one Workspace. */

@@ -1,5 +1,5 @@
 import { resolveActor } from './auth.js';
-import { actorLabel, reject, type ActionContext } from './authz.js';
+import { reject, type ActionContext } from './authz.js';
 import {
   type DataProductArtifact,
   type DataProductContract,
@@ -12,7 +12,7 @@ import {
 import { canonicalDigest } from './crypto.js';
 import { readJsonDocument } from './documents.js';
 import type { Fail } from './errors.js';
-import { resolveGrantScope, type GrantScope } from './grants.js';
+import { memberReader, type GrantReader, type GrantScope } from './grants.js';
 import { workspaceRoleOf } from './platform.js';
 import { evaluateAggregate, orderGroups, type EvaluatedGroup, type MetricValue } from './product-aggregate.js';
 import { queryCacheKey, readCachedPage, writeCachedPage } from './product-cache.js';
@@ -325,43 +325,41 @@ function requireOffsetWithin(offset: number, available: number, fail: Fail): voi
   }
 }
 
+/** What one Data Product Query execution needs, whichever surface reached it. */
+export interface DataProductQueryExecution {
+  session: PlatformSession;
+  /** Who the read runs for: a Workspace member, or an Agent Identity. */
+  reader: GrantReader;
+  product: DataProductArtifact;
+  /** The Audit Event target the calling surface already resolved. */
+  context: ActionContext;
+  /** The Query document, already parsed out of its transport. */
+  request: unknown;
+  /** How the calling surface reports a structured failure. */
+  fail: Fail;
+}
+
 /**
  * Answers one Data Product Query against the Data Product Release the Contract
  * was published with, so a later Dataset Release never changes an open Contract.
  *
- * A Data Product in a Workspace the actor does not belong to answers exactly like
- * one that does not exist, and the response carries curated records and permitted
- * Provenance only.
+ * The lifecycle CLI, the Data Product API, and MCP all reach this one function,
+ * so their records, cursors, Provenance, freshness, and error codes cannot drift
+ * apart: only the transport around the read differs.
  */
-export function queryDataProduct(options: {
-  root: string;
-  masterKey: string;
-  token: string;
-  dataProductId: string;
-  requestPath: string;
-}): Record<string, unknown> {
+export function executeDataProductQuery(options: DataProductQueryExecution): Record<string, unknown> {
   const startedAt = Date.now();
-  const session = openPlatform(options.root, options.masterKey);
-  const context: ActionContext = { action: 'data_product_query', scope: 'workspace' };
-  const actor = resolveActor(session, options.token, context);
-
-  const product = requireReadableProduct(session, actor, context, options.dataProductId);
-  const role = workspaceRoleOf(session.state, actor.user.user_id, product.workspace_id);
-  const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
-
-  const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), scoped, code, message, nextStep);
-  const request = readJsonDocument(
-    options.requestPath,
-    fail,
-    'DATA_PRODUCT_QUERY_INVALID',
-    'The Data Product Query document must contain valid JSON.',
-  );
+  const { session, reader, product, context: scoped, request } = options;
+  /** Reports a structured failure through the surface that reached this read. */
+  function fail(code: string, message: string, nextStep?: string): never {
+    return options.fail(code, message, nextStep);
+  }
   if (typeof request !== 'object' || request === null || Array.isArray(request)) {
     fail('DATA_PRODUCT_QUERY_INVALID', 'A Data Product Query must be a JSON object.');
   }
   const target = readQueryTarget(request as Record<string, unknown>, fail);
   if (product.versions.length === 0 || product.releases.length === 0) {
-    reject(session, actorLabel(actor.user), scoped, 'DATA_PRODUCT_NOT_PUBLISHED', 'The Data Product has no Publication to query.');
+    fail('DATA_PRODUCT_NOT_PUBLISHED', 'The Data Product has no Publication to query.');
   }
   const { version, release, major } = resolveRelease(product, target, fail);
   const dataset = session.state.datasets.find((candidate) => candidate.dataset_id === release.dataset_id);
@@ -369,7 +367,7 @@ export function queryDataProduct(options: {
     (candidate) => candidate.release === release.dataset_release,
   );
   if (!dataset || !datasetRelease) {
-    reject(session, actorLabel(actor.user), scoped, 'DATASET_RELEASE_NOT_FOUND', 'The Dataset Release this Data Product pins is not available.');
+    fail('DATASET_RELEASE_NOT_FOUND', 'The Dataset Release this Data Product pins is not available.');
   }
   const contract = version.contract;
   const schema = session.state.integration_configurations
@@ -379,7 +377,7 @@ export function queryDataProduct(options: {
   const source = session.state.sources.find((candidate) => candidate.source_id === dataset.source_id);
 
   const query = readQuery(request as Record<string, unknown>, contract, schema, fail);
-  const scope = resolveGrantScope(session, actor.user.user_id, role, product, contract, fail);
+  const scope = reader.requireScope(product, contract, fail);
   requireGrantPermits(query, scope, fail);
   const queryHash = canonicalDigest(normalizeQuery(query, release.release, major, scope.fingerprint));
   const queryFilters = [...scope.rowFilters, ...query.filters];
@@ -388,7 +386,7 @@ export function queryDataProduct(options: {
     release: release.release,
     major,
     contractHash: version.contract_hash,
-    actorUserId: actor.user.user_id,
+    subject: reader.subject,
     scopeFingerprint: scope.fingerprint,
     queryHash,
     offset,
@@ -447,13 +445,13 @@ export function queryDataProduct(options: {
   };
 
   // A page is reused only under the complete security and Release context the
-  // key states, and only after this request's actor, membership, and Grants have
-  // been resolved, so no revocation is ever bypassed.
+  // key states, and only after this request's reader and Grants have been
+  // resolved, so no revocation is ever bypassed.
   const cached = readCachedPage(session.root, session.dataKey, cacheKey);
   if (cached !== null) {
     session.audit({
       ...scoped,
-      actor: actorLabel(actor.user),
+      actor: reader.label,
       outcome: 'succeeded',
       detail: { data_product_release: release.release, cache: 'reused' },
     });
@@ -484,7 +482,7 @@ export function queryDataProduct(options: {
     requireBudget();
     session.audit({
       ...scoped,
-      actor: actorLabel(actor.user),
+      actor: reader.label,
       outcome: 'succeeded',
       detail: { data_product_release: release.release, matched_count: selected.length, returned: projected.length },
     });
@@ -550,7 +548,7 @@ export function queryDataProduct(options: {
 
   session.audit({
     ...scoped,
-    actor: actorLabel(actor.user),
+    actor: reader.label,
     outcome: 'succeeded',
     detail: {
       data_product_release: release.release,
@@ -604,3 +602,33 @@ export function queryDataProduct(options: {
     provenance,
   });
 }
+
+/**
+ * Answers one Data Product Query for a Workspace member named by a session token,
+ * reading the request from a file so the lifecycle CLI and the Data Product API
+ * share one transport-free engine.
+ */
+export function queryDataProduct(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  dataProductId: string;
+  requestPath: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'data_product_query', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const product = requireReadableProduct(session, actor, context, options.dataProductId);
+  const role = workspaceRoleOf(session.state, actor.user.user_id, product.workspace_id);
+  const reader = memberReader(session, actor.user, role);
+  const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
+  const fail: Fail = (code, message, nextStep) => reject(session, reader.label, scoped, code, message, nextStep);
+  const request = readJsonDocument(
+    options.requestPath,
+    fail,
+    'DATA_PRODUCT_QUERY_INVALID',
+    'The Data Product Query document must contain valid JSON.',
+  );
+  return executeDataProductQuery({ session, reader, product, context: scoped, request, fail });
+}
+

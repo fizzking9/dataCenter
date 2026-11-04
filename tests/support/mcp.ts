@@ -71,6 +71,25 @@ export async function mcpCall(
   };
 }
 
+/** Invokes one tool, the way a current Streamable HTTP client does. */
+export async function callTool(
+  url: string,
+  token: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<McpResult> {
+  return mcpCall(
+    url,
+    { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } },
+    { token },
+  );
+}
+
+/** Lists the tools one token may see. */
+export async function listTools(url: string, token: string): Promise<McpResult> {
+  return mcpCall(url, { jsonrpc: '2.0', id: 1, method: 'tools/list' }, { token });
+}
+
 /** Reads one JSON-RPC result from a successful exchange. */
 export function mcpResult(result: McpResult): Record<string, unknown> {
   return (result.body['result'] ?? {}) as Record<string, unknown>;

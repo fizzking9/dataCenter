@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import type { OperatorResult } from './operator.js';
+import { requestToken } from './mcp.js';
 import { command, jsonFile, type PlatformFixture } from './platform.js';
 
 /**
@@ -61,4 +62,21 @@ export function grantAgent(
     ['grant', 'publish', '--product', dataProductId, '--agent', agentIdentityId, '--request', jsonFile(fixture, name, request)],
     { token: workspaceAdministratorToken },
   );
+}
+
+/** Mints one access token for a registered client, bound to this server's own resource. */
+export async function issueAgentToken(
+  url: string,
+  client: { client_id: string; client_secret: string },
+  scope = 'mcp:read',
+): Promise<string> {
+  const issued = await requestToken(url, {
+    grant_type: 'client_credentials',
+    client_id: client.client_id,
+    client_secret: client.client_secret,
+    resource: url + '/mcp',
+    scope,
+  });
+  assert.equal(issued.status, 200, JSON.stringify(issued.body));
+  return String(issued.body['access_token']);
 }
