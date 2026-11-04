@@ -3,9 +3,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { uploadAcquisition } from './acquisition.js';
 import {
+  acquisitionCheckpoint,
   acquisitionQueue,
   enqueueAcquisition,
   listSourceAcquisition,
+  resetAcquisitionCheckpoint,
   tickSchedules,
   workAcquisition,
 } from './acquisition-run.js';
@@ -15,8 +17,11 @@ import { issueOperatorEnrollment, revokeOperator, revokeOperatorEnrollment } fro
 import { startConsoleServer } from './console-server.js';
 import {
   adoptConnection,
+  connectionPacing,
+  connectionSession,
   listConnections,
   publishConnection,
+  resetConnectionSession,
 } from './connections.js';
 import { publishCommonContext, publishWorkspaceContext, showContext } from './context.js';
 import { releaseDataset, showDataset } from './datasets.js';
@@ -290,6 +295,18 @@ async function main(): Promise<void> {
     emit(listConnections({ ...governed(options), workspaceId: required(options, 'workspace') }));
     return;
   }
+  if (command === 'connection' && subcommand === 'session') {
+    emit(connectionSession({ ...governed(options), connectionId: required(options, 'connection') }));
+    return;
+  }
+  if (command === 'connection' && subcommand === 'session-reset') {
+    emit(resetConnectionSession({ ...governed(options), connectionId: required(options, 'connection') }));
+    return;
+  }
+  if (command === 'connection' && subcommand === 'pacing') {
+    emit(connectionPacing({ ...governed(options), connectionId: required(options, 'connection') }));
+    return;
+  }
   if (command === 'acquisition-config' && subcommand === 'publish') {
     emit(publishSourceAcquisition({
       ...governed(options),
@@ -307,15 +324,32 @@ async function main(): Promise<void> {
     return;
   }
   if (command === 'acquisition' && subcommand === 'enqueue') {
-    emit(enqueueAcquisition({ ...governed(options), sourceId: required(options, 'source') }));
+    emit(enqueueAcquisition({
+      ...governed(options),
+      sourceId: required(options, 'source'),
+      ...(options.has('from') ? { from: required(options, 'from') } : {}),
+      ...(options.has('to') ? { to: required(options, 'to') } : {}),
+    }));
     return;
   }
   if (command === 'acquisition' && subcommand === 'work') {
-    emit(await workAcquisition({ ...governed(options), sourceId: required(options, 'source') }));
+    emit(await workAcquisition({
+      ...governed(options),
+      sourceId: required(options, 'source'),
+      ...(options.has('at') ? { at: required(options, 'at') } : {}),
+    }));
     return;
   }
   if (command === 'acquisition' && subcommand === 'queue') {
     emit(acquisitionQueue({ ...governed(options), sourceId: required(options, 'source') }));
+    return;
+  }
+  if (command === 'acquisition' && subcommand === 'checkpoint') {
+    emit(acquisitionCheckpoint({ ...governed(options), sourceId: required(options, 'source') }));
+    return;
+  }
+  if (command === 'acquisition' && subcommand === 'checkpoint-reset') {
+    emit(resetAcquisitionCheckpoint({ ...governed(options), sourceId: required(options, 'source') }));
     return;
   }
   if (command === 'acquisition' && subcommand === 'tick') {

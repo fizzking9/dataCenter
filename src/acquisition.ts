@@ -71,6 +71,26 @@ export function uploadAcquisition(options: {
   if (bytes.length === 0) {
     reject(session, actorLabel(actor.user), scoped, 'ACQUISITION_FILE_EMPTY', 'The acquisition file is empty.');
   }
+  // The bytes decide what the file is, not its name: an archive or a binary is
+  // refused before it is stored, so no Release is ever built on a container the
+  // Source never declared.
+  const signature = bytes.subarray(0, 4);
+  const isZip = signature.length >= 4
+    && signature[0] === 0x50
+    && signature[1] === 0x4b
+    && (signature[2] === 0x03 || signature[2] === 0x05 || signature[2] === 0x07)
+    && (signature[3] === 0x04 || signature[3] === 0x06 || signature[3] === 0x08);
+  const hasNul = bytes.includes(0x00);
+  if (isZip || hasNul) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      scoped,
+      'ACQUISITION_FILE_SIGNATURE_INVALID',
+      'The acquisition file is an archive or binary container, not the delimited text this Source declares.',
+      'Export the data as CSV before uploading it.',
+    );
+  }
 
   const now = new Date().toISOString();
   const runId = randomUUID();
@@ -98,6 +118,7 @@ export function uploadAcquisition(options: {
     source_id: source.source_id,
     mode: 'manual_upload',
     trigger: 'manual',
+    backfill: null,
     integration_configuration_version: configuration.version,
     attempts: 1,
     status: 'complete',
@@ -116,6 +137,8 @@ export function uploadAcquisition(options: {
     integration_configuration_content_hash: configuration.content_hash,
     raw_acquisition_ids: [rawId],
     created_at: now,
+    quarantined_at: null,
+    quarantine_error_code: null,
   };
   session.state.raw_acquisitions.push(raw);
   session.state.acquisition_runs.push(run);
