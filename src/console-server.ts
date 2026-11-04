@@ -10,6 +10,7 @@ import {
   signOutOperator,
   OPERATOR_SESSION_LIFETIME_MS,
 } from './operators.js';
+import { queryDataProductApi } from './data-product-api.js';
 import { OperatorError } from './errors.js';
 import { readLicenseSummary } from './license.js';
 import { handleMcpSurface, type McpServerIdentity } from './mcp.js';
@@ -229,6 +230,25 @@ async function handleApi(
     return;
   }
 
+  // A Publication advertises this path. It answers the very same governed read
+  // the MCP direct-query tool answers, with a Consumer's own Bearer credential.
+  const queryRoute = /^\/api\/workspaces\/([^/]+)\/data-products\/([^/]+)\/query$/.exec(pathname);
+  if (queryRoute !== null && method === 'POST') {
+    const credential = bearerCredential(request);
+    if (credential === undefined) {
+      throw new HttpError(401, 'SESSION_INVALID', 'A Data Product Query requires a Bearer session token.');
+    }
+    sendJson(response, 200, queryDataProductApi({
+      root: options.root,
+      masterKey: options.masterKey,
+      token: credential,
+      workspaceId: decodeURIComponent(queryRoute[1]!),
+      dataProductId: decodeURIComponent(queryRoute[2]!),
+      request: await readJson(request),
+    }));
+    return;
+  }
+
   throw new HttpError(404, 'API_NOT_FOUND', 'No such application API.');
 }
 
@@ -257,6 +277,15 @@ function recordDeniedAccess(options: ConsoleServerOptions, target: string): void
   } catch {
     // The Deployment is not open, so there is no governed Audit Event to append.
   }
+}
+
+/** Reads the Bearer credential a published Data Product API path presents. */
+function bearerCredential(request: IncomingMessage): string | undefined {
+  const header = request.headers.authorization;
+  const value = Array.isArray(header) ? header[0] : header;
+  if (value === undefined) return undefined;
+  const match = /^Bearer +([A-Za-z0-9._~+/-]+=*)$/i.exec(value.trim());
+  return match?.[1];
 }
 
 function cookieValue(request: IncomingMessage): string | undefined {
@@ -362,6 +391,19 @@ const STATUS_BY_CODE: Record<string, number> = {
   OPERATOR_PASSWORD_INVALID: 400,
   OPERATOR_NAME_INVALID: 400,
   OPERATOR_ALREADY_ENROLLED: 409,
+  // A Data Product Query failure is a governed answer, not a server fault.
+  SESSION_INVALID: 401,
+  WORKSPACE_ACCESS_DENIED: 403,
+  DATA_PRODUCT_QUERY_INVALID: 400,
+  DATA_PRODUCT_QUERY_CURSOR_INVALID: 400,
+  DATA_PRODUCT_QUERY_REFUSED: 403,
+  DATA_PRODUCT_NOT_AVAILABLE: 404,
+  DATA_PRODUCT_NOT_PUBLISHED: 409,
+  DATA_PRODUCT_RELEASE_NOT_FOUND: 404,
+  DATASET_RELEASE_NOT_FOUND: 409,
+  DATA_PRODUCT_QUERY_TOO_COMPLEX: 422,
+  DATA_PRODUCT_QUERY_RESULT_TOO_LARGE: 422,
+  DATA_PRODUCT_QUERY_TIMEOUT: 504,
 };
 
 function sendFailure(response: ServerResponse, error: unknown): void {

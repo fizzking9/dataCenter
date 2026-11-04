@@ -79,11 +79,12 @@ export interface HttpResult {
 export async function callApi(
   url: string,
   path: string,
-  options: { method?: string; body?: unknown; cookie?: string } = {},
+  options: { method?: string; body?: unknown; cookie?: string; token?: string } = {},
 ): Promise<HttpResult> {
   const headers: Record<string, string> = { accept: 'application/json' };
   if (options.body !== undefined) headers['content-type'] = 'application/json';
   if (options.cookie) headers.cookie = options.cookie;
+  if (options.token) headers.authorization = `Bearer ${options.token}`;
   const response = await fetch(`${url}${path}`, {
     method: options.method ?? (options.body === undefined ? 'GET' : 'POST'),
     headers,
