@@ -250,6 +250,56 @@ export interface DataProductMajorLine {
   withdrawn_at: string | null;
 }
 
+/** One declarative row predicate a Grant imposes on every read of a Data Product. */
+export interface GrantRowFilter {
+  field: string;
+  op:
+    | 'equals'
+    | 'not_equals'
+    | 'less_than'
+    | 'less_or_equal'
+    | 'greater_than'
+    | 'greater_or_equal'
+    | 'is_null'
+    | 'is_not_null';
+  value: string | number | null;
+}
+
+/**
+ * A Workspace-scoped authorization configuration narrowing one principal's
+ * reads of one published Data Product: the columns it may see and the rows it
+ * may count. It never widens what the Contract publishes.
+ */
+export interface DataProductGrantRecord {
+  grant_id: string;
+  workspace_id: string;
+  data_product_id: string;
+  grantee: { type: 'user' | 'agent_identity'; id: string };
+  /** Permitted Contract fields; every field the Contract publishes when unstated. */
+  columns: string[] | null;
+  row_filters: GrantRowFilter[];
+  created_at: string;
+  created_by: string;
+  revoked_at: string | null;
+}
+
+/** One encrypted, short-lived curated-result export a Consumer requested. */
+export interface ExportRecord {
+  export_id: string;
+  workspace_id: string;
+  data_product_id: string;
+  data_product_release: number;
+  actor_user_id: string;
+  created_at: string;
+  expires_at: string;
+  row_count: number;
+  columns: string[];
+  content_hash: string;
+  /** The ciphertext object, relative to the Deployment root. */
+  object_path: string;
+  downloaded_at: string | null;
+}
+
 /** One immutable result binding an exact Data Product Version to a Dataset Release. */
 export interface DataProductRelease {
   release: number;
@@ -365,4 +415,17 @@ export function findDataProductRelease(
   release: number,
 ): DataProductRelease | undefined {
   return product?.releases.find((candidate) => candidate.release === release);
+}
+
+/** The Grants still in force for one principal on one Data Product. */
+export function activeGrants(
+  grants: DataProductGrantRecord[],
+  dataProductId: string,
+  granteeId: string,
+): DataProductGrantRecord[] {
+  return grants.filter(
+    (grant) => grant.data_product_id === dataProductId
+      && grant.grantee.id === granteeId
+      && grant.revoked_at === null,
+  );
 }

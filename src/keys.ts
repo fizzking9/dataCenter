@@ -51,6 +51,11 @@ export function decrypt(key: Buffer, value: WrappedValue): Buffer {
   return Buffer.concat([decipher.update(Buffer.from(value.ciphertext, 'base64')), decipher.final()]);
 }
 
+/** Encrypts governed bytes under the Deployment data key, so no plaintext is ever stored. */
+export function encryptValue(key: Buffer, plaintext: Buffer): WrappedValue {
+  return encrypt(key, plaintext);
+}
+
 export function wrapNewDataKey(masterKey: Buffer): { dataKey: Buffer; wrapped: WrappedDataKey } {
   const dataKey = randomBytes(32);
   return {

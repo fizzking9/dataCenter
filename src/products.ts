@@ -21,6 +21,7 @@ import type { Fail } from './errors.js';
 import { workspaceRoleOf } from './platform.js';
 import { readContract } from './product-contract.js';
 import { nextContractVersion } from './product-version.js';
+import { resolveGrantScope } from './grants.js';
 import { openPlatform, type PlatformSession } from './session.js';
 import { requireAdministeredSource } from './sources.js';
 
@@ -246,33 +247,42 @@ export function listDataProducts(options: {
     workspace_id: options.workspaceId,
   };
   const actor = resolveActor(session, options.token, context);
-  if (workspaceRoleOf(session.state, actor.user.user_id, options.workspaceId) === null) {
+  const role = workspaceRoleOf(session.state, actor.user.user_id, options.workspaceId);
+  if (role === null) {
     deny(session, actorLabel(actor.user), context, 'WORKSPACE_ACCESS_DENIED', 'The Workspace is not available to this actor.');
   }
+  const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), context, code, message, nextStep);
   const visible = session.state.data_products
     .filter((product) => product.workspace_id === options.workspaceId && product.releases.length > 0)
     .flatMap((product) => {
       const version = latestDataProductVersion(product);
       const release = latestDataProductRelease(product);
       if (!version || !release) return [];
+      // Discovery is narrowed the same way a read is, so a Grant never hides a
+      // value while still disclosing that it exists.
+      const scope = resolveGrantScope(session, actor.user, role, product, version.contract, fail);
       return [{
         data_product_id: product.data_product_id,
         name: product.name,
         api_path: product.api_path,
         title: version.contract.title,
-        fields: version.contract.fields.map((field) => field.name),
-        dimensions: [...version.contract.dimensions],
-        metrics: version.contract.metrics.map((metric) => ({
-          name: metric.name,
-          aggregation: metric.aggregation,
-          value_type: metric.value_type,
-          unit: metric.unit ?? null,
-          currency: metric.currency ?? null,
-          dimensions: metric.dimensions === undefined ? [...version.contract.dimensions] : [...metric.dimensions],
-        })),
+        fields: [...scope.columns],
+        dimensions: version.contract.dimensions.filter((dimension) => scope.columns.includes(dimension)),
+        metrics: version.contract.metrics
+          .filter((metric) => metric.field === undefined || scope.columns.includes(metric.field))
+          .map((metric) => ({
+            name: metric.name,
+            aggregation: metric.aggregation,
+            value_type: metric.value_type,
+            unit: metric.unit ?? null,
+            currency: metric.currency ?? null,
+            dimensions: metric.dimensions === undefined
+              ? version.contract.dimensions.filter((dimension) => scope.columns.includes(dimension))
+              : metric.dimensions.filter((dimension) => scope.columns.includes(dimension)),
+          })),
         grain: [...version.contract.grain],
         time: version.contract.time === undefined ? null : { ...version.contract.time },
-        filters: [...version.contract.filters],
+        filters: version.contract.filters.filter((filter) => scope.columns.includes(filter)),
         data_product_version: version.version,
         data_product_release: release.release,
         dataset_release: release.dataset_release,

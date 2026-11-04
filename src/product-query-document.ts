@@ -82,6 +82,8 @@ export type ParsedQuery =
     kind: 'aggregate';
     groupBy: string[];
     metrics: DataProductMetric[];
+    /** Whether the query named its metrics, or took every metric the Contract publishes. */
+    metricsExplicit: boolean;
     filters: QueryFilter[];
     metricFilters: MetricFilter[];
     includeTotals: boolean;
@@ -200,12 +202,16 @@ function readLimit(raw: unknown, contract: DataProductContract, fail: Fail): num
 }
 
 /** Reads the metrics a query requests, defaulting to every metric the Contract publishes. */
-function readMetrics(raw: unknown, contract: DataProductContract, fail: Fail): DataProductMetric[] {
+function readMetrics(
+  raw: unknown,
+  contract: DataProductContract,
+  fail: Fail,
+): { metrics: DataProductMetric[]; explicit: boolean } {
   if (raw === undefined) {
     if (contract.metrics.length === 0) {
       fail(REFUSED, 'This Data Product Contract publishes no metric, so it cannot answer an aggregate query.');
     }
-    return [...contract.metrics];
+    return { metrics: [...contract.metrics], explicit: false };
   }
   if (!Array.isArray(raw)) {
     fail(MALFORMED, 'Query metrics must be an array of metric names.');
@@ -223,7 +229,7 @@ function readMetrics(raw: unknown, contract: DataProductContract, fail: Fail): D
   if (requested.length === 0) {
     fail(MALFORMED, 'An aggregate query must request at least one metric.');
   }
-  return requested.map((name) => contract.metrics.find((metric) => metric.name === name)!);
+  return { metrics: requested.map((name) => contract.metrics.find((metric) => metric.name === name)!), explicit: true };
 }
 
 /** Reads the grouping, proving every metric may really be evaluated at that grain. */
@@ -320,7 +326,8 @@ function readAggregate(
   schema: DatasetSchemaField[],
   fail: Fail,
 ): ParsedQuery {
-  const metrics = readMetrics(parsed['metrics'], contract, fail);
+  const metrics$ = readMetrics(parsed['metrics'], contract, fail);
+  const metrics = metrics$.metrics;
   const groupBy = readGroupBy(parsed['group_by'], contract, metrics, fail);
   const window = readWindow(parsed['window'], contract.time, 'time window', fail);
   const comparison = readWindow(parsed['comparison'], contract.time, 'comparison window', fail);
@@ -335,6 +342,7 @@ function readAggregate(
     kind: 'aggregate',
     groupBy,
     metrics,
+    metricsExplicit: metrics$.explicit,
     filters: readFilters(parsed['filters'], contract, schema, fail),
     metricFilters: readMetricFilters(parsed['metric_filters'], metrics, fail),
     includeTotals,

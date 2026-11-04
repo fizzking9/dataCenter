@@ -19,8 +19,10 @@ import {
 import { canonicalDigest } from './crypto.js';
 import { readJsonDocument } from './documents.js';
 import type { Fail } from './errors.js';
+import { resolveGrantScope, type GrantScope } from './grants.js';
 import { workspaceRoleOf } from './platform.js';
 import { evaluateAggregate, orderGroups, type EvaluatedGroup, type MetricValue } from './product-aggregate.js';
+import { queryCacheKey, readCachedPage, writeCachedPage } from './product-cache.js';
 import { decodeCursor, encodeCursor } from './product-cursor.js';
 import { readQuery, readQueryTarget, type ParsedQuery, type QueryOperator, type QueryTarget, type Window } from './product-query-document.js';
 import { openPlatform, type PlatformSession } from './session.js';
@@ -312,13 +314,19 @@ function resolveRelease(product: DataProductArtifact, target: QueryTarget, fail:
 }
 
 /** The query itself, minus the page position, so a cursor pins what it answered. */
-function normalizeQuery(query: ParsedQuery, release: number, major: number): Record<string, unknown> {
+function normalizeQuery(
+  query: ParsedQuery,
+  release: number,
+  major: number,
+  scopeFingerprint: string,
+): Record<string, unknown> {
   if (query.kind === 'records') {
-    return { release, major, kind: 'records', filters: query.filters, window: query.window ?? null };
+    return { release, major, scope: scopeFingerprint, kind: 'records', filters: query.filters, window: query.window ?? null };
   }
   return {
     release,
     major,
+    scope: scopeFingerprint,
     kind: 'aggregate',
     group_by: [...query.groupBy],
     metrics: query.metrics.map((metric) => metric.name),
@@ -332,16 +340,52 @@ function normalizeQuery(query: ParsedQuery, release: number, major: number): Rec
 }
 
 /**
- * Reads how far into a query a page continues. A cursor answers only the query
- * and Release it was issued for, and can never point past what that Release
- * holds.
+ * Proves the query asks for nothing the actor's Grant hides. A hidden column is
+ * refused rather than dropped, because filtering, grouping, or aggregating on
+ * it would disclose the very values the Grant withholds.
+ */
+function requireGrantPermits(query: ParsedQuery, scope: GrantScope, fail: Fail): void {
+  for (const filter of query.filters) {
+    if (!scope.columns.includes(filter.field)) {
+      fail(
+        'DATA_PRODUCT_QUERY_REFUSED',
+        `${filter.field} is not a column this Grant permits, so it cannot filter, group, or total this query.`,
+        'Query only the columns the Grant permits.',
+      );
+    }
+  }
+  if (query.kind !== 'aggregate') return;
+  for (const dimension of query.groupBy) {
+    if (!scope.columns.includes(dimension)) {
+      fail(
+        'DATA_PRODUCT_QUERY_REFUSED',
+        `${dimension} is not a column this Grant permits, so it cannot filter, group, or total this query.`,
+        'Query only the columns the Grant permits.',
+      );
+    }
+  }
+  if (!query.metricsExplicit) return;
+  for (const metric of query.metrics) {
+    if (metric.field !== undefined && !scope.columns.includes(metric.field)) {
+      fail(
+        'DATA_PRODUCT_QUERY_REFUSED',
+        `The ${metric.name} metric reads a column this Grant does not permit.`,
+        'Request a metric the Grant permits.',
+      );
+    }
+  }
+}
+
+/**
+ * Reads how far into a query a page continues. A cursor answers only the query,
+ * Release, and authorization scope it was issued for, so a Grant or membership
+ * change takes effect on the very next page.
  */
 function readOffset(
   session: PlatformSession,
   target: QueryTarget,
   resolved: ResolvedRelease,
   queryHash: string,
-  available: number,
   fail: Fail,
 ): number {
   if (target.cursor === undefined) return 0;
@@ -351,18 +395,22 @@ function readOffset(
     || payload.queryHash !== queryHash) {
     fail(
       'DATA_PRODUCT_QUERY_CURSOR_INVALID',
-      'This page cursor was issued for a different query, Release, or Contract line.',
+      'This page cursor was issued for a different query, Release, Contract line, or authorization scope.',
       'Read the query again from its first page.',
     );
   }
-  if (payload.offset > available) {
+  return payload.offset;
+}
+
+/** A cursor may never point past what the pinned Release holds. */
+function requireOffsetWithin(offset: number, available: number, fail: Fail): void {
+  if (offset > available) {
     fail(
       'DATA_PRODUCT_QUERY_CURSOR_INVALID',
       'This page cursor points past the results this Release holds.',
       'Read the query again from its first page.',
     );
   }
-  return payload.offset;
 }
 
 /**
@@ -424,7 +472,21 @@ export function queryDataProduct(options: {
   const source = session.state.sources.find((candidate) => candidate.source_id === dataset.source_id);
 
   const query = readQuery(request as Record<string, unknown>, contract, schema, fail);
-  const queryHash = canonicalDigest(normalizeQuery(query, release.release, major));
+  const scope = resolveGrantScope(session, actor.user, role, product, contract, fail);
+  requireGrantPermits(query, scope, fail);
+  const queryHash = canonicalDigest(normalizeQuery(query, release.release, major, scope.fingerprint));
+  const queryFilters = [...scope.rowFilters, ...query.filters];
+  const offset = readOffset(session, target, { version, release, major }, queryHash, fail);
+  const cacheKey = queryCacheKey({
+    release: release.release,
+    major,
+    contractHash: version.contract_hash,
+    actorUserId: actor.user.user_id,
+    scopeFingerprint: scope.fingerprint,
+    queryHash,
+    offset,
+    limit: query.limit,
+  });
 
   const scanned = datasetRelease.records.length;
   if (scanned > contract.limits.max_scanned_records) {
@@ -468,17 +530,37 @@ export function queryDataProduct(options: {
     }
   };
 
+  // A page is reused only under the complete security and Release context the
+  // key states, and only after this request's actor, membership, and Grants have
+  // been resolved, so no revocation is ever bypassed.
+  const cached = readCachedPage(session.root, session.dataKey, cacheKey);
+  if (cached !== null) {
+    session.audit({
+      ...scoped,
+      actor: actorLabel(actor.user),
+      outcome: 'succeeded',
+      detail: { data_product_release: release.release, cache: 'reused' },
+    });
+    return { ...cached, cache: { reused: true } };
+  }
+
+  /** Records the answer for reuse under exactly this context, then returns it. */
+  const remember = (response: Record<string, unknown>): Record<string, unknown> => {
+    writeCachedPage(session.root, session.dataKey, cacheKey, response);
+    return { ...response, cache: { reused: false } };
+  };
+
   if (query.kind === 'records') {
     const selected = orderRecords(
-      selectRecords(datasetRelease.records, contract, query.filters, query.window),
+      selectRecords(datasetRelease.records, contract, queryFilters, query.window),
       contract,
     );
-    const offset = readOffset(session, target, { version, release, major }, queryHash, selected.length, fail);
+    requireOffsetWithin(offset, selected.length, fail);
     const page = selected.slice(offset, offset + query.limit);
     const projected = page.map((record) => {
       const values: Record<string, string | number | null> = {};
-      for (const field of contract.fields) {
-        values[field.name] = record.values[field.name] ?? null;
+      for (const name of scope.columns) {
+        values[name] = record.values[name] ?? null;
       }
       return values;
     });
@@ -490,9 +572,10 @@ export function queryDataProduct(options: {
       outcome: 'succeeded',
       detail: { data_product_release: release.release, matched_count: selected.length, returned: projected.length },
     });
-    return {
+    return remember({
       ...identity,
       kind: 'records',
+      columns: [...scope.columns],
       records: projected,
       matched_count: selected.length,
       returned: projected.length,
@@ -511,15 +594,28 @@ export function queryDataProduct(options: {
         ? { window: null }
         : { window: windowView(contract.time, query.window, coverage) }),
       provenance,
-    };
+    });
   }
 
-  const spec = { groupBy: query.groupBy, metrics: query.metrics, schema };
-  const base = evaluateAggregate(selectRecords(datasetRelease.records, contract, query.filters, query.window), spec);
+  // A hidden column may still be named by a Contract metric; only the metrics
+  // this reader may evaluate are computed, and an explicit request for one it
+  // may not was already refused.
+  const metrics = query.metrics.filter(
+    (metric) => metric.field === undefined || scope.columns.includes(metric.field),
+  );
+  if (metrics.length === 0) {
+    fail(
+      'DATA_PRODUCT_QUERY_REFUSED',
+      'No metric this Data Product publishes reads a column the Grant permits.',
+      'Ask its administrator for a Grant over a column this query may aggregate.',
+    );
+  }
+  const spec = { groupBy: query.groupBy, metrics, schema };
+  const base = evaluateAggregate(selectRecords(datasetRelease.records, contract, queryFilters, query.window), spec);
   const compared = query.comparison === undefined || contract.time === undefined
     ? null
-    : evaluateAggregate(selectRecords(datasetRelease.records, contract, query.filters, query.comparison), spec);
-  const merged = mergeWindows(query.metrics, base.groups, compared?.groups ?? null)
+    : evaluateAggregate(selectRecords(datasetRelease.records, contract, queryFilters, query.comparison), spec);
+  const merged = mergeWindows(metrics, base.groups, compared?.groups ?? null)
     .filter((entry) => query.metricFilters.every(
       (filter) => matches(entry.metrics[filter.metric] ?? null, filter.op, filter.value),
     ));
@@ -531,7 +627,7 @@ export function queryDataProduct(options: {
     );
   }
   const ordered = orderGroups(merged, query.sort);
-  const offset = readOffset(session, target, { version, release, major }, queryHash, ordered.length, fail);
+  requireOffsetWithin(offset, ordered.length, fail);
   const returned = ordered.slice(offset, offset + query.limit);
   const more = offset + returned.length < ordered.length;
   requireBudget();
@@ -546,11 +642,11 @@ export function queryDataProduct(options: {
       returned: returned.length,
     },
   });
-  return {
+  return remember({
     ...identity,
     kind: 'aggregate',
     grouped_by: [...query.groupBy],
-    metrics: query.metrics.map(metricView),
+    metrics: metrics.map(metricView),
     groups: returned.map((entry) => ({
       group: { ...entry.group },
       null_dimensions: [...entry.null_dimensions],
@@ -563,7 +659,7 @@ export function queryDataProduct(options: {
         ...(compared === null
           ? {}
           : {
-            comparison: Object.fromEntries(query.metrics.map((metric) => [
+            comparison: Object.fromEntries(metrics.map((metric) => [
               metric.name,
               compareMetric(metric, base.totals[metric.name] ?? null, compared.totals[metric.name] ?? null),
             ])),
@@ -590,5 +686,5 @@ export function queryDataProduct(options: {
       ? { comparison_window: null }
       : { comparison_window: windowView(contract.time, query.comparison, coverage) }),
     provenance,
-  };
+  });
 }

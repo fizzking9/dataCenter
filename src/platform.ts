@@ -3,7 +3,9 @@ import { join } from 'node:path';
 import type {
   AcquisitionRunRecord,
   DataProductArtifact,
+  DataProductGrantRecord,
   DatasetArtifact,
+  ExportRecord,
   IntegrationBatchRecord,
   IntegrationConfigurationArtifact,
   RawAcquisitionRecord,
@@ -17,7 +19,7 @@ export type DeploymentRole = 'Deployment Administrator';
 export type WorkspaceRole = 'Workspace Administrator' | 'Consumer';
 
 export const DEPLOYMENT_CONTEXT_ARTIFACT = 'deployment-business-context';
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 export const USERNAME_PATTERN = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,189}$/;
 
 export interface UserRecord {
@@ -93,6 +95,8 @@ export interface PlatformState {
   integration_batches: IntegrationBatchRecord[];
   datasets: DatasetArtifact[];
   data_products: DataProductArtifact[];
+  data_product_grants: DataProductGrantRecord[];
+  exports: ExportRecord[];
 }
 
 /** Every human identity is stated as one account identifier of the form name@domain. */
@@ -130,6 +134,8 @@ export function readPlatform(root: string): PlatformState {
         integration_batches: [],
         datasets: [],
         data_products: [],
+        data_product_grants: [],
+        exports: [],
       };
   // A Deployment installed under an earlier schema keeps working: the added
   // Collections start empty rather than failing the read closed.
@@ -141,6 +147,35 @@ export function readPlatform(root: string): PlatformState {
   state.integration_batches ??= [];
   state.datasets ??= [];
   state.data_products ??= [];
+  state.data_product_grants ??= [];
+  state.exports ??= [];
+  // A Data Product published before Contract lines existed belongs to the single
+  // line its oldest Contract states, so an older Deployment keeps serving it.
+  for (const product of state.data_products) {
+    for (const version of product.versions) {
+      version.contract_version ??= { major: 1, minor: version.version - 1 };
+      version.withdrawn_at ??= null;
+    }
+    product.lines ??= [];
+    if (product.lines.length > 0) continue;
+    for (const release of product.releases) {
+      const version = product.versions.find((candidate) => candidate.version === release.data_product_version);
+      if (version === undefined) continue;
+      const line = product.lines.find((candidate) => candidate.major === version.contract_version.major);
+      if (line === undefined) {
+        product.lines.push({
+          major: version.contract_version.major,
+          current_version: version.version,
+          current_release: release.release,
+          opened_at: release.created_at,
+          withdrawn_at: null,
+        });
+        continue;
+      }
+      line.current_version = version.version;
+      line.current_release = release.release;
+    }
+  }
   return state;
 }
 

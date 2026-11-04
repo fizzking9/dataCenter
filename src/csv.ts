@@ -93,6 +93,20 @@ function splitRecords(text: string, fail: CsvFailure): CsvRecord[] {
   return records.filter((record) => record.cells.some((value) => value.length > 0));
 }
 
+/**
+ * Writes one curated-result table the way the reader above parses it: a quoted
+ * cell keeps its delimiter, its line break, and a literal quote, so an export
+ * reproduces the governed value rather than approximating it.
+ */
+export function toCsv(header: string[], rows: Array<Array<string | number | null>>): string {
+  const cell = (value: string | number | null): string => {
+    if (value === null) return '';
+    const text = String(value);
+    return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+  };
+  return `${[header.map(cell).join(','), ...rows.map((row) => row.map(cell).join(','))].join('\n')}\n`;
+}
+
 /** Parses a header-bearing CSV document and rejects ambiguous headers. */
 export function parseCsv(text: string, fail: CsvFailure): CsvDocument {
   const records = splitRecords(text.startsWith('\uFEFF') ? text.slice(1) : text, fail);

@@ -9,6 +9,8 @@ import { startConsoleServer } from './console-server.js';
 import { publishCommonContext, publishWorkspaceContext, showContext } from './context.js';
 import { releaseDataset, showDataset } from './datasets.js';
 import { OperatorError } from './errors.js';
+import { createExport, downloadExport } from './export.js';
+import { listGrants, publishGrant, revokeGrant } from './grants.js';
 import { initializeDeployment } from './initialize.js';
 import { installDeployment } from './install.js';
 import { adoptIntegrationConfiguration, publishIntegrationConfiguration } from './integration.js';
@@ -23,7 +25,7 @@ import { createWorkspace, grantMembership, listWorkspaces, revokeMembership } fr
 
 const GROUPED_COMMANDS = new Set([
   'user', 'workspace', 'membership', 'ownership', 'context', 'audit',
-  'source', 'integration', 'acquisition', 'dataset', 'product', 'console',
+  'source', 'integration', 'acquisition', 'dataset', 'product', 'grant', 'export', 'console',
 ]);
 const BOOLEAN_FLAGS = new Set(['admin-password-stdin', 'password-stdin', 'deployment-administrator']);
 
@@ -313,6 +315,35 @@ async function main(): Promise<void> {
       dataProductId: required(options, 'product'),
       requestPath: required(options, 'request'),
     }));
+    return;
+  }
+  if (command === 'grant' && subcommand === 'publish') {
+    emit(publishGrant({
+      ...governed(options),
+      dataProductId: required(options, 'product'),
+      username: required(options, 'username'),
+      requestPath: required(options, 'request'),
+    }));
+    return;
+  }
+  if (command === 'grant' && subcommand === 'list') {
+    emit(listGrants({ ...governed(options), dataProductId: required(options, 'product') }));
+    return;
+  }
+  if (command === 'grant' && subcommand === 'revoke') {
+    emit(revokeGrant({ ...governed(options), grantId: required(options, 'grant') }));
+    return;
+  }
+  if (command === 'export' && subcommand === 'create') {
+    emit(createExport({
+      ...governed(options),
+      dataProductId: required(options, 'product'),
+      requestPath: required(options, 'request'),
+    }));
+    return;
+  }
+  if (command === 'export' && subcommand === 'download') {
+    emit(downloadExport({ ...governed(options), exportId: required(options, 'export') }));
     return;
   }
   if (command === 'console' && subcommand === 'serve') {
