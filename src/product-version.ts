@@ -69,6 +69,24 @@ export function readContractChange(
     }
   }
 
+  // A Contract that published search may not quietly stop answering it, and a
+  // search line may not narrow what a Consumer already composes. Adding search
+  // where there was none is additive, so it stays on the same major line.
+  const previousSearch = previous.search;
+  const nextSearch = next.search;
+  if (previousSearch !== undefined) {
+    if (nextSearch === undefined
+      || previousSearch.text_field !== nextSearch.text_field
+      || previousSearch.title_field !== nextSearch.title_field
+      || narrower(previousSearch.suggest_fields, nextSearch.suggest_fields).length > 0
+      || previousSearch.ranking.kind !== nextSearch.ranking.kind
+      || previousSearch.ranking.title_weight !== nextSearch.ranking.title_weight
+      || previousSearch.ranking.text_weight !== nextSearch.ranking.text_weight
+      || nextSearch.max_terms < previousSearch.max_terms
+      || nextSearch.min_term_length > previousSearch.min_term_length) {
+      breaking.push('search');
+    }
+  }
   // A budget only ever widens: lowering one would refuse a query the previous
   // Contract's own Consumers already compose.
   if (next.max_limit < previous.max_limit) breaking.push('limit');

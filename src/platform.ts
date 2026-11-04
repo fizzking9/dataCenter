@@ -22,7 +22,7 @@ export type DeploymentRole = 'Deployment Administrator';
 export type WorkspaceRole = 'Workspace Administrator' | 'Consumer';
 
 export const DEPLOYMENT_CONTEXT_ARTIFACT = 'deployment-business-context';
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 export const USERNAME_PATTERN = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,189}$/;
 
 export interface UserRecord {
@@ -161,6 +161,10 @@ export function readPlatform(root: string): PlatformState {
   state.data_products ??= [];
   state.data_product_grants ??= [];
   state.exports ??= [];
+  // Documents added no Collection: an Integration Configuration Version may
+  // carry a document envelope and a Dataset Release may name the parser it ran,
+  // and both read as absent on a Deployment written before they existed. A
+  // tabular Release therefore never pretends to have parsed a document.
   // A Run recorded before acquisition was queued still reads as a completed
   // manual attempt rather than a Run that never started.
   for (const run of state.acquisition_runs) {

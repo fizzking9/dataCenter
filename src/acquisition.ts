@@ -38,7 +38,7 @@ export function uploadAcquisition(options: {
   const actor = resolveActor(session, options.token, context);
   const source = requireAdministeredSource(session, actor, context, options.sourceId);
   const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
-  if (source.type !== 'file') {
+  if (source.type === 'http_json') {
     reject(
       session,
       actorLabel(actor.user),

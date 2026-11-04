@@ -19,6 +19,7 @@ import { queryCacheKey, readCachedPage, writeCachedPage } from './product-cache.
 import { decodeCursor, encodeCursor } from './product-cursor.js';
 import { readQuery, readQueryTarget, type ParsedQuery, type QueryOperator, type QueryTarget, type Window } from './product-query-document.js';
 import { resolveRelease, type ResolvedRelease } from './product-release.js';
+import { orderSearchHits, searchRecords, suggestValues } from './product-search.js';
 import { requireReadableProduct } from './products.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
@@ -232,6 +233,12 @@ function normalizeQuery(
   major: number,
   scopeFingerprint: string,
 ): Record<string, unknown> {
+  if (query.kind === 'search') {
+    return { release, major, scope: scopeFingerprint, kind: 'search', terms: [...query.terms] };
+  }
+  if (query.kind === 'suggest') {
+    return { release, major, scope: scopeFingerprint, kind: 'suggest', q: query.q };
+  }
   if (query.kind === 'records') {
     return { release, major, scope: scopeFingerprint, kind: 'records', filters: query.filters, window: query.window ?? null };
   }
@@ -257,6 +264,18 @@ function normalizeQuery(
  * it would disclose the very values the Grant withholds.
  */
 function requireGrantPermits(query: ParsedQuery, scope: GrantScope, fail: Fail): void {
+  if (query.kind === 'search' || query.kind === 'suggest') {
+    // The text a search reads is a column like any other: a Grant that hides it
+    // refuses the search rather than answering it out of hidden content.
+    if (!scope.columns.includes(query.search.text_field)) {
+      fail(
+        'DATA_PRODUCT_QUERY_REFUSED',
+        `The ${query.search.text_field} field carries the text this search reads, and this Grant does not permit it.`,
+        'Query only the columns the Grant permits.',
+      );
+    }
+    return;
+  }
   for (const filter of query.filters) {
     if (!scope.columns.includes(filter.field)) {
       fail(
@@ -326,6 +345,26 @@ function requireOffsetWithin(offset: number, available: number, fail: Fail): voi
 }
 
 /**
+ * A search page belongs to the Release its own cursor names, so a later Release
+ * never shifts a page a Consumer already opened. The cursor is read before the
+ * Release is resolved, because resolving the newest Release first would answer
+ * the newest page. Naming a Release explicitly still wins — and then disagrees
+ * with the cursor, which the offset check refuses.
+ */
+function pinnedToCursor(
+  session: PlatformSession,
+  request: Record<string, unknown>,
+  target: QueryTarget,
+  fail: Fail,
+): QueryTarget {
+  const kind = request['kind'];
+  if ((kind !== 'search' && kind !== 'suggest') || target.cursor === undefined || target.release !== undefined) {
+    return target;
+  }
+  return { ...target, release: decodeCursor(session.dataKey, target.cursor, fail).release };
+}
+
+/**
  * Answers one Data Product Query against the Data Product Release the Contract
  * was published with, so a later Dataset Release never changes an open Contract.
  *
@@ -359,7 +398,8 @@ export function queryDataProduct(options: {
   if (typeof request !== 'object' || request === null || Array.isArray(request)) {
     fail('DATA_PRODUCT_QUERY_INVALID', 'A Data Product Query must be a JSON object.');
   }
-  const target = readQueryTarget(request as Record<string, unknown>, fail);
+  const stated = readQueryTarget(request as Record<string, unknown>, fail);
+  const target = pinnedToCursor(session, request as Record<string, unknown>, stated, fail);
   if (product.versions.length === 0 || product.releases.length === 0) {
     reject(session, actorLabel(actor.user), scoped, 'DATA_PRODUCT_NOT_PUBLISHED', 'The Data Product has no Publication to query.');
   }
@@ -382,7 +422,11 @@ export function queryDataProduct(options: {
   const scope = resolveGrantScope(session, actor.user.user_id, role, product, contract, fail);
   requireGrantPermits(query, scope, fail);
   const queryHash = canonicalDigest(normalizeQuery(query, release.release, major, scope.fingerprint));
-  const queryFilters = [...scope.rowFilters, ...query.filters];
+  // A search reads its rows through the Grant's own row filters alone; a record
+  // or aggregate query adds the filters it states.
+  const queryFilters = query.kind === 'records' || query.kind === 'aggregate'
+    ? [...scope.rowFilters, ...query.filters]
+    : [];
   const offset = readOffset(session, target, { version, release, major }, queryHash, fail);
   const cacheKey = queryCacheKey({
     release: release.release,
@@ -465,6 +509,73 @@ export function queryDataProduct(options: {
     writeCachedPage(session.root, session.dataKey, cacheKey, response);
     return { ...response, cache: { reused: false } };
   };
+
+  if (query.kind === 'search') {
+    const hits = orderSearchHits(
+      searchRecords(permittedRows, query.search, query.terms, scope.columns),
+      contract,
+    );
+    requireOffsetWithin(offset, hits.length, fail);
+    const page = hits.slice(offset, offset + query.limit);
+    const records = page.map((hit) => {
+      const values: Record<string, string | number | null> = {};
+      for (const name of scope.columns) {
+        values[name] = hit.record.values[name] ?? null;
+      }
+      return { ...values, score: hit.score, matched_terms: [...hit.matched] };
+    });
+    const more = offset + records.length < hits.length;
+    requireBudget();
+    session.audit({
+      ...scoped,
+      actor: actorLabel(actor.user),
+      outcome: 'succeeded',
+      detail: { data_product_release: release.release, matched_count: hits.length, returned: records.length },
+    });
+    return remember({
+      ...identity,
+      kind: 'search',
+      query: { terms: [...query.terms], text_field: query.search.text_field },
+      ranking: { ...query.search.ranking },
+      columns: [...scope.columns],
+      records,
+      matched_count: hits.length,
+      returned: records.length,
+      truncated: more,
+      next_cursor: more
+        ? encodeCursor(session.dataKey, {
+          release: release.release,
+          major,
+          queryHash,
+          offset: offset + records.length,
+        })
+        : null,
+      limit: query.limit,
+      scanned_records: permitted,
+      provenance,
+    });
+  }
+
+  if (query.kind === 'suggest') {
+    const suggestions = suggestValues(permittedRows, query.search, query.q, scope.columns, query.limit);
+    requireBudget();
+    session.audit({
+      ...scoped,
+      actor: actorLabel(actor.user),
+      outcome: 'succeeded',
+      detail: { data_product_release: release.release, suggestion_count: suggestions.length },
+    });
+    return remember({
+      ...identity,
+      kind: 'suggest',
+      query: { q: query.q, fields: [...query.search.suggest_fields] },
+      suggestions,
+      returned: suggestions.length,
+      limit: query.limit,
+      scanned_records: permitted,
+      provenance,
+    });
+  }
 
   if (query.kind === 'records') {
     const selected = orderRecords(
