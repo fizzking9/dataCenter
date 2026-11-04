@@ -13,6 +13,9 @@ import type {
   RawAcquisitionRecord,
   SourceAcquisitionArtifact,
   SourceRecord,
+  ArtifactProposalRecord,
+  ModelProfileArtifact,
+  WorkspaceModelBindingRecord,
 } from './catalog.js';
 import type { MfaRecord } from './enrollment.js';
 import { readJsonFile, writeJsonFile } from './state.js';
@@ -22,7 +25,7 @@ export type DeploymentRole = 'Deployment Administrator';
 export type WorkspaceRole = 'Workspace Administrator' | 'Consumer';
 
 export const DEPLOYMENT_CONTEXT_ARTIFACT = 'deployment-business-context';
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 export const USERNAME_PATTERN = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,189}$/;
 
 export interface UserRecord {
@@ -103,6 +106,9 @@ export interface PlatformState {
   data_products: DataProductArtifact[];
   data_product_grants: DataProductGrantRecord[];
   exports: ExportRecord[];
+  model_profiles: ModelProfileArtifact[];
+  model_bindings: WorkspaceModelBindingRecord[];
+  artifact_proposals: ArtifactProposalRecord[];
 }
 
 /** Every human identity is stated as one account identifier of the form name@domain. */
@@ -145,6 +151,9 @@ export function readPlatform(root: string): PlatformState {
         data_products: [],
         data_product_grants: [],
         exports: [],
+        model_profiles: [],
+        model_bindings: [],
+        artifact_proposals: [],
       };
   // A Deployment installed under an earlier schema keeps working: the added
   // Collections start empty rather than failing the read closed.
@@ -161,6 +170,9 @@ export function readPlatform(root: string): PlatformState {
   state.data_products ??= [];
   state.data_product_grants ??= [];
   state.exports ??= [];
+  state.model_profiles ??= [];
+  state.model_bindings ??= [];
+  state.artifact_proposals ??= [];
   // A Run recorded before acquisition was queued still reads as a completed
   // manual attempt rather than a Run that never started.
   for (const run of state.acquisition_runs) {

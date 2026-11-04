@@ -15,6 +15,7 @@ import {
   type DatasetReleaseRecord,
   type DatasetSchemaField,
   type IntegrationConfigurationVersion,
+  type ProposalTransformation,
   type RawAcquisitionRecord,
   type RecordRejection,
 } from './catalog.js';
@@ -36,7 +37,7 @@ interface IntegrationOutcome {
 }
 
 /** One fragment's source records, whichever representation acquired them. */
-interface FragmentTable {
+export interface FragmentTable {
   header: string[];
   rows: Array<{ row: number; cells: string[] }>;
 }
@@ -62,7 +63,7 @@ function fragmentTable(
   session: PlatformSession,
   actor: Actor,
   context: ActionContext,
-  version: IntegrationConfigurationVersion,
+  configuration: { mapping: Record<string, string> },
   raw: RawAcquisitionRecord,
   text: string,
 ): FragmentTable {
@@ -93,7 +94,7 @@ function fragmentTable(
   // An empty page names no columns and has no rows to lose, so it keeps the
   // mapped ones and lets the mapping check pass on evidence it does not have.
   const header = records.length === 0
-    ? Object.keys(version.mapping)
+    ? Object.keys(configuration.mapping)
     : [...new Set(records.flatMap((record) => (isRecord(record) ? Object.keys(record) : [])))];
   if (records.length > 0 && header.length === 0) {
     reject(session, actorLabel(actor.user), context, 'INTEGRATION_FRAGMENT_MALFORMED', 'A connector Raw Acquisition holds records that are not objects.');
@@ -107,6 +108,26 @@ function fragmentTable(
       )),
     })),
   };
+}
+
+/**
+ * Reads one Raw Acquisition into the same header-and-rows table whichever way
+ * it was acquired, so a Proposal preview runs what a Release would run.
+ */
+export function rawTableOf(
+  session: PlatformSession,
+  actor: Actor,
+  context: ActionContext,
+  configuration: { mapping: Record<string, string> },
+  raw: RawAcquisitionRecord,
+): FragmentTable {
+  let text: string;
+  try {
+    text = readFileSync(join(session.root, raw.object_path), 'utf8');
+  } catch {
+    reject(session, actorLabel(actor.user), context, 'RAW_ACQUISITION_UNAVAILABLE', 'A Raw Acquisition for this Batch cannot be read.');
+  }
+  return fragmentTable(session, actor, context, configuration, raw, text);
 }
 
 function applyCleaning(rules: CleaningRule[], field: string, value: string): { value: string } | { rejected: string } {
@@ -155,68 +176,93 @@ function coerce(
  * Batch. A source record that cannot become a canonical record becomes a Record
  * Rejection, so the rest of the snapshot still governs.
  */
-function integrate(
-  session: PlatformSession,
-  actor: Actor,
-  context: ActionContext,
-  version: IntegrationConfigurationVersion,
-  fragments: BatchFragment[],
-): IntegrationOutcome {
+/**
+ * The exact integration semantics a candidate is exercised under, named without
+ * a published Version so a Proposal can run before anything is published.
+ */
+export interface IntegrationRules {
+  identity: string[];
+  schema: DatasetSchemaField[];
+  cleaning: CleaningRule[];
+  mapping: Record<string, string>;
+  /** The Version number every Record Rejection is recorded under. */
+  version: number;
+}
+
+/**
+ * What one Integration Configuration would do to one table. `unmapped` names
+ * raw columns the configuration ignores; `missing` names mapped columns the
+ * table does not carry, so a caller can report drift instead of guessing.
+ */
+export interface TableOutcome {
+  records: DatasetRecordRow[];
+  rejections: RecordRejection[];
+  transformations: ProposalTransformation[];
+  unmapped: string[];
+  missing: string[];
+}
+
+/**
+ * Applies one Integration Configuration to one table without writing anything.
+ * A Dataset Release and a Proposal preview both run here, so a preview reports
+ * exactly what a Release would do, and neither invents a second semantic.
+ */
+export function applyIntegrationTable(
+  rules: IntegrationRules,
+  table: FragmentTable,
+  rawId: string,
+  seenInBatch: Set<string> = new Set<string>(),
+): TableOutcome {
   const records = new Map<string, DatasetRecordRow>();
   const rejections: RecordRejection[] = [];
-  const mapped = Object.entries(version.mapping);
-  const seenInBatch = new Set<string>();
-  let currentBatch: string | null = null;
+  const transformations: ProposalTransformation[] = [];
+  const mapped = Object.entries(rules.mapping);
+  const unmapped = table.header.filter((column) => rules.mapping[column] === undefined);
+  const missing = mapped.map(([column]) => column).filter((column) => !table.header.includes(column));
+  const seenInFragment = new Set<string>();
 
-  for (const fragment of fragments) {
-    const raw = fragment.raw;
-    if (fragment.batch_id !== currentBatch) {
-      currentBatch = fragment.batch_id;
-      seenInBatch.clear();
-    }
-    let text: string;
-    try {
-      text = readFileSync(join(session.root, raw.object_path), 'utf8');
-    } catch {
-      reject(session, actorLabel(actor.user), context, 'RAW_ACQUISITION_UNAVAILABLE', 'A Raw Acquisition for this Batch cannot be read.');
-    }
-    const document = fragmentTable(session, actor, context, version, raw, text);
-    const unknown = mapped.map(([column]) => column).filter((column) => !document.header.includes(column));
-    if (unknown.length > 0) {
-      reject(
-        session,
-        actorLabel(actor.user),
-        context,
-        'INTEGRATION_MAPPING_UNKNOWN_COLUMN',
-        `The acquired file has no source column named: ${unknown.join(', ')}.`,
-      );
-    }
-
-    const seenInFragment = new Set<string>();
-    for (const row of document.rows) {
+  if (missing.length === 0) {
+    for (const row of table.rows) {
       const rejectRow = (field: string | null, rule: RecordRejection['rule'], reason: string): void => {
         rejections.push({
-          raw_id: raw.raw_id,
+          raw_id: rawId,
           row: row.row,
           field,
           rule,
           reason,
-          integration_configuration_version: version.version,
+          integration_configuration_version: rules.version,
         });
       };
 
       const values: Record<string, string | number | null> = {};
       let failed = false;
       for (const [column, field] of mapped) {
-        const schemaField = version.schema.find((candidate) => candidate.name === field)!;
-        const rawValue = row.cells[document.header.indexOf(column)] ?? '';
-        const cleaned = applyCleaning(version.cleaning, field, rawValue);
-        if ('rejected' in cleaned) {
-          rejectRow(field, 'require_non_empty', cleaned.rejected);
-          failed = true;
-          break;
+        const schemaField = rules.schema.find((candidate) => candidate.name === field)!;
+        const rawValue = row.cells[table.header.indexOf(column)] ?? '';
+        let cleanedValue = rawValue;
+        for (const rule of rules.cleaning) {
+          if (rule.field !== field) continue;
+          const cleaned = applyCleaning([rule], field, cleanedValue);
+          if ('rejected' in cleaned) {
+            rejectRow(field, rule.rule, cleaned.rejected);
+            failed = true;
+            break;
+          }
+          if (cleaned.value !== cleanedValue) {
+            // A preview reports what the rule really changed, not that it ran.
+            transformations.push({
+              raw_id: rawId,
+              row: row.row,
+              field,
+              rule: rule.rule,
+              before: cleanedValue,
+              after: cleaned.value,
+            });
+            cleanedValue = cleaned.value;
+          }
         }
-        const coerced = coerce(schemaField, cleaned.value);
+        if (failed) break;
+        const coerced = coerce(schemaField, cleanedValue);
         if ('rejected' in coerced) {
           rejectRow(field, 'type', coerced.rejected);
           failed = true;
@@ -226,22 +272,71 @@ function integrate(
       }
       if (failed) continue;
 
-      const missing = version.identity_fields.find((field) => values[field] === null || values[field] === '');
-      if (missing !== undefined) {
-        rejectRow(missing, 'identity', 'IDENTITY_MISSING');
+      const absent = rules.identity.find((field) => values[field] === null || values[field] === '');
+      if (absent !== undefined) {
+        rejectRow(absent, 'identity', 'IDENTITY_MISSING');
         continue;
       }
-      const identity = version.identity_fields.map((field) => `${field}=${String(values[field])}`).join('|');
+      const identity = rules.identity.map((field) => `${field}=${String(values[field])}`).join('|');
       // A repeat inside one Batch is an ambiguous record, but a repeat across
       // Batches is a later acquisition of the same record and wins.
       if (seenInFragment.has(identity) || seenInBatch.has(identity)) {
-        rejectRow(version.identity_fields[0] ?? null, 'identity', 'DUPLICATE_IDENTITY');
+        rejectRow(rules.identity[0] ?? null, 'identity', 'DUPLICATE_IDENTITY');
         continue;
       }
       seenInFragment.add(identity);
       seenInBatch.add(identity);
       records.set(identity, { identity, values });
     }
+  }
+
+  return { records: [...records.values()], rejections, transformations, unmapped, missing };
+}
+
+/**
+ * Applies one Integration Configuration Version to every Raw Acquisition in the
+ * Batch. A source record that cannot become a canonical record becomes a Record
+ * Rejection, so the rest of the snapshot still governs.
+ */
+function integrate(
+  session: PlatformSession,
+  actor: Actor,
+  context: ActionContext,
+  version: IntegrationConfigurationVersion,
+  fragments: BatchFragment[],
+): IntegrationOutcome {
+  const records = new Map<string, DatasetRecordRow>();
+  const rejections: RecordRejection[] = [];
+  const rules: IntegrationRules = {
+    identity: version.identity_fields,
+    schema: version.schema,
+    cleaning: version.cleaning,
+    mapping: version.mapping,
+    version: version.version,
+  };
+  const mapped = Object.keys(version.mapping);
+  let currentBatch: string | null = null;
+  let seenInBatch = new Set<string>();
+
+  for (const fragment of fragments) {
+    if (fragment.batch_id !== currentBatch) {
+      currentBatch = fragment.batch_id;
+      seenInBatch = new Set<string>();
+    }
+    const table = rawTableOf(session, actor, context, { mapping: version.mapping }, fragment.raw);
+    const unknown = mapped.filter((column) => !table.header.includes(column));
+    if (unknown.length > 0) {
+      reject(
+        session,
+        actorLabel(actor.user),
+        context,
+        'INTEGRATION_MAPPING_UNKNOWN_COLUMN',
+        `The acquired file has no source column named: ${unknown.join(', ')}.`,
+      );
+    }
+    const outcome = applyIntegrationTable(rules, table, fragment.raw.raw_id, seenInBatch);
+    for (const record of outcome.records) records.set(record.identity, record);
+    rejections.push(...outcome.rejections);
   }
 
   return {
