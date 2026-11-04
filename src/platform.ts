@@ -22,7 +22,7 @@ export type DeploymentRole = 'Deployment Administrator';
 export type WorkspaceRole = 'Workspace Administrator' | 'Consumer';
 
 export const DEPLOYMENT_CONTEXT_ARTIFACT = 'deployment-business-context';
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 export const USERNAME_PATTERN = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,189}$/;
 
 export interface UserRecord {
@@ -58,6 +58,60 @@ export interface SessionRecord {
   revoked_at: string | null;
 }
 
+/** The lifecycle an Agent Identity passes through; a revoked one authenticates nothing. */
+export type AgentIdentityStatus = 'active' | 'revoked';
+
+/**
+ * A deployment-owned non-human principal an external API or MCP actor acts as.
+ * It belongs to explicit Workspaces and carries explicit MCP scopes, and it
+ * reads a Data Product only under a Data Product Grant naming it.
+ */
+export interface AgentIdentityRecord {
+  agent_identity_id: string;
+  name: string;
+  workspace_ids: string[];
+  scopes: string[];
+  status: AgentIdentityStatus;
+  created_at: string;
+  created_by: string;
+  revoked_at: string | null;
+}
+
+/**
+ * One pre-registered OAuth client an Agent Identity authenticates with. It is
+ * registered from a Client ID Metadata Document, so the Deployment never runs
+ * open Dynamic Client Registration and never lets a client name its own scope.
+ */
+export interface OAuthClientRecord {
+  client_id: string;
+  client_name: string;
+  redirect_uris: string[];
+  agent_identity_id: string;
+  client_secret_hash: string;
+  created_at: string;
+  created_by: string;
+  revoked_at: string | null;
+}
+
+/**
+ * One access token the Deployment minted for itself. The claims are stored, not
+ * only the hash, because every request re-proves the exact issuer, resource,
+ * audience, client, and redirect the token was issued under.
+ */
+export interface AccessTokenRecord {
+  token_hash: string;
+  issuer: string;
+  audience: string;
+  resource: string;
+  client_id: string;
+  agent_identity_id: string;
+  scopes: string[];
+  redirect_uri: string | null;
+  issued_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+}
+
 export interface ContextEntry {
   key: string;
   kind: 'metric' | 'definition' | 'dimension';
@@ -87,6 +141,9 @@ export interface ContextArtifact {
 export interface PlatformState {
   schema_version: number;
   users: UserRecord[];
+  agent_identities: AgentIdentityRecord[];
+  oauth_clients: OAuthClientRecord[];
+  access_tokens: AccessTokenRecord[];
   workspaces: WorkspaceRecord[];
   memberships: MembershipRecord[];
   sessions: SessionRecord[];
@@ -129,6 +186,9 @@ export function readPlatform(root: string): PlatformState {
     : {
         schema_version: CURRENT_SCHEMA_VERSION,
         users: [],
+        agent_identities: [],
+        oauth_clients: [],
+        access_tokens: [],
         workspaces: [],
         memberships: [],
         sessions: [],
@@ -149,6 +209,9 @@ export function readPlatform(root: string): PlatformState {
   // A Deployment installed under an earlier schema keeps working: the added
   // Collections start empty rather than failing the read closed.
   state.schema_version = CURRENT_SCHEMA_VERSION;
+  state.agent_identities ??= [];
+  state.oauth_clients ??= [];
+  state.access_tokens ??= [];
   state.sources ??= [];
   state.acquisition_connections ??= [];
   state.source_acquisitions ??= [];
@@ -209,6 +272,14 @@ export function findUser(state: PlatformState, username: string): UserRecord | u
 
 export function findUserById(state: PlatformState, userId: string): UserRecord | undefined {
   return state.users.find((user) => user.user_id === userId);
+}
+
+export function findAgentIdentity(state: PlatformState, agentIdentityId: string): AgentIdentityRecord | undefined {
+  return state.agent_identities.find((agent) => agent.agent_identity_id === agentIdentityId);
+}
+
+export function findOAuthClient(state: PlatformState, clientId: string): OAuthClientRecord | undefined {
+  return state.oauth_clients.find((client) => client.client_id === clientId);
 }
 
 export function findWorkspace(state: PlatformState, workspaceId: string): WorkspaceRecord | undefined {

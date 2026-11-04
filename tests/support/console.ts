@@ -27,7 +27,7 @@ export async function startConsole(fixture: PlatformFixture): Promise<ConsoleHan
     url,
     port: Number(listening.port),
     async stop() {
-      if (child.exitCode !== null) return;
+      if (child.exitCode !== null || child.signalCode !== null) return;
       const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
       child.kill();
       await exited;

@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { issueAccessToken, OAuthError, resolveAccessToken } from './agents.js';
+import { openPlatform } from './session.js';
 
 /** The one protocol revision this Deployment serves; older peers cannot fall forward into it. */
 export const MCP_PROTOCOL_VERSION = '2026-07-28';
@@ -55,6 +57,10 @@ export async function handleMcpSurface(
     await handleMcp(options, request, response);
     return true;
   }
+  if (url.pathname === '/oauth/token') {
+    await handleToken(options, request, response);
+    return true;
+  }
   if (url.pathname === '/.well-known/oauth-protected-resource' || url.pathname === '/.well-known/oauth-protected-resource/mcp') {
     sendJson(response, 200, protectedResourceMetadata(options.identity));
     return true;
@@ -109,6 +115,19 @@ async function handleMcp(
         -1,
         { allow: 'POST' },
         'Send each JSON-RPC message as its own POST.',
+      );
+    }
+    // Origin is a property of the HTTP request, not a claim inside the token:
+    // a browser context that is not this Deployment's origin has no MCP surface.
+    const origin = headerOne(request.headers.origin);
+    if (origin !== undefined && origin !== '' && origin !== options.identity.origin) {
+      throw new McpFailure(
+        403,
+        'MCP_ORIGIN_NOT_ALLOWED',
+        'The request came from an Origin this Deployment does not serve.',
+        -1,
+        { origin: options.identity.origin },
+        'Send the request from this Deployment\'s own origin.',
       );
     }
     if (headerOne(request.headers['mcp-session-id']) !== undefined) {
@@ -230,15 +249,167 @@ function discoverResult(): Record<string, unknown> {
 }
 
 /**
- * Authorization is required for every tool operation. It arrives with the next
- * slice; discovery is deliberately the only unauthenticated operation.
+ * Authorization is required for every tool operation; discovery is deliberately
+ * the only unauthenticated operation. The bearer token is resolved against this
+ * Deployment\'s own issuer and resource, never forwarded anywhere.
  */
 async function resolveAuthenticated(
-  _request: IncomingMessage,
-  _options: McpSurfaceOptions,
-  _context: { jsonrpcMethod: string; params: Record<string, unknown> },
+  request: IncomingMessage,
+  options: McpSurfaceOptions,
+  context: { jsonrpcMethod: string; params: Record<string, unknown> },
 ): Promise<Record<string, unknown>> {
-  throw new McpFailure(401, 'MCP_AUTHENTICATION_REQUIRED', 'Every tool operation requires an access token.', INVALID_REQUEST);
+  const resourceMetadata = `${options.identity.origin}/.well-known/oauth-protected-resource`;
+  const token = bearerToken(request);
+  if (token === undefined) {
+    throw new McpFailure(
+      401,
+      'MCP_AUTHENTICATION_REQUIRED',
+      'Every tool operation requires an access token.',
+      -1,
+      { resource_metadata: resourceMetadata },
+      'Obtain a token from this Deployment and send it as a Bearer credential.',
+    );
+  }
+  const session = openPlatform(options.root, options.masterKey);
+  const grant = resolveAccessToken(session.state, token, options.identity.origin, mcpResource(options.identity));
+  if (grant.kind === 'rejected') {
+    throw new McpFailure(401, grant.code, grant.message, -1, { resource_metadata: resourceMetadata });
+  }
+  const scopes = new Set(grant.scopes);
+  if (context.jsonrpcMethod === 'tools/list') {
+    return { tools: TOOLS.filter((tool) => tool.scopes.every((scope) => scopes.has(scope))).map(toolView) };
+  }
+  return callTool(session, grant, context.params);
+}
+
+/** Reads the Bearer credential a request presents, or nothing at all. */
+function bearerToken(request: IncomingMessage): string | undefined {
+  const header = headerOne(request.headers.authorization);
+  if (header === undefined) return undefined;
+  const match = /^Bearer +([A-Za-z0-9._~+/-]+=*)$/i.exec(header.trim());
+  return match?.[1];
+}
+
+interface McpTool {
+  name: string;
+  title: string;
+  description: string;
+  scopes: string[];
+  inputSchema: Record<string, unknown>;
+}
+
+/**
+ * The generic read-only tools this Deployment publishes. They are driven by the
+ * Contract, so no Data Product ever gets a bespoke tool.
+ */
+const TOOLS: McpTool[] = [
+  {
+    name: 'discover_data_products',
+    title: 'Discover Data Products',
+    description: 'Lists the published Data Products in one Workspace that this Agent Identity may read, with the fields, metrics, and filters its Grants permit.',
+    scopes: ['mcp:read'],
+    inputSchema: {
+      type: 'object',
+      properties: { workspace_id: { type: 'string', description: 'The Workspace whose Data Products to discover.' } },
+      required: ['workspace_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'read_data_product_contract',
+    title: 'Read Data Product Contract',
+    description: 'Reads the Contract of one published Data Product: its fields, dimensions, metrics, grain, time, filters, and limits, narrowed to what this Agent Identity may read.',
+    scopes: ['mcp:read'],
+    inputSchema: {
+      type: 'object',
+      properties: { data_product_id: { type: 'string', description: 'The Data Product whose Contract to read.' } },
+      required: ['data_product_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'query_data_product',
+    title: 'Query Data Product',
+    description: 'Answers one Data Product Query against the pinned Release, with the same records, cursors, Provenance, and errors the Data Product API answers.',
+    scopes: ['mcp:read'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        data_product_id: { type: 'string', description: 'The Data Product to query.' },
+        query: { type: 'object', description: 'The Data Product Query document, exactly as the Data Product API accepts it.' },
+      },
+      required: ['data_product_id', 'query'],
+      additionalProperties: false,
+    },
+  },
+];
+
+/**
+ * The token endpoint. It mints one short-lived access token for a pre-registered
+ * client and answers with RFC 6749 error documents, so a client learns exactly
+ * which claim was refused.
+ */
+async function handleToken(
+  options: McpSurfaceOptions,
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  try {
+    if ((request.method ?? 'GET') !== 'POST') {
+      throw new McpFailure(405, 'OAUTH_TOKEN_METHOD_UNSUPPORTED', 'The token endpoint accepts POST only.', -1, { allow: 'POST' });
+    }
+    if (!mediaTypeIs(headerOne(request.headers['content-type']), 'application/x-www-form-urlencoded')) {
+      throw new McpFailure(415, 'OAUTH_TOKEN_CONTENT_TYPE_UNSUPPORTED', 'A token request must be posted as application/x-www-form-urlencoded.', -1);
+    }
+    const form = await readForm(request);
+    sendJson(response, 200, issueAccessToken({
+      root: options.root,
+      masterKey: options.masterKey,
+      origin: options.identity.origin,
+      form,
+    }));
+  } catch (error) {
+    if (error instanceof OAuthError) {
+      sendJson(response, error.status, { error: error.error, error_description: error.message });
+      return;
+    }
+    if (error instanceof McpFailure) {
+      sendFailure(response, error, null);
+      return;
+    }
+    throw error;
+  }
+}
+
+async function readForm(request: IncomingMessage): Promise<Record<string, string>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = chunk as Buffer;
+    size += buffer.length;
+    if (size > MAX_MCP_BODY_BYTES) {
+      throw new McpFailure(413, 'OAUTH_REQUEST_TOO_LARGE', 'The token request is too large.', -1);
+    }
+    chunks.push(buffer);
+  }
+  const form: Record<string, string> = {};
+  for (const [name, value] of new URLSearchParams(Buffer.concat(chunks).toString('utf8'))) {
+    form[name] = value;
+  }
+  return form;
+}
+
+/** Dispatches one tool invocation; every tool answers or fails as a tool result. */
+function callTool(
+  _session: ReturnType<typeof openPlatform>,
+  _grant: { agent: { name: string }; client: { client_id: string }; scopes: string[] },
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  throw new McpFailure(400, 'MCP_TOOL_NOT_FOUND', `${String(params['name'])} is not a tool this Deployment publishes.`, INVALID_PARAMS);
+}
+
+function toolView(tool: McpTool): Record<string, unknown> {
+  return { name: tool.name, title: tool.title, description: tool.description, inputSchema: tool.inputSchema };
 }
 
 function readParams(value: unknown): Record<string, unknown> {
