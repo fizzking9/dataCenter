@@ -12,6 +12,7 @@ import {
 } from './operators.js';
 import { OperatorError } from './errors.js';
 import { readLicenseSummary } from './license.js';
+import { handleMcpSurface, type McpServerIdentity } from './mcp.js';
 import { openPlatform } from './session.js';
 import { deploymentStatus } from './status.js';
 import { readDeployment } from './state.js';
@@ -92,7 +93,10 @@ export async function startConsoleServer(options: ConsoleServerOptions): Promise
       'Build the application before serving the Operator Console.',
     );
   }
-  const handler = createHandler(options, assets);
+  // The MCP resource and issuer are the Deployment's own bound origin, not a
+  // client-supplied Host header, so no token can name another resource server.
+  const identity: McpServerIdentity = { origin: '' };
+  const handler = createHandler(options, assets, identity);
   const server: Server = createServer((request, response) => {
     handler(request, response).catch((error: unknown) => {
       if (!response.headersSent) sendFailure(response, error);
@@ -104,6 +108,7 @@ export async function startConsoleServer(options: ConsoleServerOptions): Promise
     // The Console is a host-local surface: it never binds off the loopback address.
     server.listen(options.port, '127.0.0.1', () => {
       server.off('error', rejectListen);
+      identity.origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
       resolveListen();
     });
   });
@@ -117,12 +122,15 @@ export async function startConsoleServer(options: ConsoleServerOptions): Promise
   };
 }
 
-function createHandler(options: ConsoleServerOptions, assets: string) {
+function createHandler(options: ConsoleServerOptions, assets: string, identity: McpServerIdentity) {
   return async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) response.setHeader(name, value);
     const url = new URL(request.url ?? '/', 'http://localhost');
     if (url.pathname.startsWith('/api/')) {
       await handleApi(options, request, response, url.pathname);
+      return;
+    }
+    if (await handleMcpSurface({ root: options.root, masterKey: options.masterKey, identity }, request, response, url)) {
       return;
     }
     await serveAsset(request, response, assets, url.pathname);
