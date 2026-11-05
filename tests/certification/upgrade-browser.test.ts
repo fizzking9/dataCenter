@@ -211,8 +211,8 @@ test('an Operator upgrades, verifies, and finalizes a signed maintenance window 
     const status = ok(command(fixture, ['status', '--operator', OPERATOR]));
     assert.equal(status['release'], '0.2.0');
     assert.equal(status['state'], 'verified_open');
-    assert.equal(asRecord(status['rollback_window'])['eligible'], false);
-    assert.equal(asRecord(status['rollback_window'])['closed_by'], 'finalize');
+    assert.equal(asRecord(status['application_rollback_window'])['eligible'], false);
+    assert.equal(asRecord(status['application_rollback_window'])['closed_by'], 'finalize');
     const refused = command(fixture, ['rollback', '--operator', OPERATOR]);
     assert.equal(refused.status, 2, refused.stderr);
     assert.equal(refused.error['code'], 'ROLLBACK_NOT_ELIGIBLE');
@@ -285,7 +285,7 @@ test('offline Application Rollback preserves current data and post-upgrade write
     const status = ok(command(fixture, ['status', '--operator', OPERATOR]));
     assert.equal(status['release'], '0.1.0');
     assert.equal(status['service_open'], true);
-    assert.equal(asRecord(status['rollback_window'])['closed_by'], 'rollback');
+    assert.equal(asRecord(status['application_rollback_window'])['closed_by'], 'rollback');
     for (const productId of [published.dataProductId, postProductId]) {
       const queried = ok(command(fixture, [
         'product', 'query',

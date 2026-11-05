@@ -187,7 +187,7 @@ test('a signed N to N+1 upgrade applies locked expand-only migrations and verifi
   assert.equal(migrations['destructive'], 0);
   assert.equal(migrations['applied_steps'], 3);
   assert.equal(migrations['skipped_steps'], 0);
-  const window = asRecord(upgraded['rollback_window']);
+  const window = asRecord(upgraded['application_rollback_window']);
   assert.equal(window['open'], true);
   assert.equal(window['eligible'], true);
   assert.equal(window['from_release'], '0.1.0');
@@ -211,7 +211,7 @@ test('a signed N to N+1 upgrade applies locked expand-only migrations and verifi
   const status = ok(command(fixture, ['status', '--operator', OPERATOR]));
   assert.equal(status['release'], '0.2.0');
   assert.equal(status['service_open'], true);
-  assert.equal(asRecord(status['rollback_window'])['open'], true);
+  assert.equal(asRecord(status['application_rollback_window'])['open'], true);
 
   const verified = ok(command(fixture, ['verify', '--operator', OPERATOR]));
   assert.equal(verified['passed'], true);
@@ -291,7 +291,7 @@ test('post-upgrade writes stay readable and governable after an offline Applicat
   assert.equal(rolledBack['data_unchanged'], true);
   assert.equal(rolledBack['offline'], true);
   assert.equal(Number(rolledBack['records_after_upgrade']) >= 2, true);
-  const closed = asRecord(rolledBack['rollback_window']);
+  const closed = asRecord(rolledBack['application_rollback_window']);
   assert.equal(closed['open'], false);
   assert.equal(closed['eligible'], false);
   assert.equal(closed['closed_by'], 'rollback');
@@ -335,7 +335,7 @@ test('post-upgrade writes stay readable and governable after an offline Applicat
   const status = ok(command(fixture, ['status', '--operator', OPERATOR]));
   assert.equal(status['release'], '0.1.0');
   assert.equal(status['service_open'], true);
-  assert.equal(asRecord(status['rollback_window'])['eligible'], false);
+  assert.equal(asRecord(status['application_rollback_window'])['eligible'], false);
 
   const repeated = command(fixture, ['rollback', '--operator', OPERATOR]);
   assert.equal(repeated.status, 2);
@@ -442,8 +442,8 @@ test('finalization ends rollback eligibility before cleanup and before another u
   const finalized = ok(command(fixture, ['finalize', '--operator', OPERATOR]));
   assert.equal(finalized['changed'], true);
   assert.equal(finalized['rollback_eligible'], false);
-  assert.equal(asRecord(finalized['rollback_window'])['open'], false);
-  assert.equal(asRecord(finalized['rollback_window'])['closed_by'], 'finalize');
+  assert.equal(asRecord(finalized['application_rollback_window'])['open'], false);
+  assert.equal(asRecord(finalized['application_rollback_window'])['closed_by'], 'finalize');
   assert.deepEqual(finalized['cleanup'], { previous_release: '0.1.0', removed: true });
   assert.equal(existsSync(join(fixture.root, 'releases', '0.1.0')), false);
 
@@ -459,8 +459,8 @@ test('finalization ends rollback eligibility before cleanup and before another u
   assert.equal(upgraded['to_release'], '0.2.1');
   assert.equal(upgraded['from_release'], '0.2.0');
   assert.equal(asRecord(upgraded['migrations'])['applied_steps'], 2);
-  assert.equal(asRecord(upgraded['rollback_window'])['from_release'], '0.2.0');
-  assert.equal(asRecord(upgraded['rollback_window'])['to_release'], '0.2.1');
+  assert.equal(asRecord(upgraded['application_rollback_window'])['from_release'], '0.2.0');
+  assert.equal(asRecord(upgraded['application_rollback_window'])['to_release'], '0.2.1');
 
   const verified = ok(command(fixture, ['verify', '--operator', OPERATOR]));
   assert.equal(verified['passed'], true);

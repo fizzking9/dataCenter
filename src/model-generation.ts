@@ -185,7 +185,7 @@ const PLAN_QUERY_KEYS = [
 ];
 const PART_KEYS = ['product', 'query'];
 /** How many independent Data Product Queries one compound question may plan. */
-export const MAX_PLAN_PARTS = 8;
+export const MAX_PLAN_PARTS = 4;
 const MISSING_KINDS = ['period', 'dimension', 'metric', 'filter_value'];
 const QUERY_KINDS = ['records', 'aggregate', 'search', 'suggest'];
 

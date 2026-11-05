@@ -57,7 +57,7 @@ test('MCP exposes generic discovery, Contract, and direct-query tools narrowed t
     assert.deepEqual((contract['fields'] as Array<Record<string, unknown>>).map((field) => field['name']), ['sn', 'city']);
     assert.deepEqual((contract['metrics'] as Array<Record<string, unknown>>).map((metric) => metric['name']), ['device_count']);
     assert.deepEqual(contract['grain'], ['sn']);
-    assert.deepEqual(contract['limits'], { max_scanned_records: 100_000, max_groups: 10_000, max_execution_ms: 5_000 });
+    assert.deepEqual(contract['limits'], { max_scanned_records: 100_000, max_groups: 5_000, max_execution_ms: 5_000 });
 
     const answered = toolPayload(await callTool(console.url, token, 'query_data_product', {
       workspace_id: workspaceId,

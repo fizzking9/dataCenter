@@ -6,7 +6,7 @@ import { readPlatform } from './platform.js';
 import { retentionHealth } from './retention.js';
 import { healthyServices } from './runtime.js';
 import { readDeployment, readJsonFile, recordEvidence } from './state.js';
-import { rollbackWindow } from './upgrade.js';
+import { applicationRollbackWindow } from './upgrade.js';
 
 export function deploymentStatus(options: {
   root: string;
@@ -48,7 +48,7 @@ export function deploymentStatus(options: {
       access: 'closed',
       release: deployment.release,
       deployment_id: deployment.deployment_id,
-      rollback_window: rollbackWindow(options.root),
+      application_rollback_window: applicationRollbackWindow(options.root),
       license,
       ...recovery,
       evidence_id: evidenceId,
@@ -67,7 +67,7 @@ export function deploymentStatus(options: {
       access: 'read_only',
       release: deployment.release,
       deployment_id: deployment.deployment_id,
-      rollback_window: rollbackWindow(options.root),
+      application_rollback_window: applicationRollbackWindow(options.root),
       license,
       ...recovery,
       evidence_id: evidenceId,
@@ -102,7 +102,7 @@ export function deploymentStatus(options: {
     access: 'full',
     release: deployment.release,
     deployment_id: deployment.deployment_id,
-    rollback_window: rollbackWindow(options.root),
+    application_rollback_window: applicationRollbackWindow(options.root),
     runtime_services: services,
     mfa_enrolled: deployment.mfa_enrolled === true,
     default_credentials: deployment.default_credentials !== false,
