@@ -33,9 +33,21 @@ import { listGrants, publishGrant, revokeGrant } from './grants.js';
 import { initializeDeployment } from './initialize.js';
 import { installDeployment } from './install.js';
 import { adoptIntegrationConfiguration, publishIntegrationConfiguration } from './integration.js';
+import { publishModelBinding, showModelBinding } from './model-binding.js';
+import { activateModelProfile, evaluateModelProfile, publishModelProfile, showModelProfile } from './model-profile.js';
 import { importLicense, readLicenseSummary } from './license.js';
 import { queryDataProduct } from './product-query.js';
 import { listDataProductReleases, listDataProducts, publishDataProduct, withdrawDataProductVersion } from './products.js';
+import {
+  adoptProposal,
+  approveProposal,
+  generateProposal,
+  previewProposal,
+  publishProposal,
+  rejectProposal,
+  showProposal,
+  validateProposal,
+} from './proposal.js';
 import { createSource } from './sources.js';
 import { adoptSourceAcquisition, publishSourceAcquisition } from './source-acquisition.js';
 import { deploymentStatus } from './status.js';
@@ -46,7 +58,7 @@ import { createWorkspace, grantMembership, listWorkspaces, revokeMembership } fr
 const GROUPED_COMMANDS = new Set([
   'user', 'workspace', 'membership', 'ownership', 'context', 'audit',
   'source', 'connection', 'acquisition', 'acquisition-config', 'integration', 'dataset',
-  'product', 'grant', 'export', 'console', 'agent',
+  'product', 'grant', 'export', 'console', 'agent', 'model', 'binding', 'proposal',
 ]);
 const BOOLEAN_FLAGS = new Set([
   'admin-password-stdin', 'password-stdin', 'deployment-administrator', 'credential-stdin',
@@ -545,6 +557,97 @@ async function main(): Promise<void> {
       masterKey: required(options, 'master-key'),
       operator: required(options, 'operator'),
     }));
+    return;
+  }
+  if (command === 'model' && subcommand === 'publish') {
+    emit(publishModelProfile({
+      ...governed(options),
+      name: required(options, 'name'),
+      configPath: required(options, 'config'),
+      ...(options.get('credential-stdin') === 'true' ? { credential: readStdin() } : {}),
+    }));
+    return;
+  }
+  if (command === 'model' && subcommand === 'evaluate') {
+    emit(await evaluateModelProfile({
+      ...governed(options),
+      profileId: required(options, 'profile'),
+      version: Number(required(options, 'version')),
+    }));
+    return;
+  }
+  if (command === 'model' && subcommand === 'activate') {
+    emit(activateModelProfile({
+      ...governed(options),
+      profileId: required(options, 'profile'),
+      version: Number(required(options, 'version')),
+    }));
+    return;
+  }
+  if (command === 'model' && subcommand === 'show') {
+    emit(showModelProfile({ ...governed(options), profileId: required(options, 'profile') }));
+    return;
+  }
+  if (command === 'binding' && subcommand === 'publish') {
+    emit(await publishModelBinding({
+      ...governed(options),
+      workspaceId: required(options, 'workspace'),
+      profileId: required(options, 'profile'),
+      configPath: required(options, 'config'),
+    }));
+    return;
+  }
+  if (command === 'binding' && subcommand === 'show') {
+    emit(showModelBinding({ ...governed(options), bindingId: required(options, 'binding') }));
+    return;
+  }
+  if (command === 'proposal' && subcommand === 'generate') {
+    emit(await generateProposal({
+      ...governed(options),
+      sourceId: required(options, 'source'),
+      bindingId: required(options, 'binding'),
+      evidencePath: required(options, 'evidence'),
+    }));
+    return;
+  }
+  if (command === 'proposal' && subcommand === 'validate') {
+    emit(validateProposal({
+      ...governed(options),
+      proposalId: required(options, 'proposal'),
+      fixturesPath: required(options, 'fixtures'),
+    }));
+    return;
+  }
+  if (command === 'proposal' && subcommand === 'preview') {
+    emit(previewProposal({
+      ...governed(options),
+      proposalId: required(options, 'proposal'),
+      rawId: required(options, 'raw'),
+    }));
+    return;
+  }
+  if (command === 'proposal' && subcommand === 'reject') {
+    emit(rejectProposal({
+      ...governed(options),
+      proposalId: required(options, 'proposal'),
+      reason: required(options, 'reason'),
+    }));
+    return;
+  }
+  if (command === 'proposal' && subcommand === 'approve') {
+    emit(approveProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
+    return;
+  }
+  if (command === 'proposal' && subcommand === 'publish') {
+    emit(publishProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
+    return;
+  }
+  if (command === 'proposal' && subcommand === 'adopt') {
+    emit(adoptProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
+    return;
+  }
+  if (command === 'proposal' && subcommand === 'show') {
+    emit(showProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
     return;
   }
   throw new Error(`Unsupported lifecycle command: ${[command, subcommand].filter(Boolean).join(' ')}.`);

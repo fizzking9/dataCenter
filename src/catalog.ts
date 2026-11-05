@@ -770,3 +770,318 @@ export function activeAgentGrants(
       && grant.revoked_at === null,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Governed generation: Model Profiles, Workspace Model Bindings, and Proposals.
+// ---------------------------------------------------------------------------
+
+/** How a Model Profile Version speaks to its administrator-supplied endpoint. */
+export type ModelAdapterKind = 'hosted' | 'generic_local';
+
+/** The generation purposes a Model Profile Version supports. */
+export type ModelPurpose = 'integration_proposal' | 'grounded_narration' | 'clarification';
+
+/** The data categories a Model Profile Version may receive for a purpose. */
+export type ModelDataCategory = 'dataset_schema' | 'cleaning_rules' | 'source_mapping' | 'sample_records';
+
+/** One prompt an exact Model Profile Version pins for one purpose. */
+export interface ModelPrompt {
+  id: ModelPurpose;
+  body: string;
+  hash: string;
+}
+
+/** One gate an activation evaluation, or a Binding preflight, reports on. */
+export interface ModelProfileCheck {
+  name: string;
+  passed: boolean;
+  detail: string | null;
+}
+
+/**
+ * The activation evidence one exact Model Profile Version produced. A Deployment
+ * Administrator evaluates a Version; the Version cannot activate without it.
+ */
+export interface ModelProfileEvaluation {
+  model_profile_version: number;
+  model_profile_content_hash: string;
+  evaluated_at: string;
+  evaluated_by: string;
+  adapter: ModelAdapterKind;
+  model_id: string;
+  passed: boolean;
+  checks: ModelProfileCheck[];
+  evidence_hash: string;
+}
+
+/** One immutable Model Profile Version: endpoint, contract, credential, and prompts. */
+export interface ModelProfileVersion {
+  version: number;
+  published_at: string;
+  published_by: string;
+  adapter: ModelAdapterKind;
+  /** The administrator-supplied endpoint this Version may call, and only it. */
+  endpoint_url: string;
+  model_id: string;
+  /** The name of this Version's stored credential, which its content hash pins. */
+  credential_ref: string;
+  /** The sealed credential itself; a later Version never rewrites this one's. */
+  credential: SealedSecret | null;
+  purposes: ModelPurpose[];
+  data_categories: ModelDataCategory[];
+  /** The declarative tools this Version may expose; nothing else exists. */
+  tools: string[];
+  max_output_bytes: number;
+  prompts: ModelPrompt[];
+  content_hash: string;
+}
+
+/** A Deployment Artifact holding the Model Profile Versions and the activated one. */
+export interface ModelProfileArtifact {
+  model_profile_id: string;
+  name: string;
+  owner_user_id: string;
+  created_at: string;
+  activated_version: number | null;
+  activated_at: string | null;
+  versions: ModelProfileVersion[];
+  /** Append-only activation evidence, always naming the exact Version it judged. */
+  evaluations: ModelProfileEvaluation[];
+}
+
+/** The preflight evidence a Workspace Model Binding was created under. */
+export interface ModelBindingPreflight {
+  checked_at: string;
+  passed: boolean;
+  checks: ModelProfileCheck[];
+  evidence_hash: string;
+}
+
+/**
+ * A Workspace-scoped reference enabling one exact Model Profile Version for a
+ * permitted purpose and data-category set. It carries no endpoint and no
+ * credential, so resolving it never discloses provider settings.
+ */
+export interface WorkspaceModelBindingRecord {
+  binding_id: string;
+  workspace_id: string;
+  model_profile_id: string;
+  model_profile_version: number;
+  model_profile_content_hash: string;
+  purposes: ModelPurpose[];
+  data_categories: ModelDataCategory[];
+  preflight: ModelBindingPreflight;
+  created_at: string;
+  created_by: string;
+  created_by_user_id: string;
+  revoked_at: string | null;
+}
+
+/** The Artifact Versions one Proposal was generated against. */
+export interface ProposalBase {
+  integration_configuration_version: number | null;
+  integration_configuration_content_hash: string | null;
+}
+
+/** The exact model, prompt, and Binding one Proposal was generated under. */
+export interface ProposalModelPin {
+  model_profile_id: string;
+  model_profile_version: number;
+  model_profile_content_hash: string;
+  adapter: ModelAdapterKind;
+  model_id: string;
+  prompt_id: ModelPurpose;
+  prompt_hash: string;
+}
+
+/** What the generated change was derived from, and how much of it there was. */
+export interface ProposalEvidence {
+  data_dictionary_hash: string;
+  data_dictionary_fields: string[];
+  field_count: number;
+}
+
+/**
+ * The candidate Artifact Versions one Proposal groups. The schema, cleaning, and
+ * mapping candidates are the components of the composite Integration
+ * Configuration candidate, so Approval covers all of them or none.
+ */
+export interface ProposalCandidates {
+  schema: { candidate_version: number; fields: DatasetSchemaField[]; hash: string };
+  cleaning: { candidate_version: number; rules: CleaningRule[]; hash: string };
+  mapping: { candidate_version: number; mapping: Record<string, string>; hash: string };
+  integration_configuration: {
+    version: number;
+    identity_fields: string[];
+    schema_hash: string;
+    cleaning_hash: string;
+    mapping_hash: string;
+    content_hash: string;
+  };
+}
+
+/** One value a cleaning rule changed while a candidate was exercised. */
+export interface ProposalTransformation {
+  raw_id: string;
+  row: number;
+  field: string;
+  rule: CleaningRuleName;
+  before: string;
+  after: string;
+}
+
+/** What a candidate would change relative to its base and to a real source table. */
+export interface ProposalDrift {
+  base_present: boolean;
+  schema: {
+    added: string[];
+    removed: string[];
+    retyped: Array<{ field: string; from: DatasetFieldType; to: DatasetFieldType }>;
+  };
+  cleaning: { added: string[]; removed: string[] };
+  mapping: {
+    added: string[];
+    removed: string[];
+    retargeted: Array<{ column: string; from: string; to: string }>;
+  };
+  /** How a real raw table lines up with the candidate mapping. */
+  raw_columns: { unmapped: string[]; missing: string[] };
+}
+
+/** The evidence one deterministic validation run produced for one Proposal. */
+export interface ProposalValidationRecord {
+  validated_at: string;
+  validated_by: string;
+  fixtures: Array<{
+    name: string;
+    header: string[];
+    record_count: number;
+    transformed: number;
+    rejected: number;
+    transformations: ProposalTransformation[];
+    rejections: RecordRejection[];
+    drift: ProposalDrift;
+  }>;
+  evidence_hash: string;
+}
+
+/** The evidence one isolated preview of a real Raw Acquisition produced. */
+export interface ProposalPreviewRecord {
+  previewed_at: string;
+  previewed_by: string;
+  raw_id: string;
+  acquisition_run_id: string;
+  record_count: number;
+  transformed: number;
+  rejected: number;
+  records_hash: string;
+  transformations: ProposalTransformation[];
+  rejections: RecordRejection[];
+  drift: ProposalDrift;
+  evidence_hash: string;
+}
+
+/** The lineage every Approval, Publication, and Adoption restates. */
+export interface ProposalProvenance {
+  model_profile_id: string;
+  model_profile_version: number;
+  model_profile_content_hash: string;
+  adapter: ModelAdapterKind;
+  model_id: string;
+  binding_id: string;
+  prompt_id: ModelPurpose;
+  prompt_hash: string;
+  data_dictionary_hash: string;
+  validation_hash: string;
+  preview_hash: string;
+  candidate_content_hash: string;
+  proposal_hash: string;
+}
+
+/** One Workspace Administrator decision on one exact Proposal. */
+export interface ProposalDecisionRecord {
+  decided_at: string;
+  decided_by: string;
+  actor: string;
+  outcome: 'approved' | 'rejected';
+  reason: string | null;
+  model: ProposalModelPin;
+  evidence_hash: string;
+  provenance: ProposalProvenance;
+}
+
+/** The lifecycle fact making the approved candidate available for Adoption. */
+export interface ProposalPublicationRecord {
+  published_at: string;
+  published_by: string;
+  actor: string;
+  integration_configuration_version: number;
+  model: ProposalModelPin;
+  evidence_hash: string;
+  provenance: ProposalProvenance;
+}
+
+/** The lifecycle fact binding the Source to the published candidate. */
+export interface ProposalAdoptionRecord {
+  adopted_at: string;
+  adopted_by: string;
+  actor: string;
+  integration_configuration_version: number;
+  previous_adopted_version: number | null;
+  model: ProposalModelPin;
+  evidence_hash: string;
+  provenance: ProposalProvenance;
+}
+
+/**
+ * One immutable review unit for one logical generated change, grouping the exact
+ * candidate Artifact Versions and their evidence for all-or-nothing Approval.
+ */
+export interface ArtifactProposalRecord {
+  proposal_id: string;
+  workspace_id: string;
+  source_id: string;
+  created_at: string;
+  created_by: string;
+  created_by_user_id: string;
+  binding_id: string;
+  base: ProposalBase;
+  model: ProposalModelPin;
+  evidence: ProposalEvidence;
+  candidates: ProposalCandidates;
+  /** The content address of everything above; a mismatched record is refused. */
+  proposal_hash: string;
+  validations: ProposalValidationRecord[];
+  previews: ProposalPreviewRecord[];
+  decisions: ProposalDecisionRecord[];
+  publications: ProposalPublicationRecord[];
+  adoptions: ProposalAdoptionRecord[];
+}
+
+export function findModelProfile(
+  profiles: ModelProfileArtifact[],
+  modelProfileId: string,
+): ModelProfileArtifact | undefined {
+  return profiles.find((profile) => profile.model_profile_id === modelProfileId);
+}
+
+export function findModelProfileVersion(
+  profile: ModelProfileArtifact | undefined,
+  version: number,
+): ModelProfileVersion | undefined {
+  return profile?.versions.find((candidate) => candidate.version === version);
+}
+
+export function findModelBinding(
+  bindings: WorkspaceModelBindingRecord[],
+  bindingId: string,
+): WorkspaceModelBindingRecord | undefined {
+  return bindings.find((binding) => binding.binding_id === bindingId);
+}
+
+export function findArtifactProposal(
+  proposals: ArtifactProposalRecord[],
+  proposalId: string,
+): ArtifactProposalRecord | undefined {
+  return proposals.find((proposal) => proposal.proposal_id === proposalId);
+}
