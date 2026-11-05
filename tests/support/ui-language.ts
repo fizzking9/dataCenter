@@ -35,8 +35,12 @@ export async function copyLeaks(page: Page): Promise<CopyLeak[]> {
       || /^[a-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)+\.?$/u.test(text)
       || /^[A-Z0-9][A-Z0-9 .%+\-–—/]*$/u.test(text);
 
+    // Product brand names are governed identifiers written in Latin letters in
+    // Chinese prose; naming any number of them never turns a sentence English.
+    const BRANDS = new Set(['MinIO', 'PostgreSQL']);
     const englishWords = (text: string): string[] =>
-      (text.match(/[A-Za-z][A-Za-z'-]*/gu) ?? []).filter((word) => word.length >= 3 && /[a-z]/u.test(word));
+      (text.match(/[A-Za-z][A-Za-z'-]*/gu) ?? [])
+        .filter((word) => !BRANDS.has(word) && word.length >= 3 && /[a-z]/u.test(word));
 
     // English prose joins words with spaces; a Chinese sentence naming two
     // branded services ("对象存储 MinIO、数据库 PostgreSQL") does not.
