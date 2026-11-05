@@ -47,8 +47,9 @@ function aggregationLabel(aggregation: string): string {
   return optional(`value.aggregation.${aggregation}`) ?? aggregation;
 }
 
+/** One deterministic validation check: the governed ASCII id still picks the Chinese label. */
 function checkLabel(check: string): string {
-  return optional(`productProposal.check.${check}`) ?? check;
+  return optional(`productProposal.check.${check.replace(/:/gu, '.')}`) ?? check;
 }
 
 function recordOf(value: unknown): Record<string, unknown> {
