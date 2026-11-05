@@ -14,8 +14,10 @@ import {
   type DataProductMajorLine,
   type DataProductRelease,
   type DataProductVersion,
+  type DatasetArtifact,
   type DatasetReleaseRecord,
   type DatasetSchemaField,
+  type SourceRecord,
 } from './catalog.js';
 import { canonicalDigest } from './crypto.js';
 import type { Fail } from './errors.js';
@@ -30,65 +32,50 @@ const NAME_MINIMUM = 2;
 const NAME_MAXIMUM = 128;
 
 /** The stable logical path a published Data Product serves; no endpoint is generated. */
-function apiPath(workspaceId: string, dataProductId: string): string {
+export function apiPath(workspaceId: string, dataProductId: string): string {
   return `/api/workspaces/${workspaceId}/data-products/${dataProductId}/query`;
 }
 
-/**
- * Publishes one Data Product Version and its Data Product Release, binding both
- * to the current Dataset Release. Publication is the act that exposes the API.
- *
- * A name is the identity of one published API, so reusing it for another Dataset
- * is refused rather than silently repointing a Consumer's endpoint.
- */
-export function publishDataProduct(options: {
-  root: string;
-  masterKey: string;
-  token: string;
-  sourceId: string;
-  name: string;
-  contractPath: string;
-}): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
-  const context: ActionContext = { action: 'data_product_publication', scope: 'workspace' };
-  const actor = resolveActor(session, options.token, context);
-  const source = requireAdministeredSource(session, actor, context, options.sourceId);
-  const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
+/** What one Publication of one Contract Version produced. */
+export interface ContractPublication {
+  product: DataProductArtifact;
+  version: DataProductVersion;
+  release: DataProductRelease;
+}
 
-  const dataset = findDataset(session.state.datasets, source.source_id);
-  const datasetRelease = latestDatasetRelease(dataset);
-  if (!dataset || !datasetRelease) {
-    reject(
-      session,
-      actorLabel(actor.user),
-      scoped,
-      'DATASET_RELEASE_NOT_FOUND',
-      'The Source has no Dataset Release to publish as a Data Product.',
-      'Release the Dataset before publishing a Data Product over it.',
-    );
-  }
+/**
+ * Publishes one Contract Version and its Data Product Release into the open
+ * Session, binding both to the exact Dataset Release the caller pinned. The
+ * caller owns the save, so a Proposal Publication and its lifecycle fact land
+ * together or not at all.
+ */
+export function publishContractVersion(options: {
+  session: PlatformSession;
+  actor: Actor;
+  context: ActionContext;
+  source: SourceRecord;
+  dataset: DatasetArtifact;
+  datasetRelease: DatasetReleaseRecord;
+  name: string;
+  contract: DataProductContract;
+}): ContractPublication {
+  const { session, actor, source, dataset, datasetRelease, contract } = options;
+  const scoped = options.context;
+  const actorName = actorLabel(actor.user);
   const name = options.name.trim();
   if (name.length < NAME_MINIMUM || name.length > NAME_MAXIMUM) {
-    reject(session, actorLabel(actor.user), scoped, 'DATA_PRODUCT_NAME_INVALID', 'A Data Product name must contain 2 to 128 characters.');
+    reject(session, actorName, scoped, 'DATA_PRODUCT_NAME_INVALID', 'A Data Product name must contain 2 to 128 characters.');
   }
-  const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), scoped, code, message, nextStep);
-  const contract = readContract(
-    fail,
-    options.contractPath,
-    schemaOf(session, actorLabel(actor.user), scoped, source.source_id, datasetRelease),
-  );
-  requireServeableGrain(session, actorLabel(actor.user), scoped, contract, datasetRelease);
+  requireServeableGrain(session, actorName, scoped, contract, datasetRelease);
 
   let product = session.state.data_products.find(
     (candidate) => candidate.workspace_id === source.workspace_id && candidate.name.toLowerCase() === name.toLowerCase(),
   );
-  const alreadyBound = product === undefined
-    ? undefined
-    : latestDataProductRelease(product)?.dataset_id;
+  const alreadyBound = product === undefined ? undefined : latestDataProductRelease(product)?.dataset_id;
   if (product && alreadyBound !== undefined && alreadyBound !== dataset.dataset_id) {
     reject(
       session,
-      actorLabel(actor.user),
+      actorName,
       scoped,
       'DATA_PRODUCT_NAME_TAKEN',
       'This name is already the published Data Product API of another Dataset.',
@@ -131,6 +118,56 @@ export function publishDataProduct(options: {
   product.versions.push(version);
   product.releases.push(release);
   advanceLine(product, version, release);
+  return { product, version, release };
+}
+
+/**
+ * Publishes one Data Product Version and its Data Product Release from a
+ * Contract file, binding both to the current Dataset Release. Publication is
+ * the act that exposes the API.
+ */
+export function publishDataProduct(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  sourceId: string;
+  name: string;
+  contractPath: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'data_product_publication', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const source = requireAdministeredSource(session, actor, context, options.sourceId);
+  const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
+
+  const dataset = findDataset(session.state.datasets, source.source_id);
+  const datasetRelease = latestDatasetRelease(dataset);
+  if (!dataset || !datasetRelease) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      scoped,
+      'DATASET_RELEASE_NOT_FOUND',
+      'The Source has no Dataset Release to publish as a Data Product.',
+      'Release the Dataset before publishing a Data Product over it.',
+    );
+  }
+  const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), scoped, code, message, nextStep);
+  const contract = readContract(
+    fail,
+    options.contractPath,
+    schemaOf(session, actorLabel(actor.user), scoped, source.source_id, datasetRelease),
+  );
+  const { product, version, release } = publishContractVersion({
+    session,
+    actor,
+    context: scoped,
+    source,
+    dataset,
+    datasetRelease,
+    name: options.name,
+    contract,
+  });
 
   session.audit({
     ...scoped,
@@ -141,8 +178,8 @@ export function publishDataProduct(options: {
       data_product_version: version.version,
       data_product_release: release.release,
       dataset_release: release.dataset_release,
-      contract_major: contractVersion.major,
-      contract_minor: contractVersion.minor,
+      contract_major: version.contract_version.major,
+      contract_minor: version.contract_version.minor,
     },
   });
   session.save();
@@ -154,7 +191,7 @@ export function publishDataProduct(options: {
     data_product_version: version.version,
     data_product_release: release.release,
     dataset_release: release.dataset_release,
-    contract_version: { ...contractVersion },
+    contract_version: { ...version.contract_version },
     contract_hash: version.contract_hash,
     published_at: version.published_at,
     released_at: release.created_at,
@@ -193,7 +230,7 @@ function advanceLine(
  * Release it is published over. A coarser grain would let one record stand for
  * several and double count every metric, so the Publication is refused instead.
  */
-function requireServeableGrain(
+export function requireServeableGrain(
   session: PlatformSession,
   actor: string,
   context: ActionContext,
@@ -218,7 +255,7 @@ function requireServeableGrain(
   }
 }
 
-function schemaOf(
+export function schemaOf(
   session: PlatformSession,
   actor: string,
   context: ActionContext,

@@ -422,6 +422,16 @@ export async function evaluateModelProfile(options: {
       return STRUCTURED_OUTPUT.integration_proposal;
     });
   }
+  if (version.purposes.includes('data_product_proposal')) {
+    await record('structured_output:data_product_proposal', async () => {
+      const answer = await generateForPurpose(pinned, 'data_product_proposal', EVALUATION_INPUTS.data_product_proposal, failure);
+      const fields = answer.output['fields'];
+      if (!Array.isArray(fields) || fields.length === 0) {
+        throw new OperatorError('MODEL_STRUCTURED_OUTPUT_INVALID', 'The answer did not honour the declared structured output.');
+      }
+      return STRUCTURED_OUTPUT.data_product_proposal;
+    });
+  }
   await record('constrained_tools', async () => {
     // The request exposes only the tools its purpose declares, so any tool call
     // in the answer is the endpoint reaching outside what it was given.

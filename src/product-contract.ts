@@ -77,16 +77,17 @@ function readNameList(
  * Schema behind it. A Contract never restates the Dataset Schema; it selects
  * from it.
  */
-export function readContract(fail: Fail, path: string, schema: DatasetSchemaField[]): DataProductContract {
-  const parsed = readJsonDocument(
-    path,
-    fail,
-    'DATA_PRODUCT_CONTRACT_UNREADABLE',
-    'The Data Product Contract file must contain valid JSON.',
-  );
-  if (!isRecord(parsed)) {
-    fail('DATA_PRODUCT_CONTRACT_INVALID', 'A Data Product Contract must be a JSON object.');
-  }
+/**
+ * Validates one already-parsed Contract document against the exact Dataset
+ * Schema behind it. Generation and publication both reach this function, so a
+ * generated candidate is never validated by a second Contract model.
+ */
+export function parseContract(
+  fail: Fail,
+  document: Record<string, unknown>,
+  schema: DatasetSchemaField[],
+): DataProductContract {
+  const parsed: Record<string, unknown> = document;
   const title = typeof parsed['title'] === 'string' ? parsed['title'].trim() : '';
   if (title.length < TITLE_MINIMUM || title.length > TITLE_MAXIMUM) {
     fail('DATA_PRODUCT_CONTRACT_INVALID', 'A Data Product Contract title must contain 2 to 128 characters.');
@@ -120,6 +121,20 @@ export function readContract(fail: Fail, path: string, schema: DatasetSchemaFiel
     limits,
     ...(search === undefined ? {} : { search }),
   };
+}
+
+/** Reads one Contract file and validates it exactly as a generated candidate is. */
+export function readContract(fail: Fail, path: string, schema: DatasetSchemaField[]): DataProductContract {
+  const parsed = readJsonDocument(
+    path,
+    fail,
+    'DATA_PRODUCT_CONTRACT_UNREADABLE',
+    'The Data Product Contract file must contain valid JSON.',
+  );
+  if (!isRecord(parsed)) {
+    fail('DATA_PRODUCT_CONTRACT_INVALID', 'A Data Product Contract must be a JSON object.');
+  }
+  return parseContract(fail, parsed, schema);
 }
 
 function readFields(fail: Fail, raw: unknown, schema: DatasetSchemaField[]): DataProductContract['fields'] {

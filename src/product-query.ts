@@ -356,6 +356,11 @@ export interface DataProductQueryExecution {
   request: unknown;
   /** How the calling surface reports a structured failure. */
   fail: Fail;
+  /**
+   * Whether the answer may be reused from, and written to, the page cache.
+   * An isolated preview sets this false so it persists nothing at all.
+   */
+  persistCache?: boolean;
 }
 
 /**
@@ -491,7 +496,8 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
   // A page is reused only under the complete security and Release context the
   // key states, and only after this request's reader and Grants have been
   // resolved, so no revocation is ever bypassed.
-  const cached = readCachedPage(session.root, session.dataKey, cacheKey);
+  const persistCache = options.persistCache !== false;
+  const cached = persistCache ? readCachedPage(session.root, session.dataKey, cacheKey) : null;
   if (cached !== null) {
     session.audit({
       ...scoped,
@@ -504,7 +510,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
 
   /** Records the answer for reuse under exactly this context, then returns it. */
   const remember = (response: Record<string, unknown>): Record<string, unknown> => {
-    writeCachedPage(session.root, session.dataKey, cacheKey, response);
+    if (persistCache) writeCachedPage(session.root, session.dataKey, cacheKey, response);
     return { ...response, cache: { reused: false } };
   };
 

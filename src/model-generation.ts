@@ -15,6 +15,8 @@ import { REFUSED_KEYS } from './product-query-document.js';
 /** The purposes a Model Profile Version may declare, in evaluation order. */
 export const MODEL_PURPOSES: ModelPurpose[] = [
   'integration_proposal',
+  'integration_proposal',
+  'data_product_proposal',
   'grounded_narration',
   'clarification',
   'query_plan',
@@ -32,6 +34,7 @@ export const MODEL_DATA_CATEGORIES: ModelDataCategory[] = [
 /** The declared structured-output shape each purpose has to answer with. */
 export const STRUCTURED_OUTPUT: Record<ModelPurpose, string> = {
   integration_proposal: 'integration_configuration_candidate',
+  data_product_proposal: 'data_product_contract_candidate',
   grounded_narration: 'grounded_narrative',
   clarification: 'clarification_question',
   query_plan: 'data_product_query_plan',
@@ -40,6 +43,7 @@ export const STRUCTURED_OUTPUT: Record<ModelPurpose, string> = {
 /** The tools each purpose may expose; nothing outside this closed set exists. */
 const PURPOSE_TOOLS: Record<ModelPurpose, string[]> = {
   integration_proposal: ['read_data_dictionary'],
+  data_product_proposal: [],
   grounded_narration: ['read_governed_result'],
   clarification: [],
   query_plan: [],
@@ -225,6 +229,29 @@ export async function generateIntegrationCandidate(
   });
 }
 
+/**
+ * Runs one Data Product generation under the exact pinned Version and returns
+ * the candidate Contract document. The caller validates it with the same
+ * Contract parser publication uses, so a candidate is never a second model.
+ */
+export async function generateProductCandidate(
+  profile: PinnedModelProfile,
+  input: unknown,
+  fail: AdapterFailure,
+): Promise<Record<string, unknown>> {
+  const result = await generateForPurpose(profile, 'data_product_proposal', input, fail);
+  if (result.tool_calls.length > 0) {
+    // The authorized schema and Business Context are already supplied, so a
+    // tool call would mean the endpoint looked somewhere it was not given.
+    fail('MODEL_STRUCTURED_OUTPUT_INVALID', 'The Model Profile answer used a tool the Data Product Proposal generation did not need.');
+  }
+  const output = result.output['contract'] ?? result.output;
+  if (!isRecord(output)) {
+    fail('MODEL_STRUCTURED_OUTPUT_INVALID', 'The Model Profile answer did not contain a Data Product Contract candidate.');
+  }
+  return output;
+}
+
 /** Runs one grounded-narration generation and refuses ungrounded or English prose. */
 export async function generateGroundedNarration(
   profile: PinnedModelProfile,
@@ -272,6 +299,25 @@ export const EVALUATION_INPUTS = {
       { city: '杭州', handled_count: 5 },
       { city: '上海', handled_count: 3 },
     ],
+  },
+  data_product_proposal: {
+    name: '设备处理量表',
+    requirement: '按城市汇总设备处理量与结算金额。',
+    clarifications: [],
+    dataset: {
+      dataset_id: 'evaluation-dataset',
+      release: 1,
+      identity_fields: ['sn'],
+      fields: [
+        { name: 'sn', type: 'string', description: '设备序列号' },
+        { name: 'city', type: 'string', description: '所在城市' },
+        { name: 'handled_count', type: 'integer', description: '当日处理量' },
+      ],
+    },
+    metric_definitions: [
+      { key: 'handled_count_total', value: '处理量合计', unit: '次' },
+    ],
+    business_context: { common_version: 1, workspace_version: 1 },
   },
   clarification: {
     question: '处理量',

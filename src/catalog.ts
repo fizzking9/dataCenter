@@ -779,7 +779,12 @@ export function activeAgentGrants(
 export type ModelAdapterKind = 'hosted' | 'generic_local';
 
 /** The generation purposes a Model Profile Version supports. */
-export type ModelPurpose = 'integration_proposal' | 'grounded_narration' | 'clarification' | 'query_plan';
+export type ModelPurpose =
+  | 'integration_proposal'
+  | 'data_product_proposal'
+  | 'grounded_narration'
+  | 'clarification'
+  | 'query_plan';
 
 /** The data categories a Model Profile Version may receive for a purpose. */
 export type ModelDataCategory = 'dataset_schema' | 'cleaning_rules' | 'source_mapping' | 'sample_records' | 'product_contract';
@@ -1037,7 +1042,9 @@ export interface ProposalAdoptionRecord {
  * One immutable review unit for one logical generated change, grouping the exact
  * candidate Artifact Versions and their evidence for all-or-nothing Approval.
  */
-export interface ArtifactProposalRecord {
+export interface IntegrationProposalRecord {
+  /** Discriminates the Proposal kinds one collection holds; absent reads as integration. */
+  kind?: 'integration';
   proposal_id: string;
   workspace_id: string;
   source_id: string;
@@ -1057,6 +1064,150 @@ export interface ArtifactProposalRecord {
   publications: ProposalPublicationRecord[];
   adoptions: ProposalAdoptionRecord[];
 }
+
+/** The Dataset Release and Business Context facts a Data Product Proposal was generated against. */
+export interface DataProductProposalBase {
+  dataset_id: string;
+  dataset_release: number;
+  dataset_records_hash: string;
+  dataset_schema_hash: string;
+  common_business_context_version: number;
+  common_business_context_content_hash: string;
+  workspace_business_context_version: number;
+  workspace_business_context_content_hash: string;
+  data_product_id: string | null;
+  data_product_version: number | null;
+  data_product_contract_hash: string | null;
+}
+
+/** One administrator clarification that completed a requirement before generation. */
+export interface RequirementClarification {
+  question: string;
+  answer: string;
+}
+
+/** The natural-language requirement, its clarifications, and their content address. */
+export interface DataProductRequirement {
+  text: string;
+  clarifications: RequirementClarification[];
+  hash: string;
+}
+
+/** What the generated Contract was allowed to draw on, and how much of it there was. */
+export interface DataProductProposalEvidence {
+  requirement_hash: string;
+  dataset_release_hash: string;
+  schema_fields: string[];
+  field_count: number;
+  metric_definition_keys: string[];
+  business_context_hash: string;
+}
+
+/** The one candidate Data Product a Proposal submits for all-or-nothing Approval. */
+export interface DataProductProposalCandidates {
+  name: string;
+  contract: DataProductContract;
+  contract_hash: string;
+  content_hash: string;
+}
+
+/** The evidence one deterministic validation run produced for one Data Product Proposal. */
+export interface DataProductProposalValidationRecord {
+  validated_at: string;
+  validated_by: string;
+  dataset_release: number;
+  contract_hash: string;
+  metric_definition_keys: string[];
+  checks: string[];
+  evidence_hash: string;
+}
+
+/** The evidence one isolated preview of the real Dataset Release produced. */
+export interface DataProductProposalPreviewRecord {
+  previewed_at: string;
+  previewed_by: string;
+  dataset_release: number;
+  contract_hash: string;
+  api_shape: Record<string, unknown>;
+  example_queries: Array<Record<string, unknown>>;
+  representative_results: Array<Record<string, unknown>>;
+  freshness: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  narrative: Record<string, unknown>;
+  evidence_hash: string;
+}
+
+/** The lineage every Data Product Approval and Publication restates. */
+export interface DataProductProposalProvenance {
+  model_profile_id: string;
+  model_profile_version: number;
+  model_profile_content_hash: string;
+  adapter: ModelAdapterKind;
+  model_id: string;
+  binding_id: string;
+  prompt_id: ModelPurpose;
+  prompt_hash: string;
+  requirement_hash: string;
+  validation_hash: string;
+  preview_hash: string;
+  candidate_content_hash: string;
+  proposal_hash: string;
+}
+
+/** One Workspace Administrator decision on one exact Data Product Proposal. */
+export interface DataProductProposalDecisionRecord {
+  decided_at: string;
+  decided_by: string;
+  actor: string;
+  outcome: 'approved' | 'rejected';
+  reason: string | null;
+  model: ProposalModelPin;
+  evidence_hash: string;
+  provenance: DataProductProposalProvenance;
+}
+
+/** The lifecycle fact making the approved Data Product available to Consumers. */
+export interface DataProductProposalPublicationRecord {
+  published_at: string;
+  published_by: string;
+  actor: string;
+  data_product_id: string;
+  data_product_version: number;
+  data_product_release: number;
+  contract_hash: string;
+  model: ProposalModelPin;
+  evidence_hash: string;
+  provenance: DataProductProposalProvenance;
+}
+
+/** One immutable review unit for one generated Data Product Contract. */
+export interface DataProductProposalRecord {
+  kind: 'data_product';
+  proposal_id: string;
+  workspace_id: string;
+  source_id: string;
+  dataset_id: string;
+  created_at: string;
+  created_by: string;
+  created_by_user_id: string;
+  binding_id: string;
+  requirement: DataProductRequirement;
+  base: DataProductProposalBase;
+  model: ProposalModelPin;
+  evidence: DataProductProposalEvidence;
+  candidates: DataProductProposalCandidates;
+  proposal_hash: string;
+  validations: DataProductProposalValidationRecord[];
+  previews: DataProductProposalPreviewRecord[];
+  decisions: DataProductProposalDecisionRecord[];
+  publications: DataProductProposalPublicationRecord[];
+}
+
+/**
+ * Every Proposal the Deployment holds, of either kind. One collection keeps a
+ * Proposal one all-or-nothing review unit whichever Artifact it proposes.
+ */
+export type ArtifactProposalRecord = IntegrationProposalRecord | DataProductProposalRecord;
 
 export function findModelProfile(
   profiles: ModelProfileArtifact[],

@@ -35,6 +35,7 @@ function digest(value: unknown): string {
 /** The data categories a purpose's pinned input actually carries. */
 const PURPOSE_CATEGORIES: Record<ModelPurpose, ModelDataCategory[]> = {
   integration_proposal: ['dataset_schema', 'cleaning_rules', 'source_mapping'],
+  data_product_proposal: ['dataset_schema'],
   grounded_narration: ['sample_records'],
   clarification: [],
   query_plan: ['product_contract'],
@@ -97,6 +98,15 @@ async function preflight(
           throw new OperatorError('MODEL_STRUCTURED_OUTPUT_INVALID', 'The answer did not honour the declared structured output.');
         }
         return 'integration_configuration_candidate';
+      });
+    }
+    if (purpose === 'data_product_proposal') {
+      await record('structured_output', async () => {
+        const answer = await generateForPurpose(pinned, purpose, EVALUATION_INPUTS[purpose], failure);
+        if (!Array.isArray(answer.output['fields']) || answer.output['fields'].length === 0) {
+          throw new OperatorError('MODEL_STRUCTURED_OUTPUT_INVALID', 'The answer did not honour the declared structured output.');
+        }
+        return 'data_product_contract_candidate';
       });
     }
     if (purpose === 'grounded_narration') {
