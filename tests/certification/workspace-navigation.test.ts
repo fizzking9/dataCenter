@@ -198,7 +198,7 @@ test('local sign-in demands administrator MFA or a recovery code and answers eve
     // A correct code signs the administrator in.
     await page.getByLabel('动态验证码', { exact: true }).fill(totpCode(world.deploymentAdministrator.totp!));
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.getByRole('heading', { name: '工作区' }).waitFor();
+    await page.getByRole('heading', { name: '工作区', exact: true }).waitFor();
     assert.equal((await sessionBar(page).innerText()).includes(world.deploymentAdministrator.username), true);
 
     // Signing out ends the session without pretending it expired.
@@ -207,7 +207,7 @@ test('local sign-in demands administrator MFA or a recovery code and answers eve
 
     // A recovery code signs the same administrator in exactly once.
     await signInWithRecoveryCode(page, world.deploymentAdministrator, world.fixture.administrator.recovery_codes[0]!);
-    await page.getByRole('heading', { name: '工作区' }).waitFor();
+    await page.getByRole('heading', { name: '工作区', exact: true }).waitFor();
     await signOut(page);
 
     await signInWithRecoveryCode(page, world.deploymentAdministrator, world.fixture.administrator.recovery_codes[0]!);
@@ -258,12 +258,14 @@ test('Deployment and Workspace navigation are separate trees', async () => {
     const page = await open(browser, consoleServer.url, '/app');
 
     await signIn(page, world.deploymentAdministrator);
-    await page.getByRole('heading', { name: '工作区' }).waitFor();
+    await page.getByRole('heading', { name: '工作区', exact: true }).waitFor();
     assert.equal(await page.getByRole('navigation', { name: '部署导航' }).count(), 1);
     assert.equal(await page.getByRole('navigation', { name: '工作区导航' }).count(), 0);
     assert.equal(await page.getByRole('link', { name: '数据产品' }).count(), 0);
     // Deployment-level governance lists the Workspace, and still shows no content.
-    await page.getByRole('region', { name: '工作区' }).getByText('Operations').waitFor();
+    await page.getByRole('region', { name: '工作区', exact: true })
+      .getByRole('cell', { name: 'Operations', exact: true })
+      .waitFor();
     const administration = await page.locator('body').innerText();
     assert.equal(administration.includes('refund_window'), false, administration);
     assert.equal(administration.includes('region_scope'), false, administration);
@@ -313,9 +315,9 @@ test('deployment navigation stays reachable from inside a Workspace', async () =
 
     // Deployment navigation is its own destination, not a detour through the picker.
     await page.getByRole('link', { name: '工作区' }).click();
-    await page.getByRole('heading', { name: '工作区' }).waitFor();
+    await page.getByRole('heading', { name: '工作区', exact: true }).waitFor();
     assert.equal(page.url(), `${consoleServer.url}/app/deployment`);
-    const administration = await page.getByRole('region', { name: '工作区' }).innerText();
+    const administration = await page.getByRole('region', { name: '工作区', exact: true }).innerText();
     assert.equal(administration.includes('Operations'), true, administration);
     assert.equal(administration.includes('Isolation'), true, administration);
     assert.equal(administration.includes('refund_window'), false, administration);
@@ -507,7 +509,7 @@ test('every built-in Role signs in and reaches only its authorized navigation', 
 
     // Deployment Administrator: deployment navigation only.
     await signIn(page, world.deploymentAdministrator);
-    await page.getByRole('heading', { name: '工作区' }).waitFor();
+    await page.getByRole('heading', { name: '工作区', exact: true }).waitFor();
     assert.match(await sessionBar(page).innerText(), /部署管理员/u);
     await page.goto(`${consoleServer.url}/app/w/${world.operations}/overview`);
     await page.getByRole('heading', { name: '工作区不可用' }).waitFor();

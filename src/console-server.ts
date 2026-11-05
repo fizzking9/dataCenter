@@ -10,7 +10,16 @@ import { browserIdentity, browserNavigation } from './navigation.js';
 import { listDataProducts } from './products.js';
 import { publishModelBinding, revokeModelBinding, showModelBindingWorkspace } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, listModelProfiles, publishModelProfile } from './model-profile.js';
-import { grantMembership, listMemberships, listWorkspaces, revokeMembership } from './workspaces.js';
+import {
+  appointEmergencyAdministrator,
+  createWorkspace,
+  grantMembership,
+  listMemberships,
+  listWorkspaces,
+  revokeMembership,
+} from './workspaces.js';
+import { createUser, deactivateUser, listUsers, transferOwnership } from './users.js';
+import { createServiceIdentity, listServiceIdentities, revokeServiceIdentity } from './service-identities.js';
 import {
   exchangeOperatorEnrollment,
   resolveOperatorSession,
@@ -302,6 +311,112 @@ async function handleApi(
   if (pathname === '/api/deployment/workspaces' && method === 'GET') {
     const token = userSession(request);
     sendJson(response, 200, listWorkspaces({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/workspaces' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, createWorkspace({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      name: text(body, 'name'),
+      administrator: text(body, 'administrator'),
+    }));
+    return;
+  }
+
+  const emergencyRoute = /^\/api\/deployment\/workspaces\/([^/]+)\/emergency-administrator$/u.exec(pathname);
+  if (emergencyRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 200, appointEmergencyAdministrator({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: decodeURIComponent(emergencyRoute[1]!),
+      username: text(body, 'username'),
+    }));
+    return;
+  }
+
+  // Deployment-level identity governance. Every route resolves the platform
+  // session and each module refuses a non-Administrator, so the browser never
+  // decides who may manage identities.
+  if (pathname === '/api/deployment/users' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listUsers({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/users' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, await createUser({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      username: text(body, 'username'),
+      password: text(body, 'password'),
+      deploymentAdministrator: flag(body, 'deployment_administrator'),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/users/deactivate' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 200, deactivateUser({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      username: text(body, 'username'),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/ownership-transfer' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 200, transferOwnership({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      from: text(body, 'from'),
+      to: text(body, 'to'),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/service-identities' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listServiceIdentities({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/service-identities' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, createServiceIdentity({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      name: text(body, 'name'),
+      workspaceIds: identifiers(body, 'workspace_ids'),
+    }));
+    return;
+  }
+
+  const serviceIdentityRoute = /^\/api\/deployment\/service-identities\/([^/]+)\/revoke$/u.exec(pathname);
+  if (serviceIdentityRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, revokeServiceIdentity({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      serviceIdentityId: decodeURIComponent(serviceIdentityRoute[1]!),
+    }));
     return;
   }
 
@@ -643,6 +758,18 @@ function number(body: Record<string, unknown>, field: string): number {
   return typeof value === 'number' ? value : Number.NaN;
 }
 
+/** A checkbox is its own explicit fact; only a JSON boolean states it. */
+function flag(body: Record<string, unknown>, field: string): boolean {
+  return body[field] === true;
+}
+
+/** A non-empty list of governed identifiers, in the order the browser sent them. */
+function identifiers(body: Record<string, unknown>, field: string): string[] {
+  const value = body[field];
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === 'string' && entry !== '');
+}
+
 async function serveAsset(
   request: IncomingMessage,
   response: ServerResponse,
@@ -704,6 +831,24 @@ const STATUS_BY_CODE: Record<string, number> = {
   ROLE_INVALID: 400,
   MEMBERSHIP_NOT_FOUND: 404,
   LAST_ADMINISTRATOR_PROTECTED: 409,
+  USERNAME_INVALID: 400,
+  USER_ALREADY_EXISTS: 409,
+  USER_NOT_FOUND: 404,
+  USER_DEACTIVATED: 409,
+  PASSWORD_INVALID: 400,
+  OWNER_TRANSFER_REQUIRED: 409,
+  OWNERSHIP_TARGET_INVALID: 400,
+  OWNER_NOT_ELIGIBLE: 409,
+  WORKSPACE_NAME_INVALID: 400,
+  WORKSPACE_NAME_TAKEN: 409,
+  WORKSPACE_NOT_FOUND: 404,
+  EMERGENCY_ADMINISTRATOR_NOT_PERMITTED: 403,
+  EMERGENCY_ADMINISTRATOR_NOT_REQUIRED: 409,
+  SERVICE_IDENTITY_NAME_INVALID: 400,
+  SERVICE_IDENTITY_EXISTS: 409,
+  SERVICE_IDENTITY_NAME_CONFLICT: 409,
+  SERVICE_IDENTITY_WORKSPACE_INVALID: 400,
+  SERVICE_IDENTITY_NOT_FOUND: 404,
   CONTEXT_NOT_PUBLISHED: 404,
   CONTEXT_SHADOWS_COMMON: 409,
   CROSS_WORKSPACE_REFERENCE: 409,

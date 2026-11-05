@@ -554,7 +554,7 @@ test('real browser substitution, denial, inheritance, Chinese validation and aud
 
     const deploymentPage = await open(browser, consoleServer.url, '/app');
     await signIn(deploymentPage, world.deploymentAdministrator);
-    await deploymentPage.getByRole('heading', { name: '工作区' }).waitFor();
+    await deploymentPage.getByRole('heading', { name: '工作区', exact: true }).waitFor();
     await deploymentPage.goto(`${consoleServer.url}/app/w/${world.operations}/overview`);
     await deploymentPage.getByRole('heading', { name: '工作区不可用' }).waitFor();
     const deploymentCookie = await cookieHeader(deploymentPage.context());
