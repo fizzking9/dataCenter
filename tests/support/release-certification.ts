@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { canonicalJson, sha256File } from '../../src/crypto.js';
 import { LOCAL_EMBEDDING_CONFIGURATION } from '../../src/embeddings.js';
+import { MODEL_ADAPTERS } from '../../src/model-adapter.js';
 import { createBundleFixture, type BundleFixture } from './bundle.js';
 import { startConsole } from './console.js';
 import { EXTENDED_LEDGER_CONTRACT, acquireAndRelease, publishSource } from './data-product.js';
@@ -21,7 +22,12 @@ import { blockedEgressEnvironment, recordedEgressAttempts, type EgressGuard } fr
 import { verifyEvidenceManifest, writeEvidenceManifest, type WrittenEvidence } from './evidence.js';
 import { fakeDockerEnvironment } from './fake-docker.js';
 import { issueLicense } from './license.js';
-import { MOCK_MODEL_ID, startMockModelEndpoint, type MockModelEndpoint } from './model-endpoint.js';
+import {
+  MOCK_MODEL_ID,
+  startMockModelEndpoint,
+  type MockBehaviour,
+  type MockModelEndpoint,
+} from './model-endpoint.js';
 import { commandAsync } from './async-command.js';
 import { runOperator, type OperatorResult } from './operator.js';
 import {
@@ -73,19 +79,41 @@ export const LEDGER_ORACLE = {
   ],
 } as const;
 
-/** The three provider-native profiles a hosted adapter is certified against. */
+/**
+ * The shipped adapter profile set, plus the two platform-contract adapters that
+ * keep disconnected generation working. Every native provider speaks its own
+ * wire protocol; the generic adapter speaks OpenAI-compatible Chat Completions.
+ */
 export const PROVIDER_PROFILES = [
-  { key: 'alibaba-qwen', name: '通义千问（阿里云原生）', adapter: 'hosted' },
-  { key: 'deepseek', name: '深度求索（DeepSeek 原生）', adapter: 'hosted' },
-  { key: 'openai-compatible', name: 'OpenAI 兼容端点', adapter: 'hosted' },
+  { key: 'alibaba-qwen', name: '通义千问（阿里云原生）', adapter: 'alibaba_qwen' },
+  { key: 'deepseek', name: '深度求索（DeepSeek 原生）', adapter: 'deepseek' },
+  { key: 'openai-compatible', name: 'OpenAI 兼容端点', adapter: 'openai_compatible' },
+  { key: 'hosted-contract', name: '托管契约端点', adapter: 'hosted' },
   { key: 'local-generic', name: '本地通用生成（离线）', adapter: 'generic_local' },
 ] as const;
 
 type ProviderKey = typeof PROVIDER_PROFILES[number]['key'];
-const REAL_MODEL_ENV: Record<Exclude<ProviderKey, 'local-generic'>, string> = {
+type RealProviderKey = 'alibaba-qwen' | 'deepseek' | 'openai-compatible';
+const REAL_MODEL_ENV: Record<RealProviderKey, string> = {
   'alibaba-qwen': 'DC_CERT_REAL_MODEL_QWEN',
   deepseek: 'DC_CERT_REAL_MODEL_DEEPSEEK',
   'openai-compatible': 'DC_CERT_REAL_MODEL_OPENAI',
+};
+
+/** The provider-native adapter each real-model suite exercises. */
+const REAL_MODEL_ADAPTERS: Record<RealProviderKey, string> = {
+  'alibaba-qwen': 'alibaba_qwen',
+  deepseek: 'deepseek',
+  'openai-compatible': 'openai_compatible',
+};
+
+/** One deliberately incompatible behaviour each shipped adapter must refuse. */
+const ADVERSE_BEHAVIOURS: Partial<Record<string, MockBehaviour>> = {
+  hosted: 'undeclared_tool',
+  generic_local: 'malformed_structured_output',
+  alibaba_qwen: 'identity_mismatch',
+  deepseek: 'identity_mismatch',
+  openai_compatible: 'malformed_structured_output',
 };
 
 export interface Scenario {
@@ -126,6 +154,11 @@ export interface AdapterResult {
   }>;
   consecutive_passes: number;
   passed: boolean;
+  binding: {
+    passed: boolean;
+    checks: Array<{ name: string; passed: boolean }>;
+    evidence_hash: string;
+  };
   adverse: Array<{ behaviour: string; refused: boolean; failed_checks: string[] }>;
 }
 
@@ -576,6 +609,7 @@ async function publishProfile(options: {
   purposes: readonly string[];
   categories: readonly string[];
   credential: string | null;
+  tools?: readonly string[];
 }): Promise<PublishedProfile> {
   const config = jsonFile(options.world, `certification-profile-${options.adapter}-${options.purposes.length}`, {
     adapter: options.adapter,
@@ -583,7 +617,7 @@ async function publishProfile(options: {
     model_id: options.modelId ?? MOCK_MODEL_ID,
     purposes: [...options.purposes],
     data_categories: [...options.categories],
-    tools: [],
+    tools: [...(options.tools ?? [])],
     max_output_bytes: 65_536,
     prompts: profilePrompts(options.purposes),
   });
@@ -637,13 +671,17 @@ async function adapterConformance(
 }> {
   const adapters: AdapterResult[] = [];
   const models: Array<Record<string, unknown>> = [];
+  let localActivation: Record<string, unknown> | null = null;
   let redactionSample: { profile_id: string; credential: string; endpoint_url: string } | null = null;
   for (const provider of PROVIDER_PROFILES) {
     const purposes = provider.key === 'local-generic' ? LOCAL_PURPOSES : PURPOSES;
     const categories = provider.key === 'local-generic'
       ? [...DATA_CATEGORIES, 'product_contract']
       : [...DATA_CATEGORIES];
-    const credential = provider.adapter === 'hosted' ? `certification-credential-${provider.key}` : null;
+    // A native provider needs its credential; the local contract adapter does not.
+    const credential = provider.adapter === 'generic_local'
+      ? null
+      : `certification-credential-${provider.key}`;
     const published = await publishProfile({
       world,
       name: provider.name,
@@ -652,6 +690,7 @@ async function adapterConformance(
       purposes,
       categories,
       credential,
+      tools: ['read_data_dictionary', 'read_governed_result'],
     });
     if (provider.key === 'alibaba-qwen') {
       redactionSample = {
@@ -691,6 +730,32 @@ async function adapterConformance(
       });
     }
     const consecutive = runs.every((run) => run.passed) ? runs.length : 0;
+    // Activation reads the Version's latest evaluation, so it happens while the
+    // three certified runs are still the newest evidence.
+    const activated = ok(command(world, [
+      'model', 'activate', '--profile', published.model_profile_id, '--version', String(published.model_profile_version),
+    ], { token: world.deploymentAdministratorToken }), `model activate ${provider.key}`);
+    if (provider.key === 'local-generic') localActivation = activated;
+
+    // Every shipped adapter also clears a Workspace Model Binding preflight for
+    // the purposes it was certified against, Chinese narration and clarification
+    // included.
+    const bound = ok(await commandAsync(world, [
+      'binding', 'publish',
+      '--workspace', world.workspaceId,
+      '--profile', published.model_profile_id,
+      '--config', jsonFile(world, `certification-binding-${provider.key}`, {
+        model_profile_version: published.model_profile_version,
+        purposes: [...purposes],
+        data_categories: [...categories],
+      }),
+    ], { token: world.workspaceAdministratorToken }) as unknown as OperatorResult, `binding publish ${provider.key}`);
+    const preflight = asRecord(bound['preflight'] ?? {});
+    const bindingChecks = asArray(preflight['checks']).map((check) => {
+      const record = asRecord(check);
+      return { name: String(record['name']), passed: record['passed'] === true };
+    });
+
     adapters.push({
       provider: provider.key,
       label: provider.name,
@@ -701,33 +766,24 @@ async function adapterConformance(
       runs,
       consecutive_passes: consecutive,
       passed: consecutive === 3,
+      binding: {
+        passed: preflight['passed'] === true && bindingChecks.every((check) => check.passed),
+        checks: bindingChecks,
+        evidence_hash: String(preflight['evidence_hash']),
+      },
       adverse: [],
     });
   }
 
   // Deliberately incompatible endpoints must be refused, never repaired. One
   // adverse family per shipped adapter keeps the run exact and representative.
-  const hosted = adapters.find((entry) => entry.adapter === 'hosted');
-  const local = adapters.find((entry) => entry.adapter === 'generic_local');
-  // Activation reads the Version's latest evaluation, so it must happen while
-  // the three certified runs are still the newest evidence.
-  const activated = ok(command(world, [
-    'model', 'activate', '--profile', local!.model_profile_id, '--version', '1',
-  ], { token: world.deploymentAdministratorToken }), 'model activate');
-  if (hosted !== undefined) {
-    endpoint.behaviour = 'undeclared_tool';
-    const adverse = await evaluateProfile(world, hosted.model_profile_id, 1);
-    hosted.adverse.push({
-      behaviour: 'undeclared_tool',
-      refused: adverse['passed'] !== true && failedChecks(adverse).length > 0,
-      failed_checks: failedChecks(adverse),
-    });
-  }
-  if (local !== undefined) {
-    endpoint.behaviour = 'malformed_structured_output';
-    const adverse = await evaluateProfile(world, local.model_profile_id, 1);
-    local.adverse.push({
-      behaviour: 'malformed_structured_output',
+  for (const adapter of adapters) {
+    const behaviour = ADVERSE_BEHAVIOURS[adapter.adapter];
+    if (behaviour === undefined) continue;
+    endpoint.behaviour = behaviour;
+    const adverse = await evaluateProfile(world, adapter.model_profile_id, 1);
+    adapter.adverse.push({
+      behaviour,
       refused: adverse['passed'] !== true && failedChecks(adverse).length > 0,
       failed_checks: failedChecks(adverse),
     });
@@ -739,9 +795,9 @@ async function adapterConformance(
     models,
     activation: {
       provider: 'local-generic',
-      activated_version: activated['activated_version'],
-      evaluation_hash: activated['evaluation_hash'],
-      content_hash: activated['content_hash'],
+      activated_version: localActivation!['activated_version'],
+      evaluation_hash: localActivation!['evaluation_hash'],
+      content_hash: localActivation!['content_hash'],
     },
     redactionSample: redactionSample!,
   };
@@ -777,11 +833,12 @@ async function realModelSuites(
 ): Promise<RealModelResult[]> {
   const results: RealModelResult[] = [];
   for (const provider of ['alibaba-qwen', 'deepseek', 'openai-compatible'] as const) {
+    const adapter = REAL_MODEL_ADAPTERS[provider];
     const configured = options.realModels?.[provider] ?? configuredRealModel(provider);
     if (configured === null) {
       results.push({
         provider,
-        adapter: 'hosted',
+        adapter,
         model_id: null,
         status: 'not_configured',
         runs: [],
@@ -794,12 +851,13 @@ async function realModelSuites(
       const published = await publishProfile({
         world,
         name: `${provider} 真实模型`,
-        adapter: 'hosted',
+        adapter,
         endpointUrl: configured.endpoint_url,
         modelId: configured.model_id,
         purposes: PURPOSES,
         categories: DATA_CATEGORIES,
         credential: configured.credential ?? null,
+        tools: ['read_data_dictionary', 'read_governed_result'],
       });
       for (let run = 1; run <= 3; run += 1) {
         const evaluation = await evaluateProfile(world, published.model_profile_id, published.model_profile_version);
@@ -808,7 +866,7 @@ async function realModelSuites(
       const allPassed = runs.every((run) => run.passed);
       results.push({
         provider,
-        adapter: 'hosted',
+        adapter,
         model_id: configured.model_id,
         status: allPassed ? 'passed' : 'failed',
         runs,
@@ -817,7 +875,7 @@ async function realModelSuites(
     } catch (error) {
       results.push({
         provider,
-        adapter: 'hosted',
+        adapter,
         model_id: configured.model_id,
         status: 'failed',
         runs,
@@ -829,7 +887,7 @@ async function realModelSuites(
 }
 
 function configuredRealModel(
-  provider: 'alibaba-qwen' | 'deepseek' | 'openai-compatible',
+  provider: RealProviderKey,
 ): { endpoint_url: string; model_id: string; credential?: string } | null {
   const raw = process.env[REAL_MODEL_ENV[provider]];
   if (raw === undefined || raw.trim() === '') return null;
@@ -1239,7 +1297,7 @@ export async function certifyRelease(options: CertificationOptions = {}): Promis
     ],
     adapters: adapterResults,
     adapter_summary: {
-      shipped_adapters: ['hosted', 'generic_local'],
+      shipped_adapters: [...MODEL_ADAPTERS],
       certified_profiles: PROVIDER_PROFILES.map((profile) => profile.key),
       profiles_passed: adaptersPassed,
       profiles_total: adapterResults.length,

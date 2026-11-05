@@ -18,7 +18,7 @@ import { canonicalDigest } from './crypto.js';
 import { isRecord, readJsonDocument } from './documents.js';
 import { OperatorError, type Fail } from './errors.js';
 import { decrypt, encryptSecret } from './keys.js';
-import { MODEL_CONTRACT, modelAdapter, type PinnedModelProfile } from './model-adapter.js';
+import { MODEL_ADAPTERS, MODEL_CONTRACT, modelAdapter, type PinnedModelProfile } from './model-adapter.js';
 import {
   EVALUATION_INPUTS,
   MODEL_DATA_CATEGORIES,
@@ -40,7 +40,7 @@ import {
 } from './operations.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
-export const ADAPTERS: ModelAdapterKind[] = ['hosted', 'generic_local'];
+export const ADAPTERS: ModelAdapterKind[] = [...MODEL_ADAPTERS];
 const NAME_MINIMUM = 2;
 const NAME_MAXIMUM = 128;
 const TOOL_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;

@@ -705,6 +705,172 @@ test('the browser covers successful activation, evaluation failure, revocation, 
   }
 });
 
+/** Every shipped provider protocol is evaluated and bound through its own adapter. */
+test('native Qwen, DeepSeek, and generic OpenAI-compatible adapters evaluate, bind, and answer under their own protocols', async () => {
+  const current = world();
+  const endpoint = await startMockModelEndpoint();
+  const consoleServer = await startConsole(current.fixture);
+  try {
+    for (const adapter of ['alibaba_qwen', 'deepseek', 'openai_compatible'] as const) {
+      const credential = `t67-native-credential-${adapter}`;
+      const published = await publishProfile(
+        consoleServer.url,
+        current.deploymentAdministratorToken,
+        profileInput(endpoint, adapter, `Native ${adapter}`, { credential }),
+      );
+      assert.equal(published.status, 201, published.text);
+      assert.equal(published.text.includes(credential), false, published.text);
+      const modelProfileId = String(published.body['model_profile_id']);
+
+      const evaluated = await evaluateProfile(
+        consoleServer.url,
+        current.deploymentAdministratorToken,
+        modelProfileId,
+        1,
+      );
+      assert.equal(evaluated.status, 200, evaluated.text);
+      assert.equal(evaluated.body['passed'], true, JSON.stringify(evaluated.body['checks']));
+      const checks = checksOf(evaluated.body);
+      for (const name of [
+        'preflight',
+        'pinned_identity',
+        'structured_output',
+        'constrained_tools',
+        'simplified_chinese_prompt',
+        'grounded_narration',
+        'simplified_chinese_narrative',
+        'simplified_chinese_clarification',
+      ]) {
+        assert.equal(checks.get(name)?.['passed'], true, `${adapter}: ${name}`);
+      }
+
+      const activated = await activateProfile(
+        consoleServer.url,
+        current.deploymentAdministratorToken,
+        modelProfileId,
+        1,
+      );
+      assert.equal(activated.status, 200, activated.text);
+      const bound = await publishBinding(
+        consoleServer.url,
+        current.workspaceAdministratorToken,
+        current.workspaceId,
+        bindingInput(modelProfileId, 1, PURPOSES, DATA_CATEGORIES),
+      );
+      assert.equal(bound.status, 201, bound.text);
+      assert.equal(asRecord(bound.body['preflight'])['passed'], true);
+      assert.equal(bound.text.includes(credential), false, bound.text);
+      assert.equal(bound.text.includes(endpoint.url), false, bound.text);
+
+      // The request that reached the fixture is the provider's protocol, not the
+      // platform contract, and it demands provider-enforced structured output.
+      const sent = endpoint.calls.at(-1) as Record<string, unknown>;
+      assert.equal(Object.keys(sent).includes('contract'), false, adapter);
+      if (adapter === 'alibaba_qwen') {
+        const parameters = asRecord(sent['parameters']);
+        assert.equal(asRecord(parameters['response_format'])['type'], 'json_schema');
+        assert.equal(asArray(asRecord(sent['input'])['messages']).length, 2);
+      } else if (adapter === 'deepseek') {
+        assert.equal(asRecord(sent['tool_choice'])['type'], 'function');
+        assert.equal(typeof asRecord(asRecord(sent['tool_choice'])['function'])['name'], 'string');
+      } else {
+        assert.equal(asRecord(sent['response_format'])['type'], 'json_schema');
+        assert.equal(asArray(sent['messages']).length, 2);
+      }
+
+      const listed = await callApi(consoleServer.url, '/api/deployment/model-profiles', {
+        cookie: userCookie(current.deploymentAdministratorToken),
+      });
+      assert.equal(listed.text.includes(credential), false, listed.text);
+      assert.equal(listed.text.includes(endpoint.url), false, listed.text);
+    }
+  } finally {
+    await consoleServer.stop();
+    await endpoint.close();
+  }
+});
+
+/** Provider adapters refuse settings and identities they cannot honour. */
+test('native adapters fail closed on a missing credential, a mutable alias, an unserved model, and an echoed identity mismatch', async () => {
+  const current = world();
+  const endpoint = await startMockModelEndpoint();
+  const consoleServer = await startConsole(current.fixture);
+  try {
+    const unauthenticated = await publishProfile(
+      consoleServer.url,
+      current.deploymentAdministratorToken,
+      profileInput(endpoint, 'alibaba_qwen', 'No Credential'),
+    );
+    assert.equal(unauthenticated.status, 201, unauthenticated.text);
+    const noCredential = await evaluateProfile(
+      consoleServer.url,
+      current.deploymentAdministratorToken,
+      String(unauthenticated.body['model_profile_id']),
+      1,
+    );
+    assert.equal(noCredential.body['passed'], false);
+    assert.equal(checksOf(noCredential.body).get('preflight')?.['detail'], 'MODEL_CREDENTIAL_REQUIRED');
+
+    const alias = await publishProfile(
+      consoleServer.url,
+      current.deploymentAdministratorToken,
+      profileInput(endpoint, 'deepseek', 'Mutable Alias', {
+        credential: 't67-alias-credential',
+        model_id: 'deepseek-chat-latest',
+      }),
+    );
+    assert.equal(alias.status, 201, alias.text);
+    const aliased = await evaluateProfile(
+      consoleServer.url,
+      current.deploymentAdministratorToken,
+      String(alias.body['model_profile_id']),
+      1,
+    );
+    assert.equal(aliased.body['passed'], false);
+    assert.equal(checksOf(aliased.body).get('preflight')?.['detail'], 'MODEL_MODEL_ALIAS_UNSUPPORTED');
+
+    const unserved = await publishProfile(
+      consoleServer.url,
+      current.deploymentAdministratorToken,
+      profileInput(endpoint, 'openai_compatible', 'Unserved Model', {
+        credential: 't67-unserved-credential',
+        model_id: 'not-served-by-this-endpoint',
+      }),
+    );
+    assert.equal(unserved.status, 201, unserved.text);
+    const missing = await evaluateProfile(
+      consoleServer.url,
+      current.deploymentAdministratorToken,
+      String(unserved.body['model_profile_id']),
+      1,
+    );
+    assert.equal(missing.body['passed'], false);
+    assert.equal(checksOf(missing.body).get('preflight')?.['detail'], 'MODEL_IDENTITY_MISMATCH');
+
+    const healthy = await publishProfile(
+      consoleServer.url,
+      current.deploymentAdministratorToken,
+      profileInput(endpoint, 'deepseek', 'Echoed Identity', { credential: 't67-identity-credential' }),
+    );
+    assert.equal(healthy.status, 201, healthy.text);
+    endpoint.behaviour = 'identity_mismatch';
+    const mismatched = await evaluateProfile(
+      consoleServer.url,
+      current.deploymentAdministratorToken,
+      String(healthy.body['model_profile_id']),
+      1,
+    );
+    assert.equal(mismatched.body['passed'], false);
+    const identityChecks = checksOf(mismatched.body);
+    assert.equal(identityChecks.get('preflight')?.['passed'], true);
+    assert.equal(identityChecks.get('pinned_identity')?.['passed'], false);
+    assert.equal(identityChecks.get('pinned_identity')?.['detail'], 'MODEL_IDENTITY_MISMATCH');
+  } finally {
+    await consoleServer.stop();
+    await endpoint.close();
+  }
+});
+
 /** The Deployment publishes its governed vocabulary once, so no surface restates it. */
 test('the Model Profile list publishes every governed purpose, data category, and adapter exactly once', async () => {
   const fixture = initializePlatform();
@@ -732,7 +898,13 @@ test('the Model Profile list publishes every governed purpose, data category, an
       'product_contract',
       'scraper_diagnostics',
     ]);
-    assert.deepEqual(vocabulary['adapters'], ['hosted', 'generic_local']);
+    assert.deepEqual(vocabulary['adapters'], [
+      'hosted',
+      'generic_local',
+      'alibaba_qwen',
+      'deepseek',
+      'openai_compatible',
+    ]);
   } finally {
     await consoleServer.stop();
   }
@@ -773,7 +945,7 @@ test('the Model Profile form renders every purpose and data category the server 
     ]) {
       assert.equal(await page.getByLabel(category, { exact: true }).count(), 1, category);
     }
-    assert.equal(await page.getByLabel('适配方式').locator('option').count(), 2);
+    assert.equal(await page.getByLabel('适配方式').locator('option').count(), 5);
   } finally {
     await browser?.close();
     await consoleServer.stop();
