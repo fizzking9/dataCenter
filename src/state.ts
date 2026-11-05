@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assertCondition } from './errors.js';
 
@@ -39,6 +39,56 @@ export function readDeployment(root: string): DeploymentState {
 
 export function writeDeployment(root: string, state: DeploymentState): void {
   writeJsonFile(join(root, 'deployment.json'), state);
+}
+
+export interface EvidenceSummary {
+  evidence_id: string;
+  operation: string;
+  outcome: string;
+  occurred_at: string;
+  error_code?: string;
+}
+
+/**
+ * The newest durable evidence for the named operations. It never reads content
+ * bytes or secrets: only the facts an Operator Console states as outcomes.
+ */
+export function recentEvidence(
+  root: string,
+  operations: readonly string[],
+  limit = 12,
+): EvidenceSummary[] {
+  const directory = join(root, 'evidence');
+  if (!existsSync(directory)) return [];
+  const allowed = new Set(operations);
+  const summaries: Array<EvidenceSummary & { mtime: number }> = [];
+  for (const name of readdirSync(directory)) {
+    if (!name.endsWith('.json')) continue;
+    const path = join(directory, name);
+    try {
+      const record = readJsonFile<Record<string, unknown>>(path);
+      const operation = typeof record['operation'] === 'string' ? record['operation'] : '';
+      if (!allowed.has(operation)) continue;
+      summaries.push({
+        evidence_id: typeof record['evidence_id'] === 'string' ? record['evidence_id'] : name.slice(0, -5),
+        operation,
+        outcome: typeof record['outcome'] === 'string' ? record['outcome'] : '',
+        occurred_at: typeof record['occurred_at'] === 'string' ? record['occurred_at'] : '',
+        ...(typeof record['error_code'] === 'string' ? { error_code: record['error_code'] } : {}),
+        mtime: statSync(path).mtimeMs,
+      });
+    } catch {
+      // Evidence that cannot be read is not lifecycle evidence.
+    }
+  }
+  summaries.sort((left, right) => right.mtime - left.mtime);
+  return summaries.slice(0, limit).map((summary) => ({
+    evidence_id: summary.evidence_id,
+    operation: summary.operation,
+    outcome: summary.outcome,
+    occurred_at: summary.occurred_at,
+    ...(summary.error_code === undefined ? {} : { error_code: summary.error_code }),
+  }));
 }
 
 export function recordEvidence(

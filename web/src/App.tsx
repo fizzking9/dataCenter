@@ -4,13 +4,17 @@ import { t } from './i18n/zh-CN.js';
 import { PlatformApp } from './PlatformApp.js';
 import { ConsoleScreen } from './screens/ConsoleScreen.js';
 import { EnrollmentScreen } from './screens/EnrollmentScreen.js';
+import { LifecycleScreen } from './screens/LifecycleScreen.js';
 import { SignInScreen } from './screens/SignInScreen.js';
 import { Shell } from './ui/Shell.js';
 
-type Path = '/' | '/enroll';
+type Path = '/' | '/upgrade' | '/enroll';
 
 function currentPath(): Path {
-  return window.location.pathname.replace(/\/+$/u, '') === '/enroll' ? '/enroll' : '/';
+  const pathname = window.location.pathname.replace(/\/+$/u, '');
+  if (pathname === '/enroll') return '/enroll';
+  if (pathname === '/upgrade') return '/upgrade';
+  return '/';
 }
 
 /** The enrolment secret arrives in the fragment, so it never reaches the server log. */
@@ -101,7 +105,12 @@ function OperatorApp() {
   if (session) {
     return (
       <Shell account={session.username} onSignOut={() => void signOut()}>
-        <ConsoleScreen onSessionLost={sessionLost} />
+        <ConsoleNav path={path} onNavigate={navigate} />
+        {path === '/upgrade' ? (
+          <LifecycleScreen onSessionLost={sessionLost} />
+        ) : (
+          <ConsoleScreen onSessionLost={sessionLost} />
+        )}
       </Shell>
     );
   }
@@ -110,5 +119,28 @@ function OperatorApp() {
     <Shell>
       <SignInScreen expired={expired} onSignedIn={setSession} onEnroll={() => navigate('/enroll')} />
     </Shell>
+  );
+}
+
+/** The Operator Console's own navigation, distinct from platform Role navigation. */
+function ConsoleNav({ path, onNavigate }: { path: Path; onNavigate: (next: Path) => void }) {
+  const link = (target: Path, label: string) => (
+    <a
+      className={path === target ? 'console-nav__link console-nav__link--active' : 'console-nav__link'}
+      href={target}
+      aria-current={path === target ? 'page' : undefined}
+      onClick={(event) => {
+        event.preventDefault();
+        onNavigate(target);
+      }}
+    >
+      {label}
+    </a>
+  );
+  return (
+    <nav className="console-nav" aria-label={t('console.navLabel')}>
+      {link('/', t('nav.console'))}
+      {link('/upgrade', t('nav.lifecycle'))}
+    </nav>
   );
 }

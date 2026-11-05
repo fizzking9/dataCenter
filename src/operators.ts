@@ -418,6 +418,101 @@ export async function signInOperator(options: {
   };
 }
 
+/* ------------------------------------------------------------------------- *
+ * Step-up authentication for consequential Operator lifecycle actions
+ * ------------------------------------------------------------------------- */
+
+export interface OperatorStepUp {
+  verified_at: string;
+  method: 'totp' | 'recovery_code';
+  operator: string;
+}
+
+/**
+ * A fresh password and dynamic code prove the Operator is present before an
+ * irreversible lifecycle action. It never mints a session: the standing
+ * Operator Console session stays the only authority, and the verification is
+ * audited as its own security-relevant fact.
+ */
+export async function verifyOperatorStepUp(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  password: string;
+  totp?: string;
+  recoveryCode?: string;
+  purpose: string;
+}): Promise<OperatorStepUp> {
+  const resolved = resolveOperatorSession(options.root, options.token);
+  assertCondition(
+    resolved !== undefined,
+    'OPERATOR_SESSION_INVALID',
+    'The Operator Console session is not valid.',
+  );
+  const session = openPlatform(options.root, options.masterKey);
+  const console = readOperatorConsole(options.root);
+  const account = findOperatorById(console, resolved.operator.operator_id);
+  assertCondition(
+    account !== undefined && account.status === 'active',
+    'OPERATOR_SESSION_INVALID',
+    'The Operator Console session is not valid.',
+  );
+  assertCondition(
+    !(account.locked_until && Date.parse(account.locked_until) > Date.now()),
+    'OPERATOR_STEP_UP_FAILED',
+    'Step-up authentication is temporarily locked after repeated failures.',
+    'Wait for the lockout to end, then re-enter the password and a current dynamic code.',
+  );
+  if (!(await verifyPassword(options.password, account.password_hash))) {
+    registerOperatorFailure(account);
+    writeOperatorConsole(options.root, console);
+    session.audit({
+      actor: operatorActor(account.username),
+      action: 'operator_step_up_authentication',
+      scope: 'deployment',
+      target: options.purpose,
+      outcome: 'failed',
+      detail: { reason: 'password', purpose: options.purpose },
+    });
+    throw new OperatorError(
+      'OPERATOR_STEP_UP_FAILED',
+      'Operator step-up authentication failed.',
+      'Re-enter the current password and a current dynamic code before the consequential action.',
+    );
+  }
+  if (!satisfiesOperatorMfa(session.dataKey, account, options.totp, options.recoveryCode)) {
+    registerOperatorFailure(account);
+    writeOperatorConsole(options.root, console);
+    session.audit({
+      actor: operatorActor(account.username),
+      action: 'operator_step_up_authentication',
+      scope: 'deployment',
+      target: options.purpose,
+      outcome: 'failed',
+      detail: { reason: 'mfa', purpose: options.purpose },
+    });
+    throw new OperatorError(
+      'OPERATOR_STEP_UP_FAILED',
+      'Operator step-up authentication failed.',
+      'Re-enter the current password and a current dynamic code before the consequential action.',
+    );
+  }
+  account.failure_count = 0;
+  account.locked_until = null;
+  writeOperatorConsole(options.root, console);
+  const method: 'totp' | 'recovery_code' = options.totp === undefined ? 'recovery_code' : 'totp';
+  const verifiedAt = new Date().toISOString();
+  session.audit({
+    actor: operatorActor(account.username),
+    action: 'operator_step_up_authentication',
+    scope: 'deployment',
+    target: options.purpose,
+    outcome: 'succeeded',
+    detail: { method, purpose: options.purpose, verified_at: verifiedAt },
+  });
+  return { verified_at: verifiedAt, method, operator: account.username };
+}
+
 /** Resolves the Operator behind a console cookie on every request. */
 export function resolveOperatorSession(
   root: string,

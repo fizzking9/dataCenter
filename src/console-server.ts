@@ -2,6 +2,7 @@ import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { extname, join, resolve, sep } from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { acquireUpload } from './acquisition.js';
 import {
@@ -103,6 +104,7 @@ import {
   resolveOperatorSession,
   signInOperator,
   signOutOperator,
+  verifyOperatorStepUp,
   OPERATOR_SESSION_LIFETIME_MS,
 } from './operators.js';
 import { queryDataProductApi } from './data-product-api.js';
@@ -125,7 +127,8 @@ import { readLicenseSummary } from './license.js';
 import { handleMcpSurface, type McpServerIdentity } from './mcp.js';
 import { openPlatform } from './session.js';
 import { deploymentStatus } from './status.js';
-import { readDeployment } from './state.js';
+import { readDeployment, recentEvidence } from './state.js';
+import { finalizeUpgrade, preflightUpgrade, readMigrationLedger, readUpgradeRecord, rollbackDeployment, rollbackWindow, verifyUpgrade } from './upgrade.js';
 
 export const SESSION_COOKIE = 'dc_operator_console';
 /** Platform User sessions are a separate channel from the Operator Console. */
@@ -237,12 +240,45 @@ export async function startConsoleServer(options: ConsoleServerOptions): Promise
   };
 }
 
+interface LifecycleJobError {
+  code: string;
+  message: string;
+  next_step?: string;
+}
+
+/** The one background lifecycle attempt this Console has started, if any. */
+interface LifecycleJob {
+  kind: 'upgrade';
+  state: 'running' | 'succeeded' | 'failed';
+  started_at: string;
+  finished_at: string | null;
+  operator: string;
+  error: LifecycleJobError | null;
+  result: Record<string, unknown> | null;
+}
+
+/** The durable operations the Operator Console states as lifecycle evidence. */
+const LIFECYCLE_EVIDENCE_OPERATIONS = ['preflight', 'checkpoint', 'upgrade', 'verify', 'finalize', 'rollback'] as const;
+
+function publicJob(job: LifecycleJob | undefined): Record<string, unknown> | null {
+  if (job === undefined) return null;
+  return {
+    kind: job.kind,
+    state: job.state,
+    started_at: job.started_at,
+    finished_at: job.finished_at,
+    error: job.error,
+    result: job.result,
+  };
+}
+
 function createHandler(options: ConsoleServerOptions, assets: string, identity: McpServerIdentity) {
+  const lifecycleJobs = new Map<string, LifecycleJob>();
   return async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) response.setHeader(name, value);
     const url = new URL(request.url ?? '/', 'http://localhost');
     if (url.pathname.startsWith('/api/')) {
-      await handleApi(options, request, response, url.pathname);
+      await handleApi(options, request, response, url.pathname, lifecycleJobs);
       return;
     }
     if (await handleMcpSurface({ root: options.root, masterKey: options.masterKey, identity }, request, response, url)) {
@@ -257,6 +293,7 @@ async function handleApi(
   request: IncomingMessage,
   response: ServerResponse,
   pathname: string,
+  lifecycleJobs: Map<string, LifecycleJob>,
 ): Promise<void> {
   const method = request.method ?? 'GET';
   if (method !== 'GET' && !isSameOrigin(request)) {
@@ -340,6 +377,127 @@ async function handleApi(
       deployment_id: deployment.deployment_id,
       state: deployment.state,
       checked_at: new Date().toISOString(),
+    });
+    return;
+  }
+
+  // Post-installation lifecycle: one signed maintenance window at a time, with
+  // its durable record, locked migration ledger, rollback window, and evidence
+  // readable between every step. The browser calls the same governed modules the
+  // CLI calls; no lifecycle decision is made in the browser or in this route.
+  if (pathname === '/api/operator/lifecycle' && method === 'GET') {
+    authorize(options, request, 'operator_console_lifecycle');
+    const deployment = readDeployment(options.root);
+    sendJson(response, 200, {
+      deployment: {
+        release: deployment.release,
+        state: deployment.state,
+        service_open: deployment.service_open,
+      },
+      upgrade: readUpgradeRecord(options.root) ?? null,
+      ledger: readMigrationLedger(options.root),
+      rollback_window: rollbackWindow(options.root),
+      evidence: recentEvidence(options.root, LIFECYCLE_EVIDENCE_OPERATIONS, 12),
+      job: publicJob(lifecycleJobs.get(options.root)),
+      checked_at: new Date().toISOString(),
+    });
+    return;
+  }
+
+  if (pathname === '/api/operator/lifecycle/preflight' && method === 'POST') {
+    const resolved = authorize(options, request, 'operator_console_preflight');
+    const body = await readJson(request);
+    sendJson(response, 200, preflightUpgrade({
+      root: options.root,
+      masterKey: options.masterKey,
+      operator: resolved.operator.username,
+      bundle: requiredText(body, 'bundle'),
+      releaseKey: releaseKeyPath(options.root, body),
+      confirmedFingerprint: requiredText(body, 'confirm_release_key_fingerprint'),
+      ...(text(body, 'license') === '' ? {} : { license: text(body, 'license') }),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/operator/lifecycle/upgrade' && method === 'POST') {
+    const resolved = authorize(options, request, 'operator_console_upgrade');
+    assertLifecycleIdle(lifecycleJobs.get(options.root));
+    const body = await readJson(request);
+    // Every required statement is validated before the attempt is registered,
+    // so a malformed request can never leave a running job behind.
+    const input = {
+      bundle: requiredText(body, 'bundle'),
+      releaseKey: releaseKeyPath(options.root, body),
+      confirmedFingerprint: requiredText(body, 'confirm_release_key_fingerprint'),
+      operator: resolved.operator.username,
+      ...(text(body, 'license') === '' ? {} : { license: text(body, 'license') }),
+      ...(text(body, 'backup_root') === '' ? {} : { backupRoot: text(body, 'backup_root') }),
+    };
+    const job: LifecycleJob = {
+      kind: 'upgrade',
+      state: 'running',
+      started_at: new Date().toISOString(),
+      finished_at: null,
+      operator: resolved.operator.username,
+      error: null,
+      result: null,
+    };
+    lifecycleJobs.set(options.root, job);
+    try {
+      startUpgradeJob(options, job, input);
+    } catch (error) {
+      job.state = 'failed';
+      job.finished_at = new Date().toISOString();
+      job.error = {
+        code: 'LIFECYCLE_JOB_FAILED',
+        message: error instanceof Error ? error.message : 'The lifecycle operation failed.',
+      };
+      throw new HttpError(
+        500,
+        'LIFECYCLE_JOB_FAILED',
+        'The maintenance-window upgrade could not start.',
+        'Inspect the durable lifecycle evidence before retrying.',
+      );
+    }
+    sendJson(response, 202, { started: true, job: publicJob(job) });
+    return;
+  }
+
+  if (pathname === '/api/operator/lifecycle/verify' && method === 'POST') {
+    const resolved = authorize(options, request, 'operator_console_verify');
+    assertLifecycleIdle(lifecycleJobs.get(options.root));
+    sendJson(response, 200, verifyUpgrade({
+      root: options.root,
+      masterKey: options.masterKey,
+      operator: resolved.operator.username,
+    }));
+    return;
+  }
+
+  if (pathname === '/api/operator/lifecycle/finalize' && method === 'POST') {
+    const resolved = authorize(options, request, 'operator_console_finalize');
+    assertLifecycleIdle(lifecycleJobs.get(options.root));
+    const body = await readJson(request);
+    const stepUp = await operatorStepUp(options, request, body, 'upgrade_finalize');
+    sendJson(response, 200, {
+      ...finalizeUpgrade({ root: options.root, operator: resolved.operator.username }),
+      step_up_verified_at: stepUp.verified_at,
+    });
+    return;
+  }
+
+  if (pathname === '/api/operator/lifecycle/rollback' && method === 'POST') {
+    const resolved = authorize(options, request, 'operator_console_rollback');
+    assertLifecycleIdle(lifecycleJobs.get(options.root));
+    const body = await readJson(request);
+    const stepUp = await operatorStepUp(options, request, body, 'application_rollback');
+    sendJson(response, 200, {
+      ...rollbackDeployment({
+        root: options.root,
+        masterKey: options.masterKey,
+        operator: resolved.operator.username,
+      }),
+      step_up_verified_at: stepUp.verified_at,
     });
     return;
   }
@@ -1862,6 +2020,97 @@ async function handleApi(
   throw new HttpError(404, 'API_NOT_FOUND', 'No such application API.');
 }
 
+/** Where the browser states the signed bundle and its trust anchor. */
+function releaseKeyPath(root: string, body: Record<string, unknown>): string {
+  const explicit = text(body, 'release_key');
+  return explicit === '' ? join(root, 'trust', 'release-key.pem') : explicit;
+}
+
+/** One lifecycle mutation at a time, so a browser never races the migration lock. */
+function assertLifecycleIdle(job: LifecycleJob | undefined): void {
+  if (job?.state !== 'running') return;
+  throw new HttpError(
+    409,
+    'LIFECYCLE_BUSY',
+    'Another lifecycle operation is still running.',
+    'Wait for its durable outcome before starting another lifecycle action.',
+  );
+}
+
+/** Runs the signed maintenance-window upgrade off the request thread. */
+function startUpgradeJob(
+  options: ConsoleServerOptions,
+  job: LifecycleJob,
+  input: {
+    bundle: string;
+    releaseKey: string;
+    confirmedFingerprint: string;
+    operator: string;
+    license?: string;
+    backupRoot?: string;
+  },
+): void {
+  const worker = new Worker(new URL('./lifecycle-worker.js', import.meta.url), {
+    workerData: {
+      kind: 'upgrade',
+      root: options.root,
+      masterKey: options.masterKey,
+      operator: input.operator,
+      bundle: input.bundle,
+      releaseKey: input.releaseKey,
+      confirmedFingerprint: input.confirmedFingerprint,
+      ...(input.license === undefined ? {} : { license: input.license }),
+      ...(input.backupRoot === undefined ? {} : { backupRoot: input.backupRoot }),
+    },
+  });
+  const finish = (
+    state: 'succeeded' | 'failed',
+    error: LifecycleJobError | null,
+    result: Record<string, unknown> | null,
+  ): void => {
+    if (job.state !== 'running') return;
+    job.state = state;
+    job.error = error;
+    job.result = result;
+    job.finished_at = new Date().toISOString();
+  };
+  worker.once('message', (message: { ok?: boolean; result?: Record<string, unknown>; error?: LifecycleJobError }) => {
+    if (message.ok === true) finish('succeeded', null, message.result ?? null);
+    else finish('failed', message.error ?? { code: 'LIFECYCLE_JOB_FAILED', message: 'The lifecycle operation failed.' }, null);
+  });
+  worker.once('error', (error: Error) => {
+    finish('failed', { code: 'LIFECYCLE_JOB_FAILED', message: error.message }, null);
+  });
+  worker.once('exit', (code) => {
+    if (job.state === 'running') {
+      finish('failed', { code: 'LIFECYCLE_JOB_FAILED', message: `The lifecycle worker exited with code ${String(code)}.` }, null);
+    }
+  });
+  worker.unref();
+}
+
+/** A fresh password and dynamic code prove the Operator before a final act. */
+async function operatorStepUp(
+  options: ConsoleServerOptions,
+  request: IncomingMessage,
+  body: Record<string, unknown>,
+  purpose: string,
+): Promise<{ verified_at: string }> {
+  const token = cookieValue(request);
+  if (token === undefined) {
+    throw new HttpError(401, 'OPERATOR_SESSION_INVALID', 'The Operator Console session is not valid.');
+  }
+  return verifyOperatorStepUp({
+    root: options.root,
+    masterKey: options.masterKey,
+    token,
+    password: requiredText(body, 'password'),
+    ...(text(body, 'totp') === '' ? {} : { totp: text(body, 'totp') }),
+    ...(text(body, 'recovery_code') === '' ? {} : { recoveryCode: text(body, 'recovery_code') }),
+    purpose,
+  });
+}
+
 /** Every console request re-resolves the Operator, so revocation takes effect at once. */
 function authorize(options: ConsoleServerOptions, request: IncomingMessage, target: string) {
   const token = cookieValue(request);
@@ -2031,6 +2280,15 @@ function text(body: Record<string, unknown>, field: string): string {
   return typeof value === 'string' ? value : '';
 }
 
+/** A field a governed lifecycle action cannot infer on the browser's behalf. */
+function requiredText(body: Record<string, unknown>, field: string): string {
+  const value = text(body, field);
+  if (value === '') {
+    throw new HttpError(400, 'INVALID_REQUEST', `The ${field} field is required.`);
+  }
+  return value;
+}
+
 /** A whole number the governed module validates, never a browser-side guess. */
 function number(body: Record<string, unknown>, field: string): number {
   const value = body[field];
@@ -2116,7 +2374,58 @@ const STATUS_BY_CODE: Record<string, number> = {
   OPERATOR_ENROLLMENT_CONSUMED: 401,
   OPERATOR_AUTHENTICATION_FAILED: 401,
   OPERATOR_SESSION_INVALID: 401,
+  OPERATOR_STEP_UP_FAILED: 401,
   OPERATOR_PASSWORD_INVALID: 400,
+  // Lifecycle actions are serialized: one signed maintenance window at a time.
+  LIFECYCLE_BUSY: 409,
+  LIFECYCLE_JOB_FAILED: 500,
+  // Preflight refusals are governed answers with actionable next steps.
+  BUNDLE_NOT_FOUND: 404,
+  BUNDLE_INCOMPLETE: 409,
+  BUNDLE_PATH_INVALID: 400,
+  BUNDLE_SIGNATURE_INVALID: 409,
+  BUNDLE_CHECKSUM_INVALID: 409,
+  BUNDLE_IMAGE_DIGEST_INVALID: 409,
+  BUNDLE_UNSUPPORTED: 409,
+  BUNDLE_ARCHITECTURE_UNSUPPORTED: 409,
+  RELEASE_KEY_NOT_FOUND: 404,
+  RELEASE_KEY_NOT_CONFIRMED: 409,
+  UPGRADE_PATH_UNSUPPORTED: 409,
+  UPGRADE_DEPLOYMENT_NOT_OPEN: 409,
+  ROLLBACK_WINDOW_OPEN: 409,
+  UPGRADE_QUEUES_NOT_DRAINED: 409,
+  BACKUP_UNHEALTHY: 409,
+  RUNTIME_UNHEALTHY: 409,
+  RUNTIME_COMMAND_FAILED: 502,
+  UPGRADE_LOCKED: 409,
+  PREVIOUS_RELEASE_IMAGES_MISSING: 409,
+  PREVIOUS_RELEASE_UNTRUSTED: 409,
+  LICENSE_NOT_FOUND: 404,
+  LICENSE_RELEASE_INELIGIBLE: 409,
+  LICENSE_SIGNATURE_INVALID: 409,
+  LICENSE_REQUEST_MISMATCH: 409,
+  LICENSE_DEPLOYMENT_MISMATCH: 409,
+  LICENSE_WINDOW_INVALID: 409,
+  LICENSE_NOT_YET_VALID: 409,
+  LICENSE_EXPIRED: 409,
+  LICENSE_RELEASE_INVALID: 409,
+  UPGRADE_NOT_READY: 409,
+  UPGRADE_RELEASE_MISMATCH: 409,
+  VERIFICATION_REQUIRED: 409,
+  UPGRADE_VERIFICATION_FAILED: 422,
+  DEPLOYMENT_NOT_OPEN: 409,
+  DEPLOYMENT_NOT_FOUND: 404,
+  ROLLBACK_NOT_ELIGIBLE: 409,
+  ROLLBACK_NOT_APPLICABLE: 409,
+  ROLLBACK_DEPLOYMENT_NOT_OPEN: 409,
+  ROLLBACK_NOT_EXPAND_ONLY: 409,
+  MIGRATION_DOWNGRADE_UNSUPPORTED: 409,
+  MIGRATION_NOT_EXPAND_ONLY: 409,
+  MIGRATION_FAILED: 500,
+  RELEASE_INSTALL_FAILED: 500,
+  CHECKPOINT_OBJECTS_UNCOORDINATED: 409,
+  CHECKPOINT_DEPLOYMENT_CLOSED: 409,
+  CHECKPOINT_AT_INVALID: 400,
   OPERATOR_NAME_INVALID: 400,
   OPERATOR_ALREADY_ENROLLED: 409,
   AUTHENTICATION_FAILED: 401,

@@ -47,6 +47,175 @@ export interface LicenseView {
   state: string;
 }
 
+/** The rollback window one upgrade opens until finalization or rollback closes it. */
+export interface RollbackWindowView {
+  open: boolean;
+  eligible: boolean;
+  from_release: string;
+  to_release: string;
+  upgrade_id: string;
+  opened_at: string;
+  closed_at: string | null;
+  closed_by: string | null;
+}
+
+export interface UpgradeRecordView {
+  upgrade_id: string;
+  attempt: number;
+  status: string;
+  from_release: string;
+  to_release: string;
+  checkpoint_id: string | null;
+  bundle_fingerprint: string;
+  started_at: string;
+  updated_at: string;
+  migrations: string[];
+  store_schema_version: number;
+  previous_images: { release: string; images: number };
+  rollback_window: RollbackWindowView | null;
+  verification: { passed: boolean; verified_at: string; evidence_id: string; checks: string[] } | null;
+  finalization: { finalized_at: string; previous_release_removed: boolean; evidence_id: string } | null;
+  rollback: {
+    rolled_back_at: string;
+    to_release: string;
+    down_migrations: number;
+    data_unchanged: boolean;
+    records_after_upgrade: number;
+    evidence_id: string;
+  } | null;
+  last_error: { code: string; message: string; at: string } | null;
+}
+
+export interface MigrationLedgerView {
+  schema_version: number;
+  store_schema_version: number;
+  updated_at: string;
+  migrations: Array<{
+    id: string;
+    from_release: string;
+    to_release: string;
+    state_schema_version: number;
+    expand_only: boolean;
+    applied_at: string;
+    steps: Array<{ name: string; applied_at: string }>;
+  }>;
+}
+
+export interface LifecycleEvidenceView {
+  evidence_id: string;
+  operation: string;
+  outcome: string;
+  occurred_at: string;
+  error_code?: string;
+}
+
+export interface LifecycleJobView {
+  kind: string;
+  state: string;
+  started_at: string;
+  finished_at: string | null;
+  error: ApiError | null;
+  result: Record<string, unknown> | null;
+}
+
+export interface LifecycleView {
+  deployment: { release: string; state: string; service_open: boolean };
+  upgrade: UpgradeRecordView | null;
+  ledger: MigrationLedgerView;
+  rollback_window: RollbackWindowView | null;
+  evidence: LifecycleEvidenceView[];
+  job: LifecycleJobView | null;
+  checked_at: string;
+}
+
+export interface PreflightView {
+  passed: boolean;
+  from_release: string;
+  to_release: string;
+  resumable: boolean;
+  service_open: boolean;
+  upgrade_path: { adjacent: boolean; declared: boolean; from: string; to: string; migration_id: string };
+  bundle: {
+    release: string;
+    release_key_fingerprint: string;
+    signature_verified: boolean;
+    files: number;
+    images: number;
+  };
+  previous_images: { release: string; images: number; archives: string[] };
+  license: { eligible: boolean; highest_eligible_release: string };
+  master_key: { valid: boolean };
+  stores: { healthy: boolean; services: string[] };
+  queues: { queued: number; running: number; pending_purges: number; pending: number };
+  backups: { health: string; last_checkpoint_id: string | null; last_checkpoint_at: string | null };
+  capacity: { measured: boolean; free_bytes: number | null; required_bytes: number; sufficient: boolean };
+  checkpoint_required: boolean;
+  evidence_id: string;
+}
+
+/** One verification check; a failed one states its governed error code. */
+export interface UpgradeCheckView {
+  passed: boolean;
+  error_code?: string;
+  [key: string]: unknown;
+}
+
+export interface VerifyView {
+  passed: boolean;
+  from_release: string;
+  to_release: string;
+  store_schema_version: number;
+  migrations: { applied: string[]; expand_only: boolean; destructive: number };
+  checks: Record<string, UpgradeCheckView>;
+  rollback_window: RollbackWindowView | null;
+  evidence_id: string;
+}
+
+export interface FinalizeView {
+  upgrade_id: string;
+  from_release: string;
+  to_release: string;
+  rollback_eligible: boolean;
+  changed: boolean;
+  rollback_window: RollbackWindowView | null;
+  cleanup: { previous_release: string; removed: boolean };
+  finalization: { finalized_at: string; previous_release_removed: boolean; evidence_id: string };
+  evidence_id: string;
+  step_up_verified_at: string;
+}
+
+export interface RollbackView {
+  upgrade_id: string;
+  from_release: string;
+  to_release: string;
+  release: string;
+  state: string;
+  service_open: boolean;
+  down_migrations: number;
+  state_schema_version: number;
+  data_unchanged: boolean;
+  records_after_upgrade: number;
+  previous_images: { release: string; images: number; archives: string[] };
+  offline: boolean;
+  rollback_window: RollbackWindowView;
+  evidence_id: string;
+  step_up_verified_at: string;
+}
+
+export interface LifecyclePreflightRequest {
+  bundle: string;
+  release_key: string;
+  confirm_release_key_fingerprint: string;
+  license?: string;
+}
+
+/** A consequential lifecycle action proves the Operator with password and MFA. */
+export interface LifecycleStepUpRequest {
+  password: string;
+  totp?: string;
+  recovery_code?: string;
+}
+
 /** A platform User session, which is a different channel from the Operator one. */
 export interface PlatformSessionView {
   username: string;
@@ -2394,6 +2563,19 @@ export const consoleApi = {
     request<Credentials>('/api/operator/enrollment', { method: 'POST', body: JSON.stringify(body) }),
   health: () => request<HealthView>('/api/operator/health'),
   license: () => request<LicenseView>('/api/operator/license'),
+  lifecycle: () => request<LifecycleView>('/api/operator/lifecycle'),
+  preflight: (body: LifecyclePreflightRequest) =>
+    request<PreflightView>('/api/operator/lifecycle/preflight', { method: 'POST', body: JSON.stringify(body) }),
+  upgrade: (body: LifecyclePreflightRequest & { backup_root?: string }) =>
+    request<{ started: boolean; job: LifecycleJobView }>('/api/operator/lifecycle/upgrade', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  verify: () => request<VerifyView>('/api/operator/lifecycle/verify', { method: 'POST' }),
+  finalize: (body: LifecycleStepUpRequest) =>
+    request<FinalizeView>('/api/operator/lifecycle/finalize', { method: 'POST', body: JSON.stringify(body) }),
+  rollback: (body: LifecycleStepUpRequest) =>
+    request<RollbackView>('/api/operator/lifecycle/rollback', { method: 'POST', body: JSON.stringify(body) }),
 };
 
 /**
