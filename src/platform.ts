@@ -17,6 +17,11 @@ import type {
   SourceRecord,
   ArtifactProposalRecord,
   ModelProfileArtifact,
+  ScraperCredentialRecord,
+  ScraperRunManifest,
+  ScraperServiceArtifact,
+  ScraperTaskArtifact,
+  SourceScraperServiceRecord,
   WorkspaceModelBindingRecord,
 } from './catalog.js';
 import type { MfaRecord } from './enrollment.js';
@@ -170,6 +175,11 @@ export interface PlatformState {
   model_profiles: ModelProfileArtifact[];
   model_bindings: WorkspaceModelBindingRecord[];
   artifact_proposals: ArtifactProposalRecord[];
+  scraper_tasks: ScraperTaskArtifact[];
+  scraper_services: ScraperServiceArtifact[];
+  source_scraper_services: SourceScraperServiceRecord[];
+  scraper_credentials: ScraperCredentialRecord[];
+  scraper_runs: ScraperRunManifest[];
 }
 
 /** Every human identity is stated as one account identifier of the form name@domain. */
@@ -220,6 +230,11 @@ export function readPlatform(root: string): PlatformState {
         model_profiles: [],
         model_bindings: [],
         artifact_proposals: [],
+        scraper_tasks: [],
+        scraper_services: [],
+        source_scraper_services: [],
+        scraper_credentials: [],
+        scraper_runs: [],
       };
   // A Deployment installed under an earlier schema keeps working: the added
   // Collections start empty rather than failing the read closed.
@@ -248,6 +263,11 @@ export function readPlatform(root: string): PlatformState {
   state.model_profiles ??= [];
   state.model_bindings ??= [];
   state.artifact_proposals ??= [];
+  state.scraper_tasks ??= [];
+  state.scraper_services ??= [];
+  state.source_scraper_services ??= [];
+  state.scraper_credentials ??= [];
+  state.scraper_runs ??= [];
   // A Run recorded before acquisition was queued still reads as a completed
   // manual attempt rather than a Run that never started.
   for (const run of state.acquisition_runs) {
