@@ -305,8 +305,8 @@ export interface StepUpGrantView {
   expires_at: string;
 }
 
-/** The rollback window one upgrade opens until finalization or rollback closes it. */
-export interface RollbackWindowView {
+/** The Application Rollback window one upgrade opens until finalization or rollback closes it. */
+export interface ApplicationRollbackWindowView {
   open: boolean;
   eligible: boolean;
   from_release: string;
@@ -330,7 +330,7 @@ export interface UpgradeRecordView {
   migrations: string[];
   store_schema_version: number;
   previous_images: { release: string; images: number };
-  rollback_window: RollbackWindowView | null;
+  application_rollback_window: ApplicationRollbackWindowView | null;
   verification: { passed: boolean; verified_at: string; evidence_id: string; checks: string[] } | null;
   finalization: { finalized_at: string; previous_release_removed: boolean; evidence_id: string } | null;
   rollback: {
@@ -380,7 +380,7 @@ export interface LifecycleView {
   deployment: { release: string; state: string; service_open: boolean };
   upgrade: UpgradeRecordView | null;
   ledger: MigrationLedgerView;
-  rollback_window: RollbackWindowView | null;
+  application_rollback_window: ApplicationRollbackWindowView | null;
   evidence: LifecycleEvidenceView[];
   job: LifecycleJobView | null;
   checked_at: string;
@@ -425,7 +425,7 @@ export interface VerifyView {
   store_schema_version: number;
   migrations: { applied: string[]; expand_only: boolean; destructive: number };
   checks: Record<string, UpgradeCheckView>;
-  rollback_window: RollbackWindowView | null;
+  application_rollback_window: ApplicationRollbackWindowView | null;
   evidence_id: string;
 }
 
@@ -435,7 +435,7 @@ export interface FinalizeView {
   to_release: string;
   rollback_eligible: boolean;
   changed: boolean;
-  rollback_window: RollbackWindowView | null;
+  application_rollback_window: ApplicationRollbackWindowView | null;
   cleanup: { previous_release: string; removed: boolean };
   finalization: { finalized_at: string; previous_release_removed: boolean; evidence_id: string };
   evidence_id: string;
@@ -455,7 +455,7 @@ export interface RollbackView {
   records_after_upgrade: number;
   previous_images: { release: string; images: number; archives: string[] };
   offline: boolean;
-  rollback_window: RollbackWindowView;
+  application_rollback_window: ApplicationRollbackWindowView;
   evidence_id: string;
   step_up_verified_at: string;
 }

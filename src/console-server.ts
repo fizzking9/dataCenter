@@ -164,7 +164,7 @@ import {
 import { openPlatform } from './session.js';
 import { deploymentStatus } from './status.js';
 import { readDeployment, recentEvidence } from './state.js';
-import { finalizeUpgrade, preflightUpgrade, readMigrationLedger, readUpgradeRecord, rollbackDeployment, rollbackWindow, verifyUpgrade } from './upgrade.js';
+import { applicationRollbackWindow, finalizeUpgrade, preflightUpgrade, readMigrationLedger, readUpgradeRecord, rollbackDeployment, verifyUpgrade } from './upgrade.js';
 
 export const SESSION_COOKIE = 'dc_operator_console';
 /** Platform User sessions are a separate channel from the Operator Console. */
@@ -474,7 +474,7 @@ async function handleApi(
   }
 
   // Post-installation lifecycle: one signed maintenance window at a time, with
-  // its durable record, locked migration ledger, rollback window, and evidence
+  // its durable record, locked migration ledger, Application Rollback window, and evidence
   // readable between every step. The browser calls the same governed modules the
   // CLI calls; no lifecycle decision is made in the browser or in this route.
   if (pathname === '/api/operator/lifecycle' && method === 'GET') {
@@ -488,7 +488,7 @@ async function handleApi(
       },
       upgrade: readUpgradeRecord(options.root) ?? null,
       ledger: readMigrationLedger(options.root),
-      rollback_window: rollbackWindow(options.root),
+      application_rollback_window: applicationRollbackWindow(options.root),
       evidence: recentEvidence(options.root, LIFECYCLE_EVIDENCE_OPERATIONS, 12),
       job: publicJob(lifecycleJobs.get(options.root)),
       checked_at: new Date().toISOString(),

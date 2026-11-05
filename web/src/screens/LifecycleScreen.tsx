@@ -66,7 +66,7 @@ function stateLabel(state: string): ReactNode {
 }
 
 function windowLabel(lifecycle: LifecycleView): string {
-  const window = lifecycle.rollback_window;
+  const window = lifecycle.application_rollback_window;
   if (window === null) return t('lifecycle.window.none');
   if (window.open) {
     return message('lifecycle.window.open', { from: window.from_release, to: window.to_release });
@@ -404,7 +404,7 @@ export function LifecycleScreen({ onSessionLost }: LifecycleScreenProps) {
   const upgrade = lifecycle?.upgrade ?? null;
   const job = lifecycle?.job ?? null;
   const running = job?.state === 'running';
-  const windowOpen = lifecycle?.rollback_window?.open === true;
+  const windowOpen = lifecycle?.application_rollback_window?.open === true;
   const verified = upgrade?.verification?.passed === true;
   const finalizedAt = finalizeResult?.finalization.finalized_at ?? upgrade?.finalization?.finalized_at ?? null;
   const previousRemoved = finalizeResult?.cleanup.removed
@@ -412,7 +412,7 @@ export function LifecycleScreen({ onSessionLost }: LifecycleScreenProps) {
     ?? false;
   const canVerify = upgrade !== null && (upgrade.status === 'upgraded' || upgrade.status === 'verified') && !running;
   const canFinalize = windowOpen && verified && !running;
-  const canRollback = windowOpen && lifecycle?.rollback_window?.eligible === true && !running;
+  const canRollback = windowOpen && lifecycle?.application_rollback_window?.eligible === true && !running;
   const busyNow = busy !== null;
 
   const refresh = (): void => {
@@ -760,8 +760,8 @@ export function LifecycleScreen({ onSessionLost }: LifecycleScreenProps) {
                     {
                       term: t('lifecycle.rollback.target'),
                       value: message('lifecycle.rollback.targetValue', {
-                        from: lifecycle?.rollback_window?.to_release ?? '',
-                        to: lifecycle?.rollback_window?.from_release ?? '',
+                        from: lifecycle?.application_rollback_window?.to_release ?? '',
+                        to: lifecycle?.application_rollback_window?.from_release ?? '',
                       }),
                     },
                     { term: t('confirm.consequence'), value: t('lifecycle.rollback.consequence') },
