@@ -1,6 +1,6 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { resolveActor } from './auth.js';
-import { actorLabel, deny, reject, requireDeploymentAdministrator, type ActionContext } from './authz.js';
+import { actorLabel, deny, reject, requireDeploymentAdministrator, type ActionContext, type Actor } from './authz.js';
 import { isRecord, readJsonDocument } from './documents.js';
 import type { Fail } from './errors.js';
 import {
@@ -12,11 +12,12 @@ import {
   type AccessTokenRecord,
   type AgentDelegationRecord,
   type AgentIdentityRecord,
+  type OAuthAuthorizationCodeRecord,
   type OAuthClientRecord,
   type PlatformState,
   type UserRecord,
 } from './platform.js';
-import { openPlatform } from './session.js';
+import { openPlatform, type PlatformSession } from './session.js';
 import { constantTimeEquals, hashToken } from './tokens.js';
 
 /** The scopes an Agent Identity may hold; each one opens a tool surface and nothing else. */
@@ -24,8 +25,12 @@ import { constantTimeEquals, hashToken } from './tokens.js';
 export const MCP_SCOPES = ['mcp:read', 'mcp:nlq'];
 
 const ACCESS_TOKEN_LIFETIME_MS = 15 * 60 * 1000;
+const AUTHORIZATION_CODE_LIFETIME_MS = 60 * 1000;
 const MAX_REDIRECT_URIS = 8;
 const MAX_SCOPES = MCP_SCOPES.length;
+/** PKCE S256 output and input shapes, exactly as RFC 7636 defines them. */
+const PKCE_CHALLENGE = /^[A-Za-z0-9_-]{43}$/u;
+const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/u;
 
 /** Metadata the Deployment controls, so a client can never claim it for itself. */
 const PROTECTED_CLIENT_FIELDS = [
@@ -55,6 +60,24 @@ export class OAuthError extends Error {
   ) {
     super(message);
     this.name = 'OAuthError';
+  }
+}
+
+/**
+ * One failure of the authorization endpoint. A refusal that already validated
+ * the client and redirect URI is redirected back to that exact URI; anything
+ * else is stated locally, so an unvalidated URI is never redirected to.
+ */
+export class OAuthAuthorizationError extends Error {
+  constructor(
+    readonly status: number,
+    readonly error: string,
+    message: string,
+    readonly redirectUri: string | null = null,
+    readonly state: string | null = null,
+  ) {
+    super(message);
+    this.name = 'OAuthAuthorizationError';
   }
 }
 
@@ -433,9 +456,245 @@ function requireScopes(fail: Fail, raw: string[]): string[] {
 }
 
 /**
- * Mints one access token for a pre-registered client. The token names this
- * Deployment as its issuer and its MCP endpoint as its resource and audience,
- * and carries exactly the scopes the Agent Identity already holds.
+ * What one authorization request would delegate, once every claim has been
+ * proven against the Deployment's own identity and the User's session.
+ */
+export interface AuthorizationConsentView {
+  user: { user_id: string; username: string };
+  client: { client_id: string; client_name: string };
+  agent: { agent_identity_id: string; name: string };
+  workspace: { workspace_id: string; name: string };
+  scopes: string[];
+  redirect_uri: string;
+  code_challenge: string;
+  state: string | null;
+}
+
+interface AuthorizationGrant {
+  session: PlatformSession;
+  user: UserRecord;
+  client: OAuthClientRecord;
+  agent: AgentIdentityRecord;
+  workspace: { workspace_id: string; name: string };
+  delegation: AgentDelegationRecord;
+  scopes: string[];
+  redirectUri: string;
+  state: string | null;
+}
+
+/**
+ * Describes the consent one authenticated User is being asked for. Nothing is
+ * recorded until the User explicitly approves; every claim is revalidated here.
+ */
+export function describeAuthorization(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  params: Record<string, string>;
+}): AuthorizationConsentView {
+  const grant = validateAuthorization(options);
+  return {
+    user: { user_id: grant.user.user_id, username: grant.user.username },
+    client: { client_id: grant.client.client_id, client_name: grant.client.client_name },
+    agent: { agent_identity_id: grant.agent.agent_identity_id, name: grant.agent.name },
+    workspace: { workspace_id: grant.workspace.workspace_id, name: grant.workspace.name },
+    scopes: [...grant.scopes],
+    redirect_uri: grant.redirectUri,
+    code_challenge: options.params['code_challenge'] ?? '',
+    state: grant.state,
+  };
+}
+
+/**
+ * Records one explicit consent and issues a short-lived, single-use
+ * authorization code bound to the User, Agent Identity, Workspace, scopes,
+ * client, exact redirect URI, and PKCE challenge.
+ */
+export function approveAuthorization(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  params: Record<string, string>;
+}): { location: string } {
+  const grant = validateAuthorization(options);
+  const code = randomBytes(32).toString('base64url');
+  const now = Date.now();
+  const record: OAuthAuthorizationCodeRecord = {
+    code_hash: hashToken(code),
+    client_id: grant.client.client_id,
+    agent_identity_id: grant.agent.agent_identity_id,
+    user_id: grant.user.user_id,
+    workspace_id: grant.delegation.workspace_id,
+    delegation_id: grant.delegation.delegation_id,
+    scopes: [...grant.scopes],
+    redirect_uri: grant.redirectUri,
+    code_challenge: options.params['code_challenge'] ?? '',
+    code_challenge_method: 'S256',
+    issued_at: new Date(now).toISOString(),
+    expires_at: new Date(now + AUTHORIZATION_CODE_LIFETIME_MS).toISOString(),
+    consumed_at: null,
+  };
+  grant.session.state.oauth_authorization_codes.push(record);
+  grant.session.audit({
+    action: 'oauth_authorization_consent',
+    scope: 'workspace',
+    workspace_id: grant.delegation.workspace_id,
+    target: grant.client.client_id,
+    actor: actorLabel(grant.user),
+    outcome: 'succeeded',
+    detail: {
+      agent_identity_id: grant.agent.agent_identity_id,
+      delegation_id: grant.delegation.delegation_id,
+      scopes: grant.scopes.join(' '),
+      scope_count: grant.scopes.length,
+      redirect_uri: grant.redirectUri,
+    },
+  });
+  grant.session.save();
+  return { location: redirectLocation(grant.redirectUri, { code, state: grant.state }) };
+}
+
+/** Records one consent refusal; no code is issued and no authority is delegated. */
+export function denyAuthorization(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  params: Record<string, string>;
+}): { location: string } {
+  const grant = validateAuthorization(options);
+  grant.session.audit({
+    action: 'oauth_authorization_consent',
+    scope: 'workspace',
+    workspace_id: grant.delegation.workspace_id,
+    target: grant.client.client_id,
+    actor: actorLabel(grant.user),
+    outcome: 'denied',
+    detail: {
+      reason: 'consent_refused',
+      agent_identity_id: grant.agent.agent_identity_id,
+      delegation_id: grant.delegation.delegation_id,
+      scopes: grant.scopes.join(' '),
+    },
+  });
+  return { location: redirectLocation(grant.redirectUri, { error: 'access_denied', state: grant.state }) };
+}
+
+/**
+ * Proves one authorization request against the authenticated User, the
+ * pre-registered client, the Agent Identity, the Workspace, and the consenting
+ * User's active delegated consent. The client and redirect URI are validated
+ * before any error may be redirected back, so an unvalidated URI never receives
+ * a response.
+ */
+function validateAuthorization(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  params: Record<string, string>;
+}): AuthorizationGrant {
+  const session = openPlatform(options.root, options.masterKey, 'allow');
+  const context: ActionContext = { action: 'oauth_authorization_request', scope: 'deployment' };
+  const actor = resolveActor(session, options.token, context);
+  const params = options.params;
+  const client = findOAuthClient(session.state, params['client_id'] ?? '');
+  if (!client || client.revoked_at !== null) {
+    authorizationFailure(session, actor, context, 'invalid_request', 'The client_id is not a registered, active client of this Deployment.', null, null);
+  }
+  const redirectUri = params['redirect_uri'] ?? '';
+  if (!client.redirect_uris.includes(redirectUri)) {
+    authorizationFailure(session, actor, context, 'invalid_request', 'The redirect_uri is not one this client registered.', null, null);
+  }
+  const state = params['state'] ?? null;
+  if ((params['response_type'] ?? '') !== 'code') {
+    authorizationFailure(session, actor, context, 'unsupported_response_type', 'The authorization endpoint issues authorization codes only.', redirectUri, state);
+  }
+  const challenge = params['code_challenge'] ?? '';
+  if (!PKCE_CHALLENGE.test(challenge) || (params['code_challenge_method'] ?? '') !== 'S256') {
+    authorizationFailure(session, actor, context, 'invalid_request', 'A PKCE S256 code_challenge is required.', redirectUri, state);
+  }
+  const agent = findAgentIdentity(session.state, client.agent_identity_id);
+  if (!agent || agent.status !== 'active') {
+    authorizationFailure(session, actor, context, 'access_denied', 'The Agent Identity this client acts for is not active.', redirectUri, state);
+  }
+  const rawScope = (params['scope'] ?? '').trim();
+  const scopes = rawScope === ''
+    ? [...agent.scopes]
+    : [...new Set(rawScope.split(/\s+/u).filter((scope) => scope !== ''))];
+  if (scopes.length === 0 || scopes.some((scope) => !agent.scopes.includes(scope))) {
+    authorizationFailure(session, actor, context, 'invalid_scope', `This client may request only: ${agent.scopes.join(' ')}.`, redirectUri, state);
+  }
+  const workspaceId = params['workspace_id'] ?? '';
+  const workspace = findWorkspace(session.state, workspaceId);
+  const delegation = session.state.agent_delegations.find(
+    (candidate) => candidate.workspace_id === workspaceId
+      && candidate.agent_identity_id === agent.agent_identity_id
+      && candidate.user_id === actor.user.user_id
+      && candidate.revoked_at === null,
+  );
+  if (!workspace
+    || !agent.workspace_ids.includes(workspaceId)
+    || workspaceRoleOf(session.state, actor.user.user_id, workspaceId) === null
+    || delegation === undefined) {
+    authorizationFailure(
+      session,
+      actor,
+      context,
+      'access_denied',
+      'The User has no active delegated consent for this Agent Identity in this Workspace.',
+      redirectUri,
+      state,
+    );
+  }
+  return {
+    session,
+    user: actor.user,
+    client,
+    agent,
+    workspace: { workspace_id: workspace.workspace_id, name: workspace.name },
+    delegation,
+    scopes,
+    redirectUri,
+    state,
+  };
+}
+
+/** Audits one refused authorization request and fails closed with its OAuth error. */
+function authorizationFailure(
+  session: PlatformSession,
+  actor: Actor,
+  context: ActionContext,
+  error: string,
+  message: string,
+  redirectUri: string | null,
+  state: string | null,
+): never {
+  session.audit({
+    ...context,
+    actor: actorLabel(actor.user),
+    outcome: error === 'access_denied' ? 'denied' : 'failed',
+    detail: { error_code: error },
+  });
+  throw new OAuthAuthorizationError(400, error, message, redirectUri, state);
+}
+
+/** Builds a redirect to the one already-validated redirect URI. */
+function redirectLocation(
+  redirectUri: string,
+  params: { code?: string; error?: string; state: string | null },
+): string {
+  const url = new URL(redirectUri);
+  if (params.code !== undefined) url.searchParams.set('code', params.code);
+  if (params.error !== undefined) url.searchParams.set('error', params.error);
+  if (params.state !== null) url.searchParams.set('state', params.state);
+  return url.toString();
+}
+
+/**
+ * The token endpoint. Autonomous agents authenticate their pre-registered
+ * client and exchange it for a short-lived token; delegated access exchanges a
+ * single-use authorization code with its PKCE verifier, and the resulting token
+ * never carries more than the intersection of the Agent Identity and the
+ * consenting User.
  */
 export function issueAccessToken(options: {
   root: string;
@@ -443,24 +702,29 @@ export function issueAccessToken(options: {
   origin: string;
   form: Record<string, string>;
 }): Record<string, unknown> {
-  const resource = `${options.origin}/mcp`;
   const grantType = options.form['grant_type'];
-  if (grantType !== 'client_credentials') {
-    throw new OAuthError(400, 'unsupported_grant_type', 'This Deployment issues tokens for the client_credentials grant only.');
+  if (grantType !== 'client_credentials' && grantType !== 'authorization_code') {
+    throw new OAuthError(
+      400,
+      'unsupported_grant_type',
+      'This Deployment issues tokens for the client_credentials and authorization_code grants only.',
+    );
   }
-  const clientId = options.form['client_id'] ?? '';
-  const presentedSecret = options.form['client_secret'] ?? '';
+  const resource = `${options.origin}/mcp`;
   const session = openPlatform(options.root, options.masterKey, 'allow');
-  const client = findOAuthClient(session.state, clientId);
-  if (!client || client.revoked_at !== null || !constantTimeEquals(hashToken(presentedSecret), client.client_secret_hash)) {
-    throw new OAuthError(401, 'invalid_client', 'The client is not registered with this Deployment, or its secret is not valid.');
-  }
-  const agent = findAgentIdentity(session.state, client.agent_identity_id);
-  if (!agent || agent.status !== 'active') {
-    throw new OAuthError(401, 'invalid_client', 'The Agent Identity this client acts for is not active.');
-  }
+  const { client, agent } = authenticateTokenClient(session, options.form);
   if (options.form['resource'] !== resource) {
     throw new OAuthError(400, 'invalid_target', `The only resource this Deployment issues tokens for is ${resource}.`);
+  }
+  if (grantType === 'authorization_code') {
+    return exchangeAuthorizationCode(session, options, resource, client, agent);
+  }
+  if (options.form['delegation_id'] !== undefined) {
+    throw new OAuthError(
+      400,
+      'invalid_request',
+      'Delegated access uses the authorization_code grant with PKCE; client_credentials never names a delegation.',
+    );
   }
   const requested = (options.form['scope'] ?? agent.scopes.join(' ')).split(' ').filter((scope) => scope !== '');
   if (requested.length === 0 || requested.some((scope) => !agent.scopes.includes(scope))) {
@@ -470,22 +734,127 @@ export function issueAccessToken(options: {
   if (redirectUri !== undefined && !client.redirect_uris.includes(redirectUri)) {
     throw new OAuthError(400, 'OAUTH_REDIRECT_URI_INVALID', 'The redirect_uri is not one this client registered.');
   }
-  const delegation = readDelegation(session.state, options.form['delegation_id'], agent.agent_identity_id);
+  return mintAccessToken(
+    session,
+    options.origin,
+    resource,
+    client,
+    agent,
+    [...new Set(requested)],
+    redirectUri ?? null,
+    null,
+    'client_credentials',
+  );
+}
+
+/** Proves a pre-registered client and the active Agent Identity it acts for. */
+function authenticateTokenClient(
+  session: PlatformSession,
+  form: Record<string, string>,
+): { client: OAuthClientRecord; agent: AgentIdentityRecord } {
+  const clientId = form['client_id'] ?? '';
+  const presentedSecret = form['client_secret'] ?? '';
+  const client = findOAuthClient(session.state, clientId);
+  if (!client || client.revoked_at !== null || !constantTimeEquals(hashToken(presentedSecret), client.client_secret_hash)) {
+    throw new OAuthError(401, 'invalid_client', 'The client is not registered with this Deployment, or its secret is not valid.');
+  }
+  const agent = findAgentIdentity(session.state, client.agent_identity_id);
+  if (!agent || agent.status !== 'active') {
+    throw new OAuthError(401, 'invalid_client', 'The Agent Identity this client acts for is not active.');
+  }
+  return { client, agent };
+}
+
+/**
+ * Exchanges one single-use authorization code. A replayed, expired, foreign,
+ * redirect-mismatched, or verifier-mismatched code is refused, and the
+ * delegated consent is revalidated at this instant rather than trusted.
+ */
+function exchangeAuthorizationCode(
+  session: PlatformSession,
+  options: { origin: string; form: Record<string, string> },
+  resource: string,
+  client: OAuthClientRecord,
+  agent: AgentIdentityRecord,
+): Record<string, unknown> {
+  const rawCode = options.form['code'] ?? '';
+  const codeHash = hashToken(rawCode);
+  const record = rawCode === ''
+    ? undefined
+    : session.state.oauth_authorization_codes.find((candidate) => constantTimeEquals(candidate.code_hash, codeHash));
+  if (record === undefined) {
+    throw new OAuthError(400, 'invalid_grant', 'The authorization code was not issued by this Deployment.');
+  }
+  if (record.consumed_at !== null) {
+    throw new OAuthError(400, 'invalid_grant', 'The authorization code has already been used.');
+  }
+  if (Date.parse(record.expires_at) <= Date.now()) {
+    throw new OAuthError(400, 'invalid_grant', 'The authorization code has expired.');
+  }
+  if (record.client_id !== client.client_id || record.agent_identity_id !== agent.agent_identity_id) {
+    throw new OAuthError(400, 'invalid_grant', 'The authorization code was issued to a different client.');
+  }
+  if (record.redirect_uri !== (options.form['redirect_uri'] ?? '')) {
+    throw new OAuthError(400, 'invalid_grant', 'The redirect_uri does not match the authorization request.');
+  }
+  const verifier = options.form['code_verifier'] ?? '';
+  if (!PKCE_VERIFIER.test(verifier)) {
+    throw new OAuthError(400, 'invalid_grant', 'A valid PKCE code_verifier is required.');
+  }
+  const challenge = createHash('sha256').update(verifier).digest('base64url');
+  if (!constantTimeEquals(challenge, record.code_challenge)) {
+    throw new OAuthError(400, 'invalid_grant', 'The code_verifier does not match the authorization request.');
+  }
+  const delegated = activeDelegatedAuthority(session.state, record.delegation_id, agent, record.user_id);
+  if (delegated === null || delegated.delegation.workspace_id !== record.workspace_id) {
+    throw new OAuthError(400, 'invalid_grant', 'The delegated consent this code was issued under is no longer in force.');
+  }
+  if (record.scopes.length === 0 || record.scopes.some((scope) => !agent.scopes.includes(scope))) {
+    throw new OAuthError(400, 'invalid_grant', "The authorization code no longer matches the Agent Identity's scopes.");
+  }
+  // The code is consumed before the token is minted, so a replay can never
+  // produce a second token even if the first response is lost.
+  record.consumed_at = new Date().toISOString();
+  return mintAccessToken(
+    session,
+    options.origin,
+    resource,
+    client,
+    agent,
+    [...record.scopes],
+    record.redirect_uri,
+    delegated,
+    'authorization_code',
+  );
+}
+
+/** Stores and returns one access token under the exact authority it proves. */
+function mintAccessToken(
+  session: PlatformSession,
+  origin: string,
+  resource: string,
+  client: OAuthClientRecord,
+  agent: AgentIdentityRecord,
+  scopes: string[],
+  redirectUri: string | null,
+  delegated: DelegatedAuthority | null,
+  grantType: 'client_credentials' | 'authorization_code',
+): Record<string, unknown> {
   const now = Date.now();
   const record: AccessTokenRecord = {
     token_hash: '',
-    issuer: options.origin,
+    issuer: origin,
     audience: resource,
     resource,
     client_id: client.client_id,
     agent_identity_id: agent.agent_identity_id,
-    scopes: [...new Set(requested)],
-    redirect_uri: redirectUri ?? null,
+    scopes: [...new Set(scopes)],
+    redirect_uri: redirectUri,
     issued_at: new Date(now).toISOString(),
     expires_at: new Date(now + ACCESS_TOKEN_LIFETIME_MS).toISOString(),
     revoked_at: null,
-    delegation_id: delegation?.delegation_id ?? null,
-    delegated_user_id: delegation?.user_id ?? null,
+    delegation_id: delegated?.delegation.delegation_id ?? null,
+    delegated_user_id: delegated?.user.user_id ?? null,
   };
   const token = randomBytes(32).toString('base64url');
   record.token_hash = hashToken(token);
@@ -497,9 +866,13 @@ export function issueAccessToken(options: {
     target: client.client_id,
     outcome: 'succeeded',
     detail: {
+      grant_type: grantType,
       agent_identity_id: agent.agent_identity_id,
       client_id: client.client_id,
       scope_count: record.scopes.length,
+      ...(delegated === null
+        ? {}
+        : { delegated_user_id: delegated.user.user_id, delegated_username: delegated.user.username }),
     },
   });
   session.save();
@@ -599,42 +972,33 @@ function currentDelegation(
   record: AccessTokenRecord,
   agent: AgentIdentityRecord,
 ): DelegatedAuthority | null {
+  if (record.delegation_id === undefined || record.delegation_id === null) return null;
+  if (record.delegated_user_id === undefined || record.delegated_user_id === null) return null;
+  return activeDelegatedAuthority(state, record.delegation_id, agent, record.delegated_user_id);
+}
+
+/**
+ * The one exact consent in force right now for one Agent Identity and one User,
+ * revalidated against the User's status and current Workspace membership.
+ */
+function activeDelegatedAuthority(
+  state: PlatformState,
+  delegationId: string,
+  agent: AgentIdentityRecord,
+  userId: string,
+): DelegatedAuthority | null {
   const delegation = state.agent_delegations.find(
-    (candidate) => candidate.delegation_id === record.delegation_id,
+    (candidate) => candidate.delegation_id === delegationId,
   );
   const user = delegation === undefined ? undefined : findUserById(state, delegation.user_id);
   if (!delegation
     || delegation.revoked_at !== null
     || delegation.agent_identity_id !== agent.agent_identity_id
-    || delegation.user_id !== record.delegated_user_id
+    || delegation.user_id !== userId
     || !user
     || user.status !== 'active'
     || workspaceRoleOf(state, user.user_id, delegation.workspace_id) === null) {
     return null;
   }
   return { delegation, user };
-}
-
-/** Reads the consent a token request names, refusing one that is not in force. */
-function readDelegation(
-  state: PlatformState,
-  raw: string | undefined,
-  agentIdentityId: string,
-): AgentDelegationRecord | null {
-  if (raw === undefined || raw === '') return null;
-  const delegation = state.agent_delegations.find((candidate) => candidate.delegation_id === raw);
-  const user = delegation === undefined ? undefined : findUserById(state, delegation.user_id);
-  if (!delegation
-    || delegation.revoked_at !== null
-    || delegation.agent_identity_id !== agentIdentityId
-    || !user
-    || user.status !== 'active'
-    || workspaceRoleOf(state, user.user_id, delegation.workspace_id) === null) {
-    throw new OAuthError(
-      400,
-      'invalid_delegation',
-      'The delegation_id is not an active consent this Agent Identity acts under.',
-    );
-  }
-  return delegation;
 }

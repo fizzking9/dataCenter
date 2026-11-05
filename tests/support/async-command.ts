@@ -23,7 +23,7 @@ export function commandAsync(
 ): Promise<CommandResult> {
   const full = [...args, '--root', fixture.root, '--master-key', fixture.masterKey];
   if (options.token) full.push('--session-token', options.token);
-  return runAsync(full, fixture.docker, options.input);
+  return runAsync(full, { ...fixture.docker, ...(options.env ?? {}) }, options.input);
 }
 
 function runAsync(args: string[], env: NodeJS.ProcessEnv, input?: string): Promise<CommandResult> {

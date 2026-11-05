@@ -863,7 +863,7 @@ function exampleQueries(contract: DataProductContract): Array<Record<string, unk
       limit: Math.min(contract.default_limit, 10),
     });
   }
-  queries.push({ kind: 'records', limit: Math.min(contract.default_limit, 10) });
+  queries.push({ kind: 'records', include_totals: true, limit: Math.min(contract.default_limit, 10) });
   return queries;
 }
 

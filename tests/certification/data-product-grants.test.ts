@@ -142,7 +142,7 @@ function query(
 ): Page {
   const result = command(
     fixture,
-    ['product', 'query', '--product', productId, '--request', jsonFile(fixture, 'query', request)],
+    ['product', 'query', '--product', productId, '--request', jsonFile(fixture, 'query', { include_totals: true, ...request })],
     { token },
   );
   assert.equal(result.status, 0, result.stderr);

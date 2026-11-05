@@ -33,6 +33,7 @@ export type MockBehaviour =
   | 'unpublished_metric_one_part'
   | 'cross_product_join_plan'
   | 'foreign_product_plan'
+  | 'five_parts_plan'
   | 'english_plan'
   | 'unauthorized_field'
   | 'unauthorized_dimension'
@@ -607,6 +608,13 @@ function multiProductPlan(
     interpretation: '本次问题按每个数据产品各自的已发布受治理契约拆分为独立查询，不跨产品合并数据。',
     parts: parts.map((part) => ({ product: part.ref, query: part.compiled.query })),
   };
+  if (behaviour === 'five_parts_plan') {
+    // Spec section 15: one compound question plans at most four subqueries.
+    const template = parts[0];
+    if (template !== undefined) {
+      plan['parts'] = Array.from({ length: 5 }, () => ({ product: template.ref, query: template.compiled.query }));
+    }
+  }
   if (behaviour === 'cross_product_join_plan') {
     // A join is exactly the cross-product composition the platform never accepts.
     plan['join'] = { left: parts[0]?.ref ?? '', right: parts[1]?.ref ?? '', on: 'city' };

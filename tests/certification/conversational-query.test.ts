@@ -639,3 +639,32 @@ test('the two certification ledgers cover the periods the as-of assertions name'
   assert.ok(LEDGER.includes('2026-01-20'));
   assert.ok(REFUND_LEDGER.includes('2026-02-10'));
 });
+
+test('a compound plan beyond four subqueries is refused before any query runs', async (t) => {
+  const s = await readySurface();
+  t.after(() => s.endpoint.close());
+  s.endpoint.behaviour = 'five_parts_plan';
+  const refused = asOutput(await askWorkspace(s, ['--question', COMPOUND]));
+  assert.equal(refused.outcome, 'refused');
+  assert.equal(asRecord(refused)['reason_code'], 'QUERY_PLAN_PARTS_INVALID');
+  assert.equal(refused.executed, false);
+  assert.equal(refused.parts.length, 0, 'no part of an over-ceiling plan executes');
+});
+
+test('a turn past the settled hard timeout answers NLQ_TIMEOUT and leaves no partial answer', async (t) => {
+  const s = await readySurface();
+  t.after(() => s.endpoint.close());
+  const timedOut = await commandAsync(
+    s.fixture,
+    ['product', 'ask', '--workspace', s.workspaceId, '--question', COMPOUND],
+    { token: s.consumerToken, env: { DC_NLQ_TIMEOUT_MS: '1' } },
+  );
+  assert.equal(timedOut.status, 0, timedOut.stderr);
+  const output = asOutput(timedOut);
+  assert.equal(output.outcome, 'unavailable');
+  assert.equal(asRecord(output)['reason_code'], 'NLQ_TIMEOUT');
+  assert.equal(output.executed, false);
+  assert.equal(output.parts.length, 0);
+  assert.equal(output.result, null);
+  assert.ok(output.limitations.some((line) => line.includes('时限')), 'the limitation states the hard timeout');
+});

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { resolveActor } from './auth.js';
 import { actorLabel, reject, requireAdministrator, type ActionContext } from './authz.js';
+import { OperatorError } from './errors.js';
 import {
   readOperationsConfiguration,
   type OperationsConfiguration,
@@ -134,22 +135,43 @@ function asWaiting(request: AdmissionRequest, at: string): WaitingOperation {
   };
 }
 
+/** A batch ledger states its work; an execution path must run now or be refused. */
+type AdmissionMode = 'queue' | 'immediate';
+
+/** Why no platform slot is free, stated with the ceiling that was reached. */
+function platformLimitMessage(
+  state: OperationsState,
+  configuration: OperationsConfiguration,
+  request: WaitingOperation,
+): string {
+  if (request.class === 'async') {
+    const worker = request.worker ?? 'acquisition';
+    return `The Deployment is running its ${String(configuration.limits.workers[worker])} ${worker} workers.`;
+  }
+  const consumer = state.leases.filter((lease) => isConsumerClass(lease.class)).length;
+  if (request.class === 'llm' && consumer < configuration.limits.consumer_concurrency) {
+    return `The Deployment is running its ${String(configuration.limits.llm_concurrency)} LLM-backed Consumer operations.`;
+  }
+  return `The Deployment is running its ${String(configuration.limits.consumer_concurrency)} Consumer operations.`;
+}
+
 /**
  * One admission decision, stated rather than thrown, so a batch states every
  * request's outcome and a refused request still counts against its rate window.
+ * An execution path is admitted at once or refused; only a batch ledger queues.
  */
-function admitOne(
+function decideAdmission(
   state: OperationsState,
   configuration: OperationsConfiguration,
-  request: AdmissionRequest,
+  request: WaitingOperation,
   at: string,
+  mode: AdmissionMode,
 ): AdmissionOutcome {
-  const waiting = asWaiting(request, at);
-  const base = { request_id: waiting.request_id, operation: waiting.operation, workspace_id: waiting.workspace_id };
-  if (request.class === 'async' && waiting.worker === null) {
+  const base = { request_id: request.request_id, operation: request.operation, workspace_id: request.workspace_id };
+  if (request.class === 'async' && request.worker === null) {
     return { ...base, outcome: 'refused', code: 'OPERATION_CLASS_INVALID', lease_id: null, queue_position: 0 };
   }
-  const agentId = request.agent_identity_id ?? null;
+  const agentId = request.agent_identity_id;
   if (agentId !== null) {
     const llmFamily = request.class === 'llm';
     const perMinute = llmFamily
@@ -182,6 +204,24 @@ function admitOne(
       };
     }
   }
+  if (mode === 'immediate') {
+    // An execution path never occupies a durable queue it cannot drain: a full
+    // platform is a structured refusal, never a truncated or partial success.
+    if (!hasCapacity(state, configuration, request)) {
+      return {
+        ...base,
+        outcome: 'refused',
+        code: 'PLATFORM_CONCURRENCY_LIMIT',
+        message: platformLimitMessage(state, configuration, request),
+        lease_id: null,
+        queue_position: 0,
+      };
+    }
+    const lease = leaseFor(request, at);
+    state.leases.push(lease);
+    if (!state.rotation.includes(request.workspace_id)) state.rotation.push(request.workspace_id);
+    return { ...base, outcome: 'admitted', lease_id: lease.lease_id, queue_position: 0 };
+  }
   const queued = waitingInWorkspace(state, request.workspace_id, request.class);
   if (queued.length >= queueCeiling(configuration, request.class)) {
     return {
@@ -195,13 +235,13 @@ function admitOne(
   }
   // A request never overtakes its own Workspace backlog: it runs at once only
   // when its Workspace has nothing waiting and a slot is free.
-  if (queued.length === 0 && hasCapacity(state, configuration, waiting)) {
-    const lease = leaseFor(waiting, at);
+  if (queued.length === 0 && hasCapacity(state, configuration, request)) {
+    const lease = leaseFor(request, at);
     state.leases.push(lease);
     if (!state.rotation.includes(request.workspace_id)) state.rotation.push(request.workspace_id);
     return { ...base, outcome: 'admitted', lease_id: lease.lease_id, queue_position: 0 };
   }
-  state.waiting.push(waiting);
+  state.waiting.push(request);
   if (!state.rotation.includes(request.workspace_id)) state.rotation.push(request.workspace_id);
   return {
     ...base,
@@ -253,7 +293,8 @@ export function admitOperations(options: {
     const configuration = readOperationsConfiguration(options.root);
     const state = readOperationsState(options.root);
     pruneOperations(state, at);
-    const results = options.requests.map((request) => admitOne(state, configuration, request, at));
+    const results = options.requests.map((request) =>
+      decideAdmission(state, configuration, asWaiting(request, at), at, 'queue'));
     writeOperationsState(options.root, state);
     return {
       results,
@@ -261,6 +302,75 @@ export function admitOperations(options: {
       queued: results.filter((result) => result.outcome === 'queued').length,
       refused: results.filter((result) => result.outcome === 'refused').length,
     };
+  });
+}
+
+/**
+ * What one already-authorized execution path states before its work runs. The
+ * path has resolved the actor, Workspace, and object itself; admission only
+ * decides whether the Deployment has room for it now.
+ */
+export interface OperationAdmissionRequest {
+  root: string;
+  operation: string;
+  class: OperationClass;
+  workspace_id: string;
+  agent_identity_id?: string | null;
+  user_id?: string | null;
+  worker?: WorkerKind | null;
+  /** The instant the decision runs at, so a test can advance the clock. */
+  at?: string;
+}
+
+/**
+ * The one admission seam every Consumer execution path consults — the Data
+ * Product API, MCP, Natural-Language Query, and Report generation. It admits
+ * an operation at once or refuses it with the exact ceiling it reached; it
+ * never queues work the caller cannot drain and never returns a partial lease.
+ */
+export function acquireOperation(options: OperationAdmissionRequest): string {
+  const at = options.at ?? new Date().toISOString();
+  return withOperationsLock(options.root, () => {
+    const configuration = readOperationsConfiguration(options.root);
+    const state = readOperationsState(options.root);
+    pruneOperations(state, at);
+    const outcome = decideAdmission(
+      state,
+      configuration,
+      asWaiting({
+        operation: options.operation,
+        class: options.class,
+        workspace_id: options.workspace_id,
+        agent_identity_id: options.agent_identity_id ?? null,
+        user_id: options.user_id ?? null,
+        worker: options.worker ?? null,
+      }, at),
+      at,
+      'immediate',
+    );
+    // A refused Agent request is still counted in its rate window, so the state
+    // is written before the refusal is thrown.
+    writeOperationsState(options.root, state);
+    if (outcome.outcome !== 'admitted' || outcome.lease_id === null) {
+      throw new OperatorError(
+        outcome.code ?? 'OPERATION_REFUSED',
+        outcome.message ?? 'The Deployment has no room for this operation now.',
+        'Retry when an in-flight operation completes or its rate window passes.',
+      );
+    }
+    return outcome.lease_id;
+  });
+}
+
+/** Releases one lease an execution path held; a late or repeated release is harmless. */
+export function releaseOperation(options: { root: string; leaseId: string | null | undefined; at?: string }): void {
+  if (!options.leaseId) return;
+  const at = options.at ?? new Date().toISOString();
+  withOperationsLock(options.root, () => {
+    const state = readOperationsState(options.root);
+    pruneOperations(state, at);
+    state.leases = state.leases.filter((lease) => lease.lease_id !== options.leaseId);
+    writeOperationsState(options.root, state);
   });
 }
 

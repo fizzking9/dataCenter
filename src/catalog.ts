@@ -2385,6 +2385,11 @@ export interface PurgePlanEntry {
   purged?: boolean;
   /** Set when a dependency or Hold appeared after the plan was made. */
   deferred?: boolean;
+  /**
+   * The User a purged record belonged to, so a later retention answer can be
+   * given to that owner alone without disclosing the record to anyone else.
+   */
+  owner_user_id?: string | null;
 }
 
 /** One durable Purge request and its asynchronous deletion work. */
@@ -2417,5 +2422,7 @@ export interface PurgeLedgerEntry {
     record_kind: PurgeRecordKind;
     record_id: string;
     data_class: RetentionDataClass;
+    /** The owner of a purged user-owned record, when the ledger can state it. */
+    owner_user_id?: string | null;
   }>;
 }

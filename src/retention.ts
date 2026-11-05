@@ -60,7 +60,46 @@ export const RETENTION_DATA_CLASSES: RetentionDataClass[] = [
   'derived_data',
 ];
 
-const OVERRIDABLE_CLASSES: OverridableRetentionClass[] = ['raw_acquisition', 'dataset_release_history', 'report'];
+export const RETENTION_OVERRIDABLE_CLASSES: OverridableRetentionClass[] = ['raw_acquisition', 'dataset_release_history', 'report'];
+
+/** The scopes a Retention Hold may name; a deployment Hold is stated separately. */
+export const RETENTION_HOLD_SCOPES: RetentionScopeKind[] = [
+  'workspace',
+  'source',
+  'dataset',
+  'release',
+  'proposal_evidence',
+  'export',
+];
+
+/** The scopes a manual Purge supports. */
+export const RETENTION_PURGE_SCOPES: RetentionScopeKind[] = [
+  'workspace',
+  'source',
+  'dataset',
+  'release',
+  'proposal_evidence',
+  'export',
+];
+
+/**
+ * The governed retention vocabulary. Every surface that offers a data class or
+ * a scope reads it from here through the retention overview, so the browser
+ * never restates a rule the server enforces.
+ */
+export function retentionVocabulary(): {
+  data_classes: RetentionDataClass[];
+  overridable_classes: OverridableRetentionClass[];
+  hold_scopes: RetentionScopeKind[];
+  purge_scopes: RetentionScopeKind[];
+} {
+  return {
+    data_classes: [...RETENTION_DATA_CLASSES],
+    overridable_classes: [...RETENTION_OVERRIDABLE_CLASSES],
+    hold_scopes: [...RETENTION_HOLD_SCOPES],
+    purge_scopes: [...RETENTION_PURGE_SCOPES],
+  };
+}
 
 /** The settled defaults of spec section 13, applied until a policy is published. */
 export const SETTLED_RETENTION_DEFAULTS: Record<RetentionDataClass, RetentionTerm> = {
@@ -120,7 +159,7 @@ export function effectiveTerm(
   if (workspaceId === null) return term;
   const override = latestOverride(state, workspaceId);
   if (override === undefined) return term;
-  if (!(OVERRIDABLE_CLASSES as string[]).includes(dataClass)) return term;
+  if (!(RETENTION_OVERRIDABLE_CLASSES as string[]).includes(dataClass)) return term;
   const overridden = override.terms[dataClass as OverridableRetentionClass];
   if (overridden === undefined) return term;
   if (overridden.kind !== 'days') return overridden;
@@ -152,7 +191,7 @@ export function effectiveRetention(state: PlatformState, workspaceId: string): E
   const overrides: Partial<Record<OverridableRetentionClass, RetentionTerm>> = {};
   const clamped: OverridableRetentionClass[] = [];
   if (override !== undefined) {
-    for (const dataClass of OVERRIDABLE_CLASSES) {
+    for (const dataClass of RETENTION_OVERRIDABLE_CLASSES) {
       const overridden = override.terms[dataClass];
       if (overridden === undefined) continue;
       overrides[dataClass] = overridden;
@@ -301,8 +340,8 @@ export function publishRetentionPolicy(options: {
   const rawBounds = config['bounds'] ?? {};
   if (!isRecord(rawBounds)) fail('RETENTION_POLICY_INVALID', 'Policy bounds must be an object keyed by data class.');
   for (const [dataClass, value] of Object.entries(rawBounds)) {
-    if (!(OVERRIDABLE_CLASSES as string[]).includes(dataClass)) {
-      fail('RETENTION_POLICY_INVALID', `Bounds may be stated only for: ${OVERRIDABLE_CLASSES.join(', ')}.`);
+    if (!(RETENTION_OVERRIDABLE_CLASSES as string[]).includes(dataClass)) {
+      fail('RETENTION_POLICY_INVALID', `Bounds may be stated only for: ${RETENTION_OVERRIDABLE_CLASSES.join(', ')}.`);
     }
     const envelope = validBounds(value);
     if (envelope === null) {
@@ -320,7 +359,7 @@ export function publishRetentionPolicy(options: {
   if (defaults.derived_data.kind !== 'no_guarantee') {
     fail('RETENTION_POLICY_INVALID', 'Caches and indexes carry no retention guarantee.');
   }
-  for (const dataClass of OVERRIDABLE_CLASSES) {
+  for (const dataClass of RETENTION_OVERRIDABLE_CLASSES) {
     const term = defaults[dataClass];
     const envelope = bounds[dataClass];
     if (term.kind !== 'days' || term.days < envelope.min_days || term.days > envelope.max_days) {
@@ -382,10 +421,10 @@ export function publishRetentionOverride(options: {
   const bounds = policy?.bounds ?? SETTLED_RETENTION_BOUNDS;
   const terms: Partial<Record<OverridableRetentionClass, RetentionTerm>> = {};
   for (const [dataClass, value] of Object.entries(config)) {
-    if (!(OVERRIDABLE_CLASSES as string[]).includes(dataClass)) {
+    if (!(RETENTION_OVERRIDABLE_CLASSES as string[]).includes(dataClass)) {
       fail(
         'RETENTION_POLICY_INVALID',
-        `A Workspace may override only: ${OVERRIDABLE_CLASSES.join(', ')}.`,
+        `A Workspace may override only: ${RETENTION_OVERRIDABLE_CLASSES.join(', ')}.`,
       );
     }
     const term = parseTerm(value);
@@ -497,6 +536,7 @@ export function showRetentionPolicy(options: {
   }
   const policy = latestPolicy(session.state);
   const version = options.version ?? policy?.version ?? 0;
+  const vocabulary = retentionVocabulary();
   if (version === 0) {
     if (options.workspaceId !== undefined) {
       const effective = effectiveRetention(session.state, options.workspaceId);
@@ -510,6 +550,7 @@ export function showRetentionPolicy(options: {
         clamped: [...effective.clamped],
         policy_history: [],
         override_history: overrideHistory(retentionOverrideArtifact(session.state, options.workspaceId)),
+        vocabulary,
         summary: '当前生效的是内置保留默认值，适用于既有数据和未来数据。',
       };
     }
@@ -521,6 +562,7 @@ export function showRetentionPolicy(options: {
       bounds: deepCopy(SETTLED_RETENTION_BOUNDS),
       content_hash: null,
       history: [],
+      vocabulary,
       summary: '当前生效的是内置保留默认值，适用于既有数据和未来数据。',
     };
   }
@@ -543,6 +585,7 @@ export function showRetentionPolicy(options: {
       clamped: [...effective.clamped],
       policy_history: policyHistory(retentionPolicyArtifact(session.state)),
       override_history: overrideHistory(retentionOverrideArtifact(session.state, options.workspaceId)),
+      vocabulary,
       summary: `当前生效的保留策略为第 ${stored.version} 版，并叠加工作区覆盖。`,
     };
   }
@@ -550,6 +593,7 @@ export function showRetentionPolicy(options: {
     ...policyView(stored),
     source: 'published',
     history: policyHistory(retentionPolicyArtifact(session.state)),
+    vocabulary,
     summary: `当前生效的保留策略为第 ${stored.version} 版，适用于既有数据和未来数据。`,
   };
 }
@@ -837,6 +881,8 @@ interface PurgeCandidate {
   /** The Dataset Release is its Dataset's latest, or a current Product Release binds it. */
   current: boolean;
   terminal: boolean;
+  /** The User who owned the record, where only its owner may learn it was purged. */
+  owner_user_id?: string | null;
 }
 
 function reportCandidates(state: PlatformState, reports: ReportRecord[]): PurgeCandidate[] {
@@ -858,6 +904,7 @@ function reportCandidates(state: PlatformState, reports: ReportRecord[]): PurgeC
       target_id: report.report_id,
       current: false,
       terminal: true,
+      owner_user_id: null,
     };
   });
 }
@@ -881,6 +928,7 @@ function exportCandidates(state: PlatformState, exports: ExportRecord[]): PurgeC
       target_id: record.export_id,
       current: false,
       terminal: true,
+      owner_user_id: record.actor_user_id,
     };
   });
 }
@@ -905,6 +953,7 @@ function datasetReleaseCandidates(
     target_id: null,
     current: latest !== undefined && latest.release === release.release,
     terminal: true,
+    owner_user_id: null,
   };
 }
 
@@ -927,6 +976,7 @@ function proposalCandidates(proposals: ArtifactProposalRecord[]): PurgeCandidate
       target_id: proposal.proposal_id,
       current: false,
       terminal: true,
+      owner_user_id: null,
     }));
 }
 
@@ -1162,6 +1212,7 @@ function judgeCandidate(
     reason: 'within_retention',
     held_by: [],
     dependencies: [],
+    ...(candidate.owner_user_id === null || candidate.owner_user_id === undefined ? {} : { owner_user_id: candidate.owner_user_id }),
   };
   entry.held_by = holds.filter((hold) => holdCovers(hold, candidate)).map((hold) => hold.hold_id);
   if (entry.held_by.length > 0) {
@@ -1534,6 +1585,9 @@ function executeJob(session: PlatformSession, job: PurgeJobRecord, at: Date): vo
         record_kind: entry.record_kind,
         record_id: entry.record_id,
         data_class: entry.data_class,
+        ...(entry.owner_user_id === undefined || entry.owner_user_id === null
+          ? {}
+          : { owner_user_id: entry.owner_user_id }),
       })),
     };
     session.state.purge_ledger.push(ledger);

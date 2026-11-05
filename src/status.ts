@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { backupHealth } from './backup.js';
 import { readMountedMasterKey, unwrapDataKey, type WrappedDataKey } from './keys.js';
@@ -6,7 +7,16 @@ import { readPlatform } from './platform.js';
 import { retentionHealth } from './retention.js';
 import { healthyServices } from './runtime.js';
 import { readDeployment, readJsonFile, recordEvidence } from './state.js';
-import { rollbackWindow } from './upgrade.js';
+import { applicationRollbackWindow } from './upgrade.js';
+
+/**
+ * The listener the Operator Console last bound: its host, exposure, and whether
+ * TLS protects it. Absent means no Console has served this Deployment yet.
+ */
+function consoleListener(root: string): Record<string, unknown> | null {
+  const path = join(root, 'state', 'console-listener.json');
+  return existsSync(path) ? readJsonFile<Record<string, unknown>>(path) : null;
+}
 
 export function deploymentStatus(options: {
   root: string;
@@ -19,6 +29,7 @@ export function deploymentStatus(options: {
   // Recovery health is stated even while service is closed: a Deployment that
   // stopped checkpointing has lost its promised RPO whatever else it reports.
   const backup = backupHealth(options.root);
+  const listener = consoleListener(options.root);
   const recovery = {
     workers_enabled: deployment.workers_enabled !== false,
     connectivity_enabled: deployment.connectivity_enabled !== false,
@@ -48,9 +59,10 @@ export function deploymentStatus(options: {
       access: 'closed',
       release: deployment.release,
       deployment_id: deployment.deployment_id,
-      rollback_window: rollbackWindow(options.root),
+      application_rollback_window: applicationRollbackWindow(options.root),
       license,
       ...recovery,
+      console_listener: listener,
       evidence_id: evidenceId,
     };
   }
@@ -67,9 +79,10 @@ export function deploymentStatus(options: {
       access: 'read_only',
       release: deployment.release,
       deployment_id: deployment.deployment_id,
-      rollback_window: rollbackWindow(options.root),
+      application_rollback_window: applicationRollbackWindow(options.root),
       license,
       ...recovery,
+      console_listener: listener,
       evidence_id: evidenceId,
     };
   }
@@ -102,7 +115,7 @@ export function deploymentStatus(options: {
     access: 'full',
     release: deployment.release,
     deployment_id: deployment.deployment_id,
-    rollback_window: rollbackWindow(options.root),
+    application_rollback_window: applicationRollbackWindow(options.root),
     runtime_services: services,
     mfa_enrolled: deployment.mfa_enrolled === true,
     default_credentials: deployment.default_credentials !== false,
@@ -110,6 +123,7 @@ export function deploymentStatus(options: {
     license,
     retention,
     ...recovery,
+    console_listener: listener,
     evidence_id: evidenceId,
   };
 }
