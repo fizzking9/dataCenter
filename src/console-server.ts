@@ -13,6 +13,16 @@ import {
   tickSchedules,
   workAcquisition,
 } from './acquisition-run.js';
+import { listAgentIdentities, showWorkspaceAgentAccess } from './agent-admin.js';
+import {
+  createAgentDelegation,
+  createAgentIdentity,
+  registerOAuthClient,
+  revokeAgentDelegation,
+  revokeAgentIdentity,
+  revokeOAuthClient,
+} from './agents.js';
+import { publishGrant, revokeGrant } from './grants.js';
 import { showWorkspaceAudit } from './audit-view.js';
 import { login, logout } from './auth.js';
 import {
@@ -60,6 +70,23 @@ import {
 } from './product-proposal.js';
 import { createSource, listWorkspaceSources, showWorkspaceSource } from './sources.js';
 import {
+  adoptScraperProposal,
+  approveScraperProposal,
+  compileScraperService,
+  listScraperProposals,
+  listScraperWorkspace,
+  previewScraperProposal,
+  publishScraperProposal,
+  rejectScraperProposal,
+  repairScraperService,
+  showScraperProposal,
+  validateScraperProposal,
+  verifyScraperProposal,
+} from './scraper-service.js';
+import { publishScraperTaskDeclaration } from './scraper-task.js';
+import { listScraperRuns, runScraperService } from './scraper-run.js';
+import { showScraperDiagnostics } from './scraper-diagnostics.js';
+import {
   appointEmergencyAdministrator,
   createWorkspace,
   grantMembership,
@@ -88,7 +115,8 @@ export const SESSION_COOKIE = 'dc_operator_console';
 /** Platform User sessions are a separate channel from the Operator Console. */
 export const USER_SESSION_COOKIE = 'dc_user_session';
 
-const MAX_BODY_BYTES = 64 * 1024;
+/** One governed JSON body is bounded before it reaches any governed module. */
+const MAX_BODY_BYTES = 1024 * 1024;
 /** One governed upload is bounded before it reaches any governed module. */
 const MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
 const CONTENT_TYPES: Record<string, string> = {
@@ -471,6 +499,74 @@ async function handleApi(
     return;
   }
 
+  // Agent Identities are Deployment-scoped principals, so only a Deployment
+  // Administrator creates, lists, or revokes them. The governed modules state
+  // every scope, Workspace binding, and capability; the browser only renders it.
+  if (pathname === '/api/deployment/agent-identities' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listAgentIdentities({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/agent-identities' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, createAgentIdentity({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      name: text(body, 'name'),
+      workspaceIds: identifiers(body, 'workspace_ids'),
+      scopes: identifiers(body, 'scopes'),
+    }));
+    return;
+  }
+
+  const agentRevokeRoute = /^\/api\/deployment\/agent-identities\/([^/]+)\/revoke$/u.exec(pathname);
+  if (agentRevokeRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, revokeAgentIdentity({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      agentIdentityId: decodeURIComponent(agentRevokeRoute[1]!),
+    }));
+    return;
+  }
+
+  const agentClientRoute = /^\/api\/deployment\/agent-identities\/([^/]+)\/clients$/u.exec(pathname);
+  if (agentClientRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    // The browser states the same Client ID Metadata Document a file would
+    // carry; the governed module validates every field and protects the claims
+    // the Deployment controls.
+    sendJson(response, 201, registerOAuthClient({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      agentIdentityId: decodeURIComponent(agentClientRoute[1]!),
+      metadata: {
+        client_id: text(body, 'client_id'),
+        client_name: text(body, 'client_name'),
+        redirect_uris: identifiers(body, 'redirect_uris'),
+      },
+    }));
+    return;
+  }
+
+  const clientRevokeRoute = /^\/api\/deployment\/oauth-clients\/([^/]+)\/revoke$/u.exec(pathname);
+  if (clientRevokeRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, revokeOAuthClient({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      clientId: decodeURIComponent(clientRevokeRoute[1]!),
+    }));
+    return;
+  }
+
   if (pathname === '/api/workspace/data-products' && method === 'GET') {
     const token = userSession(request);
     sendJson(response, 200, listDataProducts({
@@ -478,6 +574,80 @@ async function handleApi(
       masterKey: options.masterKey,
       token,
       workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  // Agent access inside one Workspace. The Workspace Administrator sees only
+  // this Workspace's Grants and consents, publishes narrowings through the same
+  // governed module the CLI uses, and records only their own delegated consent.
+  if (pathname === '/api/workspace/agents' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, showWorkspaceAgentAccess({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/agent-grants' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const columnText = text(body, 'columns');
+    const columns = columnText
+      .split(/[,，\n]/u)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry !== '');
+    const rowFilters = jsonDocument(body, 'row_filters');
+    sendJson(response, 201, publishGrant({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      dataProductId: text(body, 'data_product_id'),
+      agentIdentityId: text(body, 'agent_identity_id'),
+      request: {
+        ...(columns.length === 0 ? {} : { columns }),
+        ...(rowFilters === undefined ? {} : { row_filters: rowFilters }),
+      },
+    }));
+    return;
+  }
+
+  const agentGrantRevokeRoute = /^\/api\/workspace\/agent-grants\/([^/]+)\/revoke$/u.exec(pathname);
+  if (agentGrantRevokeRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, revokeGrant({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      grantId: decodeURIComponent(agentGrantRevokeRoute[1]!),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/agent-delegations' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, createAgentDelegation({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      agentIdentityId: text(body, 'agent_identity_id'),
+      workspaceId: workspaceFromBody(body),
+    }));
+    return;
+  }
+
+  const agentDelegationRevokeRoute = /^\/api\/workspace\/agent-delegations\/([^/]+)\/revoke$/u.exec(pathname);
+  if (agentDelegationRevokeRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, revokeAgentDelegation({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      delegationId: decodeURIComponent(agentDelegationRevokeRoute[1]!),
     }));
     return;
   }
@@ -894,6 +1064,22 @@ async function handleApi(
     return;
   }
 
+  // The Scraper Service lifecycle: a guided Task form pins the target, output
+  // contract, parameters, fixtures, constraints, and credential references;
+  // compilation, versioned-fixture validation and preview, Approval, Publication,
+  // isolated live verification, and Source Adoption stay separate exact-version
+  // actions over the same governed modules the CLI uses.
+  if (pathname === '/api/workspace/scrapers' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listScraperWorkspace({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
   // Artifact Proposal governance: the browser states a Chinese requirement and
   // reads the data dictionary, runs the same deterministic validation and
   // isolated preview the CLI runs, then approves, publishes, and adopts exact
@@ -911,6 +1097,20 @@ async function handleApi(
     return;
   }
 
+  if (pathname === '/api/workspace/scraper-tasks' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, publishScraperTaskDeclaration({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: workspaceFromBody(body),
+      name: text(body, 'name'),
+      declaration: jsonDocument(body, 'declaration'),
+    }));
+    return;
+  }
+
   const proposalGenerateRoute = /^\/api\/workspace\/sources\/([^/]+)\/proposals\/generate$/u.exec(pathname);
   if (proposalGenerateRoute !== null && method === 'POST') {
     const token = userSession(request);
@@ -923,6 +1123,89 @@ async function handleApi(
       bindingId: text(body, 'binding_id'),
       requirement: { requirement: text(body, 'requirement'), clarifications: body['clarifications'] ?? [] },
       dictionary: jsonDocument(body, 'dictionary'),
+    }));
+    return;
+  }
+
+  const scraperCompileRoute = /^\/api\/workspace\/scraper-tasks\/([^/]+)\/compile$/u.exec(pathname);
+  if (scraperCompileRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const taskVersion = number(body, 'task_version');
+    sendJson(response, 201, compileScraperService({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      taskId: decodeURIComponent(scraperCompileRoute[1]!),
+      ...(Number.isInteger(taskVersion) ? { taskVersion } : {}),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/scraper-proposals' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listScraperProposals({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  const scraperProposalRoute = /^\/api\/workspace\/scraper-proposals\/([^/]+)\/(show|validate|preview|approve|reject|publish|verify|adopt)$/u.exec(pathname);
+  if (scraperProposalRoute !== null && (method === 'POST' || (method === 'GET' && scraperProposalRoute[2] === 'show'))) {
+    const token = userSession(request);
+    const proposalId = decodeURIComponent(scraperProposalRoute[1]!);
+    const action = scraperProposalRoute[2];
+    if (action === 'show') {
+      sendJson(response, 200, showScraperProposal({ root: options.root, masterKey: options.masterKey, token, proposalId }));
+      return;
+    }
+    const body = method === 'POST' ? await readJson(request) : {};
+    if (action === 'validate') {
+      sendJson(response, 200, validateScraperProposal({ root: options.root, masterKey: options.masterKey, token, proposalId }));
+      return;
+    }
+    if (action === 'preview') {
+      sendJson(response, 200, previewScraperProposal({ root: options.root, masterKey: options.masterKey, token, proposalId }));
+      return;
+    }
+    if (action === 'approve') {
+      sendJson(response, 200, approveScraperProposal({ root: options.root, masterKey: options.masterKey, token, proposalId }));
+      return;
+    }
+    if (action === 'publish') {
+      sendJson(response, 200, publishScraperProposal({ root: options.root, masterKey: options.masterKey, token, proposalId }));
+      return;
+    }
+    if (action === 'verify') {
+      const parameters = jsonDocument(body, 'parameters');
+      sendJson(response, 200, await verifyScraperProposal({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        proposalId,
+        ...(parameters === undefined ? {} : { parameters }),
+      }));
+      return;
+    }
+    if (action === 'adopt') {
+      sendJson(response, 200, adoptScraperProposal({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        proposalId,
+        sourceId: text(body, 'source_id'),
+      }));
+      return;
+    }
+    sendJson(response, 200, rejectScraperProposal({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      proposalId,
+      reason: text(body, 'reason'),
     }));
     return;
   }
@@ -975,6 +1258,18 @@ async function handleApi(
     return;
   }
 
+  if (pathname === '/api/workspace/scraper-runs' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listScraperRuns({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+      sourceId: searchParam(request, 'source_id') ?? '',
+    }));
+    return;
+  }
+
   // Data Product Proposal governance: the browser states a Chinese requirement
   // and reads the Contract the governed engine validated and previewed against
   // the real Dataset Release, then approves and publishes that exact candidate.
@@ -988,6 +1283,45 @@ async function handleApi(
       masterKey: options.masterKey,
       token,
       sourceId: decodeURIComponent(productProposalListRoute[1]!),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/scraper-runs' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const parameters = jsonDocument(body, 'parameters');
+    sendJson(response, 201, await runScraperService({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      sourceId: text(body, 'source_id'),
+      ...(parameters === undefined ? {} : { parameters }),
+    }));
+    return;
+  }
+
+  const scraperDiagnosticsRoute = /^\/api\/workspace\/scraper-diagnostics\/([^/]+)(\/repair)?$/u.exec(pathname);
+  if (scraperDiagnosticsRoute !== null && method === 'GET' && scraperDiagnosticsRoute[2] === undefined) {
+    const token = userSession(request);
+    sendJson(response, 200, showScraperDiagnostics({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      diagnosticsId: decodeURIComponent(scraperDiagnosticsRoute[1]!),
+    }));
+    return;
+  }
+  if (scraperDiagnosticsRoute !== null && method === 'POST' && scraperDiagnosticsRoute[2] === '/repair') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, await repairScraperService({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      diagnosticsId: decodeURIComponent(scraperDiagnosticsRoute[1]!),
+      bindingId: text(body, 'binding_id'),
+      taskVersion: number(body, 'task_version'),
     }));
     return;
   }
@@ -1291,8 +1625,9 @@ function flag(body: Record<string, unknown>, field: string): boolean {
 }
 
 /**
- * A JSON document the browser read from a file. It is parsed here, and the
- * governed module validates its shape; the browser never decides what it means.
+ * A JSON document the browser stated, either already parsed or as the text a
+ * form field or a file read carries. The governed module validates its shape;
+ * the browser never decides what it means.
  */
 function jsonDocument(body: Record<string, unknown>, field: string): unknown {
   const value = body[field];
@@ -1391,6 +1726,23 @@ const STATUS_BY_CODE: Record<string, number> = {
   SERVICE_IDENTITY_NAME_CONFLICT: 409,
   SERVICE_IDENTITY_WORKSPACE_INVALID: 400,
   SERVICE_IDENTITY_NOT_FOUND: 404,
+  // An Agent Identity is an external Consumer principal with its own scope,
+  // Workspace-binding, client, and consent refusals.
+  AGENT_NAME_INVALID: 400,
+  AGENT_ALREADY_EXISTS: 409,
+  AGENT_WORKSPACE_INVALID: 400,
+  AGENT_SCOPE_INVALID: 400,
+  AGENT_NOT_FOUND: 404,
+  OAUTH_CLIENT_METADATA_INVALID: 400,
+  OAUTH_CLIENT_METADATA_PROTECTED: 400,
+  OAUTH_CLIENT_ALREADY_REGISTERED: 409,
+  OAUTH_CLIENT_NOT_FOUND: 404,
+  DELEGATION_NOT_AVAILABLE: 404,
+  GRANT_GRANTEE_NOT_FOUND: 404,
+  GRANT_REQUEST_INVALID: 400,
+  GRANT_COLUMNS_INVALID: 400,
+  GRANT_ROW_FILTER_INVALID: 400,
+  GRANT_NOT_AVAILABLE: 404,
   CONTEXT_NOT_PUBLISHED: 404,
   CONTEXT_SHADOWS_COMMON: 409,
   CROSS_WORKSPACE_REFERENCE: 409,
@@ -1447,6 +1799,50 @@ const STATUS_BY_CODE: Record<string, number> = {
   INTEGRATION_MAPPING_INCOMPLETE: 422,
   INTEGRATION_MAPPING_UNKNOWN_COLUMN: 422,
   INTEGRATION_VERSION_NOT_FOUND: 404,
+  // A Scraper Service lifecycle refusal is a governed answer, never a fault.
+  SCRAPER_TASK_NOT_FOUND: 404,
+  SCRAPER_TASK_NAME_INVALID: 400,
+  SCRAPER_TASK_INVALID: 400,
+  SCRAPER_TASK_UNREADABLE: 400,
+  SCRAPER_NETWORK_SCOPE_NOT_APPROVED: 422,
+  SCRAPER_CREDENTIAL_INVALID: 400,
+  SCRAPER_CREDENTIAL_REQUIRED: 400,
+  SCRAPER_CREDENTIAL_NOT_FOUND: 409,
+  SCRAPER_COMPILATION_FAILED: 422,
+  SCRAPER_PROPOSAL_NOT_FOUND: 404,
+  SCRAPER_PROPOSAL_STALE: 409,
+  SCRAPER_PROPOSAL_TAMPERED: 409,
+  SCRAPER_PROPOSAL_DECIDED: 409,
+  SCRAPER_VALIDATION_REQUIRED: 409,
+  SCRAPER_VALIDATION_FAILED: 422,
+  SCRAPER_NOT_APPROVED: 409,
+  SCRAPER_ALREADY_PUBLISHED: 409,
+  SCRAPER_NOT_PUBLISHED: 409,
+  SCRAPER_VERIFICATION_REQUIRED: 409,
+  SCRAPER_VERIFICATION_FAILED: 422,
+  SCRAPER_ALREADY_ADOPTED: 409,
+  SCRAPER_SOURCE_NOT_AVAILABLE: 404,
+  SCRAPER_SOURCE_TYPE_UNSUPPORTED: 400,
+  SCRAPER_SERVICE_VERSION_NOT_FOUND: 404,
+  SCRAPER_REASON_INVALID: 400,
+  SCRAPER_PARAMETERS_UNREADABLE: 400,
+  SCRAPER_PARAMETER_INVALID: 400,
+  SCRAPER_PARAMETER_UNKNOWN: 400,
+  SCRAPER_PARAMETER_REQUIRED: 400,
+  SCRAPER_SERVICE_NOT_ADOPTED: 409,
+  SCRAPER_SERVICE_WITHDRAWN: 409,
+  SCRAPER_SERVICE_TAMPERED: 409,
+  SCRAPER_DIAGNOSTICS_NOT_FOUND: 404,
+  SCRAPER_DIAGNOSTICS_TAMPERED: 409,
+  SCRAPER_REPAIR_BINDING_NOT_FOUND: 404,
+  SCRAPER_REPAIR_BINDING_REVOKED: 409,
+  SCRAPER_REPAIR_PURPOSE_NOT_BOUND: 422,
+  SCRAPER_REPAIR_MODEL_STALE: 409,
+  SCRAPER_REPAIR_MODEL_NOT_ACTIVATED: 409,
+  SCRAPER_REPAIR_STALE: 409,
+  SCRAPER_REPAIR_FIXTURES_REQUIRED: 409,
+  SCRAPER_REPAIR_OUTPUT_INVALID: 422,
+  SCRAPER_REPAIR_FAILED: 422,
   // Declarative business API connections and connector Runs fail closed with
   // explicit codes; each maps to one status the browser can name in Chinese.
   CONNECTION_NAME_INVALID: 400,

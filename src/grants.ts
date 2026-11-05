@@ -196,6 +196,10 @@ export interface GrantReader {
   readonly label: string;
   /** The subject a cached page is bound to, so no two principals share one. */
   readonly subject: string;
+  /** Whether this reader may retrieve withdrawn Reports as governed history. */
+  readonly withdrawnVisible: boolean;
+  /** The delegated identity every Audit Event of this read attributes beside the label. */
+  readonly auditDetail: Record<string, string | number | boolean>;
   /** The scope this reader reads one Contract line under, or null when none applies. */
   scopeOf(product: DataProductArtifact, contract: DataProductContract): GrantScope | null;
   /** The same scope, failing closed with the codes the Deployment publishes. */
@@ -211,6 +215,8 @@ export function memberReader(
   return {
     label: actorLabel(user),
     subject: user.user_id,
+    withdrawnVisible: role === 'Workspace Administrator',
+    auditDetail: {},
     scopeOf: (product, contract) => readableGrantScope(session, user.user_id, role, product, contract),
     requireScope: (product, contract, fail) => resolveGrantScope(session, user.user_id, role, product, contract, fail),
   };
@@ -228,8 +234,61 @@ export function agentReader(
   return {
     label,
     subject: agentIdentityId,
+    withdrawnVisible: false,
+    auditDetail: {},
     scopeOf: (product, contract) => readableAgentGrantScope(session, agentIdentityId, product, contract),
     requireScope: (product, contract, fail) => resolveAgentGrantScope(session, agentIdentityId, product, contract, fail),
+  };
+}
+
+/**
+ * A delegated read is always the intersection of the Agent Identity's own
+ * Grants and the delegated User's current permissions: the reader sees only
+ * columns both may see, and every row filter either one states still applies.
+ * The subject binds both identities, so no cursor or handle can be reused
+ * across a change of either party.
+ */
+export function delegatedReader(
+  session: PlatformSession,
+  agentIdentityId: string,
+  user: UserRecord,
+  role: string | null,
+  label: string,
+): GrantReader {
+  const auditDetail = {
+    delegated_user_id: user.user_id,
+    delegated_username: user.username,
+  };
+  const scopeOf = (product: DataProductArtifact, contract: DataProductContract): GrantScope | null => {
+    const agentScope = readableAgentGrantScope(session, agentIdentityId, product, contract);
+    if (agentScope === null) return null;
+    const userScope = readableGrantScope(session, user.user_id, role, product, contract);
+    if (userScope === null) return null;
+    const columns = agentScope.columns.filter((column) => userScope.columns.includes(column));
+    const rowFilters = [...agentScope.rowFilters, ...userScope.rowFilters]
+      .filter((filter, index, all) => all.findIndex(
+        (candidate) => candidate.field === filter.field
+          && candidate.op === filter.op
+          && candidate.value === filter.value,
+      ) === index);
+    return {
+      columns,
+      rowFilters,
+      restricted: true,
+      fingerprint: canonicalDigest({ columns, row_filters: rowFilters, restricted: true }),
+    };
+  };
+  return {
+    label,
+    subject: `${agentIdentityId}|${user.user_id}`,
+    withdrawnVisible: false,
+    auditDetail,
+    scopeOf,
+    requireScope: (product, contract, fail) => scopeOf(product, contract) ?? fail(
+      'DATA_PRODUCT_NOT_AVAILABLE',
+      'No Data Product Grant permits this delegated authority to read this Data Product.',
+      'Ask for a Grant naming the Agent Identity and the delegated User.',
+    ),
   };
 }
 
@@ -359,7 +418,10 @@ export function publishGrant(options: {
   /** The member whose reads to narrow, or the Agent Identity instead. */
   username?: string;
   agentIdentityId?: string;
-  requestPath: string;
+  /** The Grant request as a file, as the lifecycle CLI states it. */
+  requestPath?: string;
+  /** The same request a browser form already parsed on the server. */
+  request?: unknown;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'data_product_grant_publication', scope: 'workspace' };
@@ -394,12 +456,14 @@ export function publishGrant(options: {
       'Create the Agent Identity for this Workspace before narrowing what it may read.',
     );
   }
-  const request = readJsonDocument(
-    options.requestPath,
-    fail,
-    'GRANT_REQUEST_INVALID',
-    'The Grant request must contain valid JSON.',
-  );
+  const request = options.request !== undefined
+    ? options.request
+    : readJsonDocument(
+      options.requestPath ?? '',
+      fail,
+      'GRANT_REQUEST_INVALID',
+      'The Grant request must contain valid JSON.',
+    );
   if (!isRecord(request)) {
     fail('GRANT_REQUEST_INVALID', 'A Grant request must be a JSON object.');
   }

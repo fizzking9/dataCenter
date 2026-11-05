@@ -44,9 +44,9 @@ function hrefOf(key: string, workspaceId: string | null): string | undefined {
   if (key === 'deployment.modelProfiles') return '/app/deployment/model-profiles';
   if (workspaceId === null || !key.startsWith('workspace.')) return undefined;
   const view = key.slice('workspace.'.length);
-  if (view !== 'overview' && view !== 'sources' && view !== 'products' && view !== 'context'
+  if (view !== 'overview' && view !== 'sources' && view !== 'scrapers' && view !== 'products' && view !== 'context'
     && view !== 'members' && view !== 'audit' && view !== 'models' && view !== 'proposals'
-    && view !== 'productProposals') return undefined;
+    && view !== 'productProposals' && view !== 'agents') return undefined;
   if (view === 'productProposals') {
     return `/app/w/${encodeURIComponent(workspaceId)}/product-proposals`;
   }

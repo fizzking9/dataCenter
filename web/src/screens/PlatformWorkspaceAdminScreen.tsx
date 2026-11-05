@@ -249,6 +249,7 @@ export function WorkspaceAudit({ workspaceId, onSessionLost }: WorkspaceViewProp
             <tr>
               <th scope="col">{t('workspace.audit.occurredAt')}</th>
               <th scope="col">{t('workspace.audit.actor')}</th>
+              <th scope="col">{t('workspace.audit.delegatedUser')}</th>
               <th scope="col">{t('workspace.audit.action')}</th>
               <th scope="col">{t('workspace.audit.scope')}</th>
               <th scope="col">{t('workspace.audit.target')}</th>
@@ -260,6 +261,7 @@ export function WorkspaceAudit({ workspaceId, onSessionLost }: WorkspaceViewProp
               <tr key={event.event_id}>
                 <td>{formatInstant(event.occurred_at)}</td>
                 <td>{event.actor}</td>
+                <td>{event.delegated_user ?? '—'}</td>
                 <td className="data-table__mono">{event.action}</td>
                 <td>{optional(`value.auditScope.${event.scope}`) ?? event.scope}</td>
                 <td className="data-table__mono">{event.target ?? '—'}</td>

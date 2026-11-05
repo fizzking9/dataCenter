@@ -30,6 +30,11 @@ import type {
   WorkspaceModelBindingRecord,
   MetricAggregation,
   MetricValueType,
+  PurgeJobRecord,
+  PurgeLedgerEntry,
+  RetentionHoldRecord,
+  RetentionPolicyArtifact,
+  WorkspaceRetentionOverrideArtifact,
 } from './catalog.js';
 import type { MfaRecord } from './enrollment.js';
 import { readJsonFile, writeJsonFile } from './state.js';
@@ -39,7 +44,7 @@ export type DeploymentRole = 'Deployment Administrator';
 export type WorkspaceRole = 'Workspace Administrator' | 'Consumer';
 
 export const DEPLOYMENT_CONTEXT_ARTIFACT = 'deployment-business-context';
-export const CURRENT_SCHEMA_VERSION = 7;
+export const CURRENT_SCHEMA_VERSION = 8;
 export const USERNAME_PATTERN = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,189}$/;
 
 export interface UserRecord {
@@ -126,9 +131,25 @@ export interface OAuthClientRecord {
 }
 
 /**
+ * One User's consent for one Agent Identity to act on their behalf inside one
+ * Workspace. The delegated authority a token carries is never more than the
+ * intersection of the Agent Identity's and the User's own permissions, and the
+ * consent is revalidated on every request.
+ */
+export interface AgentDelegationRecord {
+  delegation_id: string;
+  workspace_id: string;
+  agent_identity_id: string;
+  user_id: string;
+  created_at: string;
+  created_by: string;
+  revoked_at: string | null;
+}
+
+/**
  * One access token the Deployment minted for itself. The claims are stored, not
  * only the hash, because every request re-proves the exact issuer, resource,
- * audience, client, and redirect the token was issued under.
+ * audience, client, redirect, and delegated consent the token was issued under.
  */
 export interface AccessTokenRecord {
   token_hash: string;
@@ -142,6 +163,9 @@ export interface AccessTokenRecord {
   issued_at: string;
   expires_at: string;
   revoked_at: string | null;
+  /** Present only while the token acts under a delegated User's consent. */
+  delegation_id?: string | null;
+  delegated_user_id?: string | null;
 }
 
 export interface ContextEntry {
@@ -179,6 +203,7 @@ export interface PlatformState {
   schema_version: number;
   users: UserRecord[];
   agent_identities: AgentIdentityRecord[];
+  agent_delegations: AgentDelegationRecord[];
   service_identities: ServiceIdentityRecord[];
   oauth_clients: OAuthClientRecord[];
   access_tokens: AccessTokenRecord[];
@@ -213,6 +238,11 @@ export interface PlatformState {
   reports: ReportRecord[];
   report_candidates: ReportCandidateRecord[];
   report_schedules: ReportScheduleRecord[];
+  retention_policies: RetentionPolicyArtifact[];
+  retention_overrides: WorkspaceRetentionOverrideArtifact[];
+  retention_holds: RetentionHoldRecord[];
+  purge_jobs: PurgeJobRecord[];
+  purge_ledger: PurgeLedgerEntry[];
 }
 
 /** Every human identity is stated as one account identifier of the form name@domain. */
@@ -240,6 +270,7 @@ export function readPlatform(root: string): PlatformState {
         schema_version: CURRENT_SCHEMA_VERSION,
         users: [],
         agent_identities: [],
+        agent_delegations: [],
         service_identities: [],
         oauth_clients: [],
         access_tokens: [],
@@ -274,11 +305,17 @@ export function readPlatform(root: string): PlatformState {
         reports: [],
         report_candidates: [],
         report_schedules: [],
+        retention_policies: [],
+        retention_overrides: [],
+        retention_holds: [],
+        purge_jobs: [],
+        purge_ledger: [],
       };
   // A Deployment installed under an earlier schema keeps working: the added
   // Collections start empty rather than failing the read closed.
   state.schema_version = CURRENT_SCHEMA_VERSION;
   state.agent_identities ??= [];
+  state.agent_delegations ??= [];
   // A Deployment written before Service Identities existed has none, and every
   // one it does have keeps exactly the bindings it was created with.
   state.service_identities ??= [];
@@ -320,6 +357,14 @@ export function readPlatform(root: string): PlatformState {
   // candidates and no schedules; both Collections start empty.
   state.report_candidates ??= [];
   state.report_schedules ??= [];
+  // A Deployment written before retention enforcement simply has no policies,
+  // overrides, Holds, or Purge history: every class reads under the settled
+  // defaults, and nothing has ever been purged.
+  state.retention_policies ??= [];
+  state.retention_overrides ??= [];
+  state.retention_holds ??= [];
+  state.purge_jobs ??= [];
+  state.purge_ledger ??= [];
   // A Report or Template Version recorded before Withdrawal existed was never
   // withdrawn, so it keeps serving exactly as it did.
   for (const template of state.report_templates) {

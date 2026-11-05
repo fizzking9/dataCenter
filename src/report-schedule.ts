@@ -358,7 +358,7 @@ export async function tickReportSchedules(options: {
           try {
             const report = await generateReport({
               session,
-              actor: { user },
+              generatedBy: user.user_id,
               reader,
               template,
               version,

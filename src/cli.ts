@@ -15,7 +15,27 @@ import {
 } from './acquisition-run.js';
 import { acquisitionTargets } from './acquisition-targets.js';
 import { listAuditEvents } from './audit-view.js';
-import { createAgentIdentity, registerOAuthClient, revokeAgentIdentity, revokeOAuthClient } from './agents.js';
+import {
+  createRetentionHold,
+  evaluateRetention,
+  listPurgeJobs,
+  listRetentionHolds,
+  publishRetentionOverride,
+  publishRetentionPolicy,
+  releaseRetentionHold,
+  requestPurge,
+  showPurgeJob,
+  showRetentionPolicy,
+  tickRetention,
+} from './retention.js';
+import {
+  createAgentDelegation,
+  createAgentIdentity,
+  registerOAuthClient,
+  revokeAgentDelegation,
+  revokeAgentIdentity,
+  revokeOAuthClient,
+} from './agents.js';
 import { login, logout } from './auth.js';
 import { issueOperatorEnrollment, revokeOperator, revokeOperatorEnrollment } from './operators.js';
 import { startConsoleServer } from './console-server.js';
@@ -107,7 +127,7 @@ const GROUPED_COMMANDS = new Set([
   'user', 'workspace', 'membership', 'ownership', 'context', 'audit',
   'source', 'connection', 'acquisition', 'acquisition-config', 'integration', 'dataset',
   'product', 'product-proposal', 'grant', 'export', 'console', 'agent', 'model', 'binding', 'proposal',
-  'scraper', 'report',
+  'scraper', 'report', 'retention',
 ]);
 const BOOLEAN_FLAGS = new Set([
   'admin-password-stdin', 'password-stdin', 'deployment-administrator', 'credential-stdin',
@@ -337,6 +357,93 @@ async function main(): Promise<void> {
     emit(listAuditEvents({
       ...governed(options),
       ...(options.has('workspace') ? { workspaceId: required(options, 'workspace') } : {}),
+      ...(options.has('at') ? { at: required(options, 'at') } : {}),
+    }));
+    return;
+  }
+  if (command === 'retention' && subcommand === 'policy-publish') {
+    emit(publishRetentionPolicy({ ...governed(options), configPath: required(options, 'config') }));
+    return;
+  }
+  if (command === 'retention' && subcommand === 'policy-show') {
+    emit(showRetentionPolicy({
+      ...governed(options),
+      ...(options.has('workspace') ? { workspaceId: required(options, 'workspace') } : {}),
+      ...(options.has('version') ? { version: Number(required(options, 'version')) } : {}),
+    }));
+    return;
+  }
+  if (command === 'retention' && subcommand === 'override') {
+    emit(publishRetentionOverride({
+      ...governed(options),
+      workspaceId: required(options, 'workspace'),
+      configPath: required(options, 'config'),
+    }));
+    return;
+  }
+  if (command === 'retention' && subcommand === 'hold-create') {
+    emit(createRetentionHold({
+      ...governed(options),
+      scopeKind: required(options, 'scope'),
+      reason: required(options, 'reason'),
+      reviewAt: required(options, 'review-at'),
+      ...(options.has('workspace') ? { workspaceId: required(options, 'workspace') } : {}),
+      ...(options.has('source') ? { sourceId: required(options, 'source') } : {}),
+      ...(options.has('dataset') ? { datasetId: required(options, 'dataset') } : {}),
+      ...(options.has('release') ? { datasetRelease: Number(required(options, 'release')) } : {}),
+      ...(options.has('proposal') ? { targetId: required(options, 'proposal') } : {}),
+      ...(options.has('export') ? { targetId: required(options, 'export') } : {}),
+    }));
+    return;
+  }
+  if (command === 'retention' && subcommand === 'hold-list') {
+    emit(listRetentionHolds({
+      ...governed(options),
+      ...(options.has('workspace') ? { workspaceId: required(options, 'workspace') } : {}),
+    }));
+    return;
+  }
+  if (command === 'retention' && subcommand === 'hold-release') {
+    emit(releaseRetentionHold({ ...governed(options), holdId: required(options, 'hold') }));
+    return;
+  }
+  if (command === 'retention' && subcommand === 'evaluate') {
+    emit(evaluateRetention({
+      ...governed(options),
+      ...(options.has('workspace') ? { workspaceId: required(options, 'workspace') } : {}),
+      ...(options.has('at') ? { at: required(options, 'at') } : {}),
+    }));
+    return;
+  }
+  if (command === 'retention' && subcommand === 'purge') {
+    emit(requestPurge({
+      ...governed(options),
+      scopeKind: required(options, 'scope'),
+      ...(options.has('workspace') ? { workspaceId: required(options, 'workspace') } : {}),
+      ...(options.has('source') ? { sourceId: required(options, 'source') } : {}),
+      ...(options.has('dataset') ? { datasetId: required(options, 'dataset') } : {}),
+      ...(options.has('release') ? { datasetRelease: Number(required(options, 'release')) } : {}),
+      ...(options.has('proposal') ? { targetId: required(options, 'proposal') } : {}),
+      ...(options.has('export') ? { targetId: required(options, 'export') } : {}),
+      ...(options.has('at') ? { at: required(options, 'at') } : {}),
+    }));
+    return;
+  }
+  if (command === 'retention' && subcommand === 'purge-list') {
+    emit(listPurgeJobs({
+      ...governed(options),
+      ...(options.has('workspace') ? { workspaceId: required(options, 'workspace') } : {}),
+    }));
+    return;
+  }
+  if (command === 'retention' && subcommand === 'purge-show') {
+    emit(showPurgeJob({ ...governed(options), purgeId: required(options, 'purge') }));
+    return;
+  }
+  if (command === 'retention' && subcommand === 'tick') {
+    emit(tickRetention({
+      ...governed(options),
+      ...(options.has('at') ? { at: required(options, 'at') } : {}),
     }));
     return;
   }
@@ -682,6 +789,19 @@ async function main(): Promise<void> {
   }
   if (command === 'agent' && subcommand === 'revoke') {
     emit(revokeAgentIdentity({ ...governed(options), agentIdentityId: required(options, 'agent') }));
+    return;
+  }
+  if (command === 'agent' && subcommand === 'delegate') {
+    // The consenting User runs this: it records their own consent, never another's.
+    emit(createAgentDelegation({
+      ...governed(options),
+      agentIdentityId: required(options, 'agent'),
+      workspaceId: required(options, 'workspace'),
+    }));
+    return;
+  }
+  if (command === 'agent' && subcommand === 'delegate-revoke') {
+    emit(revokeAgentDelegation({ ...governed(options), delegationId: required(options, 'delegation') }));
     return;
   }
   if (command === 'agent' && subcommand === 'client-register') {

@@ -35,6 +35,13 @@ export function registerTotp(fixture: PlatformFixture, username: string, secret:
   if (typeof secret === 'string') enrolmentSecrets.set(`${fixture.root}|${username}`, secret);
 }
 
+/** The enrollment secret an administrator received, which a browser sign-in needs. */
+export function totpSecretFor(fixture: PlatformFixture, username: string): string {
+  const secret = enrolmentSecrets.get(`${fixture.root}|${username}`);
+  if (secret === undefined) throw new Error(`no enrollment secret recorded for ${username}`);
+  return secret;
+}
+
 /**
  * Installs, licenses, and initializes a Deployment through the Operator
  * lifecycle commands, leaving one bootstrapped Deployment Administrator.

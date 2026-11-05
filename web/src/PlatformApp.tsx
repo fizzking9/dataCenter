@@ -11,13 +11,15 @@ import { WorkspaceAudit, WorkspaceMembers } from './screens/PlatformWorkspaceAdm
 import { WorkspaceContext, WorkspaceOverview, WorkspaceProducts } from './screens/PlatformWorkspaceScreen.js';
 import { WorkspaceProductProposals } from './screens/PlatformProductProposalScreen.js';
 import { WorkspaceProposals } from './screens/PlatformProposalScreen.js';
+import { WorkspaceAgents } from './screens/PlatformAgentScreen.js';
+import { WorkspaceScrapers } from './screens/PlatformScraperScreen.js';
 import { WorkspaceSources } from './screens/PlatformSourceScreen.js';
 import { Alert, Panel } from './ui/Panel.js';
 import { Shell } from './ui/Shell.js';
 
 const VIEWS = [
-  'overview', 'sources', 'products', 'productProposals', 'context', 'members', 'audit', 'models',
-  'proposals', 'modelProfiles', 'users',
+  'overview', 'sources', 'scrapers', 'products', 'productProposals', 'context', 'members', 'audit',
+  'models', 'proposals', 'agents', 'modelProfiles', 'users',
 ] as const;
 type View = (typeof VIEWS)[number];
 
@@ -42,12 +44,14 @@ const DEPLOYMENT_KEYS: Partial<Record<View, string>> = {
 function viewOf(value: string | undefined): View {
   switch (value) {
     case 'sources':
+    case 'scrapers':
     case 'products':
     case 'context':
     case 'members':
     case 'audit':
     case 'models':
     case 'proposals':
+    case 'agents':
     case 'users':
       return value;
     case 'product-proposals':
@@ -315,6 +319,8 @@ export function PlatformApp() {
 
   const content = route.view === 'sources' ? (
     <WorkspaceSources workspaceId={activeId} onSessionLost={sessionLost} />
+  ) : route.view === 'scrapers' ? (
+    <WorkspaceScrapers workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'products' ? (
     <WorkspaceProducts workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'productProposals' ? (
@@ -323,6 +329,8 @@ export function PlatformApp() {
     <WorkspaceContext workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'members' ? (
     <WorkspaceMembers workspaceId={activeId} onSessionLost={sessionLost} />
+  ) : route.view === 'agents' ? (
+    <WorkspaceAgents workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'audit' ? (
     <WorkspaceAudit workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'models' ? (
