@@ -25,19 +25,22 @@ export function Alert({ tone, children, code }: AlertProps) {
 export interface PanelProps {
   title: string;
   description?: string;
+  /** A page-level panel is the document heading; a nested one stays a section. */
+  level?: 1 | 2;
   children: ReactNode;
 }
 
 /** A titled region; every console view is composed from these. */
-export function Panel({ title, description, children }: PanelProps) {
+export function Panel({ title, description, level = 2, children }: PanelProps) {
   const headingId = `panel-${title.replace(/\s+/gu, '-')}`;
+  const Heading = level === 1 ? 'h1' : 'h2';
   return (
     <section className="panel" aria-labelledby={headingId}>
       <header className="panel__header">
         <div>
-          <h2 className="panel__title" id={headingId}>
+          <Heading className={level === 1 ? 'panel__title panel__title--page' : 'panel__title'} id={headingId}>
             {title}
-          </h2>
+          </Heading>
           {description ? <p className="panel__description">{description}</p> : null}
         </div>
       </header>

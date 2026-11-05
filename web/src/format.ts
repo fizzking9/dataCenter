@@ -1,3 +1,5 @@
+import { t, type MessageKey } from './i18n/zh-CN.js';
+
 /** Locale-correct rendering of the instants the deployment reports. */
 export function formatInstant(value: string | undefined): string {
   if (!value) return '—';
@@ -11,4 +13,20 @@ export function daysUntil(value: string | undefined): number | undefined {
   const parsed = Date.parse(value);
   if (Number.isNaN(parsed)) return undefined;
   return Math.max(0, Math.floor((parsed - Date.now()) / 86_400_000));
+}
+
+/**
+ * Governed Role values stay ASCII at the boundary; only the label the User reads
+ * is Chinese, and it comes from the one catalog.
+ */
+const ROLE_KEYS: Record<string, MessageKey> = {
+  'Deployment Administrator': 'value.role.deploymentAdministrator',
+  'Workspace Administrator': 'value.role.workspaceAdministrator',
+  Consumer: 'value.role.consumer',
+};
+
+export function roleLabel(role: string | null | undefined): string {
+  if (!role) return '—';
+  const key = ROLE_KEYS[role];
+  return key === undefined ? role : t(key);
 }

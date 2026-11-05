@@ -3,6 +3,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { login, logout } from './auth.js';
+import { showContext } from './context.js';
+import { browserIdentity, browserNavigation } from './navigation.js';
+import { listDataProducts } from './products.js';
+import { listWorkspaces } from './workspaces.js';
 import {
   exchangeOperatorEnrollment,
   resolveOperatorSession,
@@ -17,6 +22,8 @@ import { deploymentStatus } from './status.js';
 import { readDeployment } from './state.js';
 
 export const SESSION_COOKIE = 'dc_operator_console';
+/** Platform User sessions are a separate channel from the Operator Console. */
+export const USER_SESSION_COOKIE = 'dc_user_session';
 
 const MAX_BODY_BYTES = 16 * 1024;
 const CONTENT_TYPES: Record<string, string> = {
@@ -221,6 +228,93 @@ async function handleApi(
     return;
   }
 
+  // The platform User channel: a separate cookie, a separate sign-in, and the
+  // authorized trees the browser application navigates. Every route resolves the
+  // session again, so revocation and expiry apply on the very next request.
+
+  if (pathname === '/api/session' && method === 'POST') {
+    const body = await readJson(request);
+    const signedIn = await login({
+      root: options.root,
+      masterKey: options.masterKey,
+      username: text(body, 'username'),
+      password: text(body, 'password'),
+      ...(text(body, 'totp') ? { totp: text(body, 'totp') } : {}),
+      ...(text(body, 'recovery_code') ? { recoveryCode: text(body, 'recovery_code') } : {}),
+    });
+    response.setHeader('set-cookie', sessionCookie(String(signedIn.session_token), signedIn.session_expires_at));
+    sendJson(response, 200, {
+      username: signedIn.username,
+      deployment_role: signedIn.deployment_role,
+      mfa_enrolled: signedIn.mfa_enrolled,
+      session_expires_at: signedIn.session_expires_at,
+    });
+    return;
+  }
+
+  if (pathname === '/api/session' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, browserIdentity({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  if (pathname === '/api/session' && method === 'DELETE') {
+    const token = cookieValueFor(request, USER_SESSION_COOKIE);
+    response.setHeader('set-cookie', sessionCookie('', null));
+    if (!token) {
+      sendJson(response, 200, { revoked: false });
+      return;
+    }
+    try {
+      sendJson(response, 200, logout({ root: options.root, masterKey: options.masterKey, token }));
+    } catch (error) {
+      // Signing out never traps a User whose session has already ended.
+      if (!(error instanceof OperatorError) || error.code !== 'SESSION_INVALID') throw error;
+      sendJson(response, 200, { revoked: false });
+    }
+    return;
+  }
+
+  if (pathname === '/api/navigation' && method === 'GET') {
+    const token = userSession(request);
+    const workspaceId = searchParam(request, 'workspace_id');
+    sendJson(response, 200, browserNavigation({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      ...(workspaceId === null ? {} : { workspaceId }),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/workspaces' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listWorkspaces({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/data-products' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listDataProducts({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/context' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, showContext({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
   throw new HttpError(404, 'API_NOT_FOUND', 'No such application API.');
 }
 
@@ -251,13 +345,44 @@ function recordDeniedAccess(options: ConsoleServerOptions, target: string): void
   }
 }
 
+function userSession(request: IncomingMessage): string {
+  const token = cookieValueFor(request, USER_SESSION_COOKIE);
+  if (!token) throw new HttpError(401, 'SESSION_INVALID', 'The session is not valid.');
+  return token;
+}
+
+/** Every Workspace-scoped request names the one active Workspace it acts on. */
+function activeWorkspace(request: IncomingMessage): string {
+  const workspaceId = searchParam(request, 'workspace_id');
+  if (workspaceId === null) {
+    throw new HttpError(400, 'WORKSPACE_REQUIRED', 'The request must name one Workspace.');
+  }
+  return workspaceId;
+}
+
+function searchParam(request: IncomingMessage, name: string): string | null {
+  const value = new URL(request.url ?? '/', 'http://localhost').searchParams.get(name);
+  return value === null || value === '' ? null : value;
+}
+
+/** The browser never reads this cookie, and it never outlives the session. */
+function sessionCookie(token: string, expiresAt: unknown): string {
+  const remaining = Date.parse(String(expiresAt)) - Date.now();
+  const maxAge = token === '' || !Number.isFinite(remaining) ? 0 : Math.max(0, Math.floor(remaining / 1000));
+  return `${USER_SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
+}
+
 function cookieValue(request: IncomingMessage): string | undefined {
+  return cookieValueFor(request, SESSION_COOKIE);
+}
+
+function cookieValueFor(request: IncomingMessage, name: string): string | undefined {
   const header = request.headers.cookie;
   if (!header) return undefined;
   for (const part of header.split(';')) {
     const separator = part.indexOf('=');
     if (separator === -1) continue;
-    if (part.slice(0, separator).trim() !== SESSION_COOKIE) continue;
+    if (part.slice(0, separator).trim() !== name) continue;
     return part.slice(separator + 1).trim();
   }
   return undefined;
@@ -354,6 +479,11 @@ const STATUS_BY_CODE: Record<string, number> = {
   OPERATOR_PASSWORD_INVALID: 400,
   OPERATOR_NAME_INVALID: 400,
   OPERATOR_ALREADY_ENROLLED: 409,
+  AUTHENTICATION_FAILED: 401,
+  SESSION_INVALID: 401,
+  AUTHORIZATION_DENIED: 403,
+  WORKSPACE_ACCESS_DENIED: 403,
+  CONTEXT_NOT_PUBLISHED: 404,
 };
 
 function sendFailure(response: ServerResponse, error: unknown): void {
