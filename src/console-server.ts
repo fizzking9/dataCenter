@@ -4,9 +4,32 @@ import type { AddressInfo } from 'node:net';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { acquireUpload } from './acquisition.js';
+import {
+  acquisitionCheckpoint,
+  cancelAcquisition,
+  enqueueAcquisition,
+  readAcquisitionPlan,
+  resetAcquisitionCheckpoint,
+  tickSchedules,
+  workAcquisition,
+} from './acquisition-run.js';
 import { showWorkspaceAudit } from './audit-view.js';
 import { login, logout } from './auth.js';
+import {
+  adoptConnection,
+  connectionPacing,
+  connectionSession,
+  listConnections,
+  previewConnectionDeclaration,
+  publishConnectionDeclaration,
+  resetConnectionSession,
+} from './connections.js';
 import { publishWorkspaceContext, showContext, showContextHistory } from './context.js';
+import {
+  adoptSourceAcquisition,
+  previewSourceAcquisition,
+  publishSourceAcquisitionDeclaration,
+} from './source-acquisition.js';
 import {
   adoptIntegrationConfiguration,
   previewIntegrationConfiguration,
@@ -560,6 +583,80 @@ async function handleApi(
     return;
   }
 
+  // Acquisition Connections are Workspace Artifacts: the guided form reviews an
+  // exact declarative document, publishes one immutable Version, and adopts it.
+  // The credential is write-only: no answer below ever returns its value.
+  if (pathname === '/api/workspace/connections' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listConnections({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/connections/preview' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 200, previewConnectionDeclaration({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: workspaceFromBody(body),
+      name: text(body, 'name'),
+      declaration: body['declaration'],
+      ...(text(body, 'credential') === '' ? {} : { credential: text(body, 'credential') }),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/connections' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, publishConnectionDeclaration({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: workspaceFromBody(body),
+      name: text(body, 'name'),
+      declaration: body['declaration'],
+      ...(text(body, 'credential') === '' ? {} : { credential: text(body, 'credential') }),
+    }));
+    return;
+  }
+
+  const connectionRoute = /^\/api\/workspace\/connections\/([^/]+)\/(adopt|session|session\/reset|pacing)$/u.exec(pathname);
+  if (connectionRoute !== null) {
+    const token = userSession(request);
+    const connectionId = decodeURIComponent(connectionRoute[1]!);
+    const action = connectionRoute[2];
+    if (action === 'adopt' && method === 'POST') {
+      const body = await readJson(request);
+      sendJson(response, 200, adoptConnection({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        connectionId,
+        version: number(body, 'version'),
+      }));
+      return;
+    }
+    if (action === 'session' && method === 'GET') {
+      sendJson(response, 200, connectionSession({ root: options.root, masterKey: options.masterKey, token, connectionId }));
+      return;
+    }
+    if (action === 'session/reset' && method === 'POST') {
+      sendJson(response, 200, resetConnectionSession({ root: options.root, masterKey: options.masterKey, token, connectionId }));
+      return;
+    }
+    if (action === 'pacing' && method === 'GET') {
+      sendJson(response, 200, connectionPacing({ root: options.root, masterKey: options.masterKey, token, connectionId }));
+      return;
+    }
+  }
+
   // A guided Source workflow: create the Source, review and publish its
   // declarative Configuration, adopt an exact Version, then upload content that
   // integrates into the next Dataset Release. Every route authorizes server-side
@@ -634,6 +731,114 @@ async function handleApi(
       version: number(body, 'version'),
     }));
     return;
+  }
+
+  // The declarative acquisition configuration a connector Source executes under.
+  const acquisitionConfigurationRoute = /^\/api\/workspace\/sources\/([^/]+)\/acquisition\/(preview|publish|adopt)$/u.exec(pathname);
+  if (acquisitionConfigurationRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const sourceId = decodeURIComponent(acquisitionConfigurationRoute[1]!);
+    if (acquisitionConfigurationRoute[2] === 'preview') {
+      sendJson(response, 200, previewSourceAcquisition({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        sourceId,
+        declaration: body['declaration'],
+      }));
+      return;
+    }
+    if (acquisitionConfigurationRoute[2] === 'publish') {
+      sendJson(response, 201, publishSourceAcquisitionDeclaration({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        sourceId,
+        declaration: body['declaration'],
+      }));
+      return;
+    }
+    sendJson(response, 200, adoptSourceAcquisition({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      sourceId,
+      version: number(body, 'version'),
+    }));
+    return;
+  }
+
+  const acquisitionRunRoute = /^\/api\/workspace\/sources\/([^/]+)\/acquisition\/runs$/u.exec(pathname);
+  if (acquisitionRunRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const from = text(body, 'from');
+    const to = text(body, 'to');
+    const rerunOf = text(body, 'rerun_of');
+    sendJson(response, 201, enqueueAcquisition({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      sourceId: decodeURIComponent(acquisitionRunRoute[1]!),
+      ...(from === '' ? {} : { from }),
+      ...(to === '' ? {} : { to }),
+      ...(rerunOf === '' ? {} : { rerunOf }),
+    }));
+    return;
+  }
+
+  const acquisitionWorkRoute = /^\/api\/workspace\/sources\/([^/]+)\/acquisition\/work$/u.exec(pathname);
+  if (acquisitionWorkRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, await workAcquisition({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      sourceId: decodeURIComponent(acquisitionWorkRoute[1]!),
+    }));
+    return;
+  }
+
+  const acquisitionCheckpointRoute = /^\/api\/workspace\/sources\/([^/]+)\/acquisition\/checkpoint(\/reset)?$/u.exec(pathname);
+  if (acquisitionCheckpointRoute !== null) {
+    const token = userSession(request);
+    const sourceId = decodeURIComponent(acquisitionCheckpointRoute[1]!);
+    if (acquisitionCheckpointRoute[2] === undefined && method === 'GET') {
+      sendJson(response, 200, acquisitionCheckpoint({ root: options.root, masterKey: options.masterKey, token, sourceId }));
+      return;
+    }
+    if (acquisitionCheckpointRoute[2] === '/reset' && method === 'POST') {
+      sendJson(response, 200, resetAcquisitionCheckpoint({ root: options.root, masterKey: options.masterKey, token, sourceId }));
+      return;
+    }
+  }
+
+  if (pathname === '/api/workspace/acquisition/schedule' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const at = text(body, 'at');
+    sendJson(response, 200, tickSchedules({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      ...(at === '' ? {} : { at }),
+    }));
+    return;
+  }
+
+  const acquisitionRunActionRoute = /^\/api\/workspace\/acquisition-runs\/([^/]+)\/(cancel|plan)$/u.exec(pathname);
+  if (acquisitionRunActionRoute !== null) {
+    const token = userSession(request);
+    const runId = decodeURIComponent(acquisitionRunActionRoute[1]!);
+    if (acquisitionRunActionRoute[2] === 'cancel' && method === 'POST') {
+      sendJson(response, 200, cancelAcquisition({ root: options.root, masterKey: options.masterKey, token, runId }));
+      return;
+    }
+    if (acquisitionRunActionRoute[2] === 'plan' && method === 'GET') {
+      sendJson(response, 200, readAcquisitionPlan({ root: options.root, masterKey: options.masterKey, token, runId }));
+      return;
+    }
   }
 
   const acquisitionRoute = /^\/api\/workspace\/sources\/([^/]+)\/acquisitions$/u.exec(pathname);
@@ -1039,6 +1244,37 @@ const STATUS_BY_CODE: Record<string, number> = {
   INTEGRATION_MAPPING_INCOMPLETE: 422,
   INTEGRATION_MAPPING_UNKNOWN_COLUMN: 422,
   INTEGRATION_VERSION_NOT_FOUND: 404,
+  // Declarative business API connections and connector Runs fail closed with
+  // explicit codes; each maps to one status the browser can name in Chinese.
+  CONNECTION_NAME_INVALID: 400,
+  CONNECTION_CONFIGURATION_INVALID: 400,
+  CONNECTION_CONFIGURATION_UNREADABLE: 400,
+  CONNECTION_AUTH_UNSUPPORTED: 400,
+  CONNECTION_CREDENTIAL_REQUIRED: 400,
+  CONNECTION_NOT_AVAILABLE: 404,
+  CONNECTION_VERSION_NOT_FOUND: 404,
+  ACQUISITION_CONFIGURATION_INVALID: 400,
+  ACQUISITION_CONFIGURATION_UNREADABLE: 400,
+  ACQUISITION_VERSION_NOT_FOUND: 404,
+  ACQUISITION_CONFIGURATION_NOT_ADOPTED: 409,
+  ACQUISITION_RUN_NOT_FOUND: 404,
+  ACQUISITION_RUN_NOT_CANCELLABLE: 409,
+  ACQUISITION_QUEUE_EMPTY: 409,
+  ACQUISITION_BACKFILL_INVALID: 400,
+  ACQUISITION_CONNECTOR_NOT_APPLICABLE: 409,
+  ACQUISITION_WORK_AT_INVALID: 400,
+  ACQUISITION_SCHEDULE_AT_INVALID: 400,
+  ACQUISITION_REQUEST_FAILED: 502,
+  ACQUISITION_RESPONSE_STATUS: 502,
+  ACQUISITION_RESPONSE_MALFORMED: 502,
+  ACQUISITION_CONTENT_TYPE_UNEXPECTED: 422,
+  ACQUISITION_PAGINATION_NOT_PROGRESSING: 422,
+  ACQUISITION_PLAN_INCOMPLETE: 422,
+  ACQUISITION_CHECKPOINT_CURSOR_INVALID: 409,
+  ACQUISITION_AUTHENTICATION_INTERVENTION_REQUIRED: 409,
+  ACQUISITION_AUTHENTICATION_REFRESH_BUSY: 409,
+  ACQUISITION_SCHEMA_DRIFT: 422,
+  ACQUISITION_PACING_RATE_EXCEEDED: 429,
 };
 
 function sendFailure(response: ServerResponse, error: unknown): void {

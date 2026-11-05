@@ -145,6 +145,8 @@ export interface AcquisitionRunRecord {
   trigger: 'manual' | 'scheduled';
   /** The window a manual backfill states; null for a normal Run. */
   backfill: { start: string; end: string } | null;
+  /** The earlier Run a manual rerun was requested from; null for a first request. */
+  rerun_of?: string | null;
   integration_configuration_version: number | null;
   attempts: number;
   status: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled';
