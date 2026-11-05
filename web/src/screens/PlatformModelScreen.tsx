@@ -46,6 +46,9 @@ const CHECK_LABELS: Record<string, MessageKey> = {
 const ADAPTER_LABELS: Record<string, MessageKey> = {
   hosted: 'model.profile.adapter.hosted',
   generic_local: 'model.profile.adapter.genericLocal',
+  alibaba_qwen: 'model.profile.adapter.alibabaQwen',
+  deepseek: 'model.profile.adapter.deepseek',
+  openai_compatible: 'model.profile.adapter.openaiCompatible',
 };
 
 function checkLabel(name: string): string {

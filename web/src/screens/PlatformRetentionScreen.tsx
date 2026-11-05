@@ -38,45 +38,7 @@ interface Notice {
   code?: string;
 }
 
-/** The nine settled data classes, in the order the tables state them. */
-const RETENTION_CLASSES: RetentionClassKey[] = [
-  'raw_acquisition',
-  'dataset_release_history',
-  'report',
-  'artifact_version',
-  'provenance',
-  'audit_event',
-  'proposal_evidence',
-  'export',
-  'derived_data',
-];
-
-/** The three classes a Workspace Administrator may override. */
-const OVERRIDABLE_CLASSES: OverridableRetentionClassKey[] = [
-  'raw_acquisition',
-  'dataset_release_history',
-  'report',
-];
-
-const HOLD_SCOPES: Array<RetentionScopeView['kind']> = [
-  'workspace',
-  'source',
-  'dataset',
-  'release',
-  'proposal_evidence',
-  'export',
-];
-
-/** The scopes a manual Purge supports. */
-const PURGE_SCOPES: Array<RetentionScopeView['kind']> = [
-  'workspace',
-  'source',
-  'dataset',
-  'release',
-  'proposal_evidence',
-  'export',
-];
-
+/** The retention vocabulary arrives with the overview; the browser states no rule of its own. */
 function termLabel(term: RetentionTermView): string {
   if (term.kind === 'days') return message('value.retentionTerm.days', { days: String(term.days) });
   return term.kind === 'indefinite' ? t('value.retentionTerm.indefinite') : t('value.retentionTerm.noGuarantee');
@@ -244,7 +206,7 @@ function PurgeJobsPanel({
 }
 
 function overrideTerm(view: WorkspaceRetentionView, dataClass: RetentionClassKey): string {
-  if (!(OVERRIDABLE_CLASSES as string[]).includes(dataClass)) return '—';
+  if (!(view.vocabulary.overridable_classes as string[]).includes(dataClass)) return '—';
   const term = view.overrides[dataClass as OverridableRetentionClassKey];
   return term === undefined ? '—' : termLabel(term);
 }
@@ -261,7 +223,7 @@ function EffectiveRetentionTable({ view }: { view: WorkspaceRetentionView }) {
         </tr>
       </thead>
       <tbody>
-        {RETENTION_CLASSES.map((dataClass) => (
+        {view.vocabulary.data_classes.map((dataClass) => (
           <tr key={dataClass}>
             <td>{classLabel(dataClass)}</td>
             <td>{termLabel(view.effective[dataClass])}</td>
@@ -749,7 +711,7 @@ export function WorkspaceRetention({ workspaceId, onSessionLost }: WorkspaceView
             value={holdDraft.scopeKind}
             onChange={(event) => updateHoldDraft({ scopeKind: event.target.value as RetentionScopeView['kind'] })}
           >
-            {HOLD_SCOPES.map((kind) => (
+            {(retention?.vocabulary.hold_scopes ?? []).map((kind) => (
               <option key={kind} value={kind}>
                 {scopeKindLabel(kind)}
               </option>
@@ -845,7 +807,7 @@ export function WorkspaceRetention({ workspaceId, onSessionLost }: WorkspaceView
             value={purgeDraft.scopeKind}
             onChange={(event) => updatePurgeDraft({ scopeKind: event.target.value as RetentionScopeView['kind'] })}
           >
-            {PURGE_SCOPES.map((kind) => (
+            {(retention?.vocabulary.purge_scopes ?? []).map((kind) => (
               <option key={kind} value={kind}>
                 {scopeKindLabel(kind)}
               </option>
@@ -1211,7 +1173,7 @@ export function DeploymentRetention({ onSessionLost }: DeploymentRetentionProps)
                 </tr>
               </thead>
               <tbody>
-                {RETENTION_CLASSES.map((dataClass) => (
+                {(policy?.vocabulary.data_classes ?? []).map((dataClass) => (
                   <tr key={dataClass}>
                     <td>{classLabel(dataClass)}</td>
                     <td>{termLabel(policy.defaults[dataClass])}</td>
@@ -1221,7 +1183,7 @@ export function DeploymentRetention({ onSessionLost }: DeploymentRetentionProps)
               </tbody>
             </table>
             <DefinitionList
-              rows={OVERRIDABLE_CLASSES.map((dataClass) => ({
+              rows={(policy?.vocabulary.overridable_classes ?? []).map((dataClass) => ({
                 term: classLabel(dataClass),
                 value: `${policy.bounds[dataClass].min_days} – ${policy.bounds[dataClass].max_days} ${t('value.days')}`,
               }))}

@@ -15,9 +15,15 @@ import type { Fail } from './errors.js';
 
 const TITLE_MINIMUM = 2;
 const TITLE_MAXIMUM = 128;
+/** Spec section 15: a page defaults to 100 and never exceeds 500 items. */
 const DEFAULT_LIMIT = 100;
-const MAX_LIMIT = 1000;
-const LIMIT_CEILING = 10000;
+const MAX_LIMIT = 500;
+const LIMIT_CEILING = 500;
+/**
+ * Spec section 15: one page carries at most 5 MiB, whatever item count the
+ * Contract declares.
+ */
+export const PAGE_BYTE_CEILING = 5 * 1024 * 1024;
 /** The key a record query uses to carry its linked records, so no base field may own it. */
 const LINKED_KEY = 'linked';
 const RELATIONSHIP_NAME = /^[a-z][a-z0-9_]{0,63}$/;
@@ -43,14 +49,15 @@ const DEFAULT_MIN_TERM_LENGTH = 2;
 /** The resource envelope a Contract gets when it declares none of its own. */
 const DEFAULT_QUERY_LIMITS: DataProductQueryLimits = {
   max_scanned_records: 100_000,
-  max_groups: 10_000,
+  max_groups: 5_000,
   max_execution_ms: 5_000,
 };
 
+/** Spec section 15: at most 5,000 groups and 10 seconds of direct execution. */
 const QUERY_LIMIT_CEILINGS: DataProductQueryLimits = {
   max_scanned_records: 10_000_000,
-  max_groups: 100_000,
-  max_execution_ms: 60_000,
+  max_groups: 5_000,
+  max_execution_ms: 10_000,
 };
 
 /**

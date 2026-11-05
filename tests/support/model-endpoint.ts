@@ -33,6 +33,7 @@ export type MockBehaviour =
   | 'unpublished_metric_one_part'
   | 'cross_product_join_plan'
   | 'foreign_product_plan'
+  | 'five_parts_plan'
   | 'english_plan'
   | 'unauthorized_field'
   | 'unauthorized_dimension'
@@ -81,27 +82,248 @@ export async function startMockModelEndpoint(): Promise<MockModelEndpoint> {
   };
 }
 
+/** The usage every deterministic mock answer states, so accounting is exact. */
+export const MOCK_USAGE = { input_tokens: 1_200, output_tokens: 300 };
+
+/** The provider protocols this fixture emulates beside the platform contract. */
+type MockProtocol = 'datacenter' | 'alibaba_qwen' | 'deepseek' | 'openai_compatible';
+
+const QWEN_GENERATE_PATH = '/api/v1/services/aigc/text-generation/generation';
+
 async function handle(
   request: IncomingMessage,
   response: ServerResponse,
   endpoint: { behaviour: MockBehaviour; calls: Array<Record<string, unknown>> },
 ): Promise<void> {
   const path = new URL(request.url ?? '/', 'http://localhost').pathname;
-  if (request.method === 'GET' && (path === '/health' || path === '/v1/models')) {
-    respond(response, 200, { model: MOCK_MODEL_ID, contracts: [MOCK_CONTRACT] });
+  if (request.method === 'GET') {
+    if (path === '/health') {
+      respond(response, 200, { model: MOCK_MODEL_ID, contracts: [MOCK_CONTRACT] });
+      return;
+    }
+    if (path === '/v1/models') {
+      // The platform contract and the generic OpenAI protocol share this route,
+      // so the answer states both the contract identity and the OpenAI list.
+      respond(response, 200, {
+        model: MOCK_MODEL_ID,
+        contracts: [MOCK_CONTRACT],
+        object: 'list',
+        data: [mockModelEntry('fixture')],
+      });
+      return;
+    }
+    if (path === '/api/v1/models') {
+      respond(response, 200, {
+        request_id: 'mock-qwen-models',
+        output: {
+          total: 1,
+          page_no: 1,
+          page_size: 20,
+          models: [{ ...mockModelEntry('qwen'), model: MOCK_MODEL_ID }],
+        },
+      });
+      return;
+    }
+    if (path === '/models') {
+      respond(response, 200, { object: 'list', data: [mockModelEntry('deepseek')] });
+      return;
+    }
+    respond(response, 404, { error: 'not_found' });
     return;
   }
-  if (request.method === 'POST' && (path === '/generate' || path === '/v1/generate')) {
+  if (request.method === 'POST') {
+    const protocol = protocolOf(path);
+    if (protocol === null) {
+      respond(response, 404, { error: 'not_found' });
+      return;
+    }
     const body = await readJson(request);
     endpoint.calls.push(body);
-    respond(response, 200, answer(body, endpoint.behaviour));
+    if (protocol === 'datacenter') {
+      respond(response, 200, answer(body, endpoint.behaviour));
+      return;
+    }
+    const payload = providerPayload(body);
+    if (payload === null || !validProviderRequest(protocol, body, payload)) {
+      respond(response, 400, { error: { type: 'invalid_request_error', message: 'the provider request is not schema constrained' } });
+      return;
+    }
+    respond(response, 200, providerAnswer(protocol, body, payload, endpoint.behaviour));
     return;
   }
   respond(response, 404, { error: 'not_found' });
 }
 
-/** The usage every deterministic mock answer states, so accounting is exact. */
-export const MOCK_USAGE = { input_tokens: 1_200, output_tokens: 300 };
+function protocolOf(path: string): MockProtocol | null {
+  if (path === '/generate' || path === '/v1/generate') return 'datacenter';
+  if (path === QWEN_GENERATE_PATH) return 'alibaba_qwen';
+  if (path === '/chat/completions') return 'deepseek';
+  if (path === '/v1/chat/completions') return 'openai_compatible';
+  return null;
+}
+
+/** One model-list entry, shaped for each provider's own list envelope. */
+function mockModelEntry(owner: string): Record<string, unknown> {
+  return {
+    id: MOCK_MODEL_ID,
+    object: 'model',
+    created: 0,
+    owned_by: owner,
+    capabilities: ['structured_output', 'function_calling'],
+  };
+}
+
+interface ProviderPayload {
+  purpose: string;
+  structured_output: string;
+  input: unknown;
+}
+
+/** Recovers the governed turn from the provider-neutral user message. */
+function providerPayload(body: Record<string, unknown>): ProviderPayload | null {
+  const input = isRecord(body['input']) ? body['input'] : null;
+  const messages = input !== null && Array.isArray(input['messages'])
+    ? input['messages']
+    : body['messages'];
+  if (!Array.isArray(messages)) return null;
+  const user = [...messages].reverse().find((message) => isRecord(message) && message['role'] === 'user');
+  if (!isRecord(user) || typeof user['content'] !== 'string') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(user['content']);
+  } catch {
+    return null;
+  }
+  if (
+    !isRecord(parsed)
+    || typeof parsed['purpose'] !== 'string'
+    || typeof parsed['structured_output'] !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    purpose: parsed['purpose'],
+    structured_output: parsed['structured_output'],
+    input: parsed['input'],
+  };
+}
+
+/** Every exposed tool must be a declared function with a schema-constrained signature. */
+function schemaTools(raw: unknown): boolean {
+  if (!Array.isArray(raw)) return false;
+  return raw.every((tool) => {
+    if (!isRecord(tool) || tool['type'] !== 'function' || !isRecord(tool['function'])) return false;
+    const definition = tool['function'];
+    const parameters = definition['parameters'];
+    return typeof definition['name'] === 'string'
+      && definition['strict'] === true
+      && isRecord(parameters)
+      && parameters['type'] === 'object';
+  });
+}
+
+function jsonSchemaFormat(parameters: Record<string, unknown> | null): Record<string, unknown> | null {
+  const format = parameters === null ? null : parameters['response_format'];
+  if (!isRecord(format) || format['type'] !== 'json_schema' || !isRecord(format['json_schema'])) return null;
+  const schema = format['json_schema'];
+  return schema['strict'] === true && isRecord(schema['schema']) ? schema : null;
+}
+
+/**
+ * The fixture refuses a provider request that does not ask the provider to
+ * enforce a structured output schema and closed tools, just as a real provider
+ * would refuse or ignore an unconstrained one.
+ */
+function validProviderRequest(
+  protocol: Exclude<MockProtocol, 'datacenter'>,
+  body: Record<string, unknown>,
+  payload: ProviderPayload | null,
+): boolean {
+  if (payload === null || typeof body['model'] !== 'string') return false;
+  if (protocol === 'alibaba_qwen') {
+    const parameters = isRecord(body['parameters']) ? body['parameters'] : null;
+    if (jsonSchemaFormat(parameters) === null) return false;
+    const tools = parameters?.['tools'];
+    return tools === undefined || schemaTools(tools);
+  }
+  if (protocol === 'openai_compatible') {
+    if (jsonSchemaFormat(body) === null) return false;
+    const tools = body['tools'];
+    return tools === undefined || schemaTools(tools);
+  }
+  const tools = body['tools'];
+  const choice = body['tool_choice'];
+  const forced = isRecord(choice) && isRecord(choice['function']) ? choice['function']['name'] : null;
+  if (forced !== payload.structured_output || !Array.isArray(tools)) return false;
+  if (!schemaTools(tools)) return false;
+  return tools.some((tool) => isRecord(tool)
+    && isRecord(tool['function'])
+    && tool['function']['name'] === payload.structured_output
+    && isRecord(tool['function']['parameters'])
+    && tool['function']['parameters']['type'] === 'object');
+}
+
+/** Wraps the deterministic governed answer in the provider's own response shape. */
+function providerAnswer(
+  protocol: Exclude<MockProtocol, 'datacenter'>,
+  body: Record<string, unknown>,
+  payload: ProviderPayload,
+  behaviour: MockBehaviour,
+): Record<string, unknown> {
+  const generated = outputFor(payload.purpose, { input: payload.input }, behaviour);
+  const output = isRecord(generated) ? generated : {};
+  const model = behaviour === 'identity_mismatch' ? 'not-the-pinned-model' : String(body['model'] ?? '');
+  if (protocol === 'alibaba_qwen') {
+    const message: Record<string, unknown> = { role: 'assistant', content: JSON.stringify(output) };
+    if (behaviour === 'undeclared_tool') {
+      message['tool_calls'] = [mockToolCall('shell_exec', {})];
+    }
+    return {
+      request_id: 'mock-qwen-request',
+      model,
+      output: { choices: [{ index: 0, finish_reason: 'stop', message }] },
+      usage: { ...MOCK_USAGE },
+    };
+  }
+  const message: Record<string, unknown> = {
+    role: 'assistant',
+    content: protocol === 'deepseek' ? null : JSON.stringify(output),
+  };
+  const toolCalls: Array<Record<string, unknown>> = [];
+  if (protocol === 'deepseek') {
+    // DeepSeek's native adapter forces a strict tool call, so the fixture answers
+    // the structured output there instead of in free-text content.
+    toolCalls.push(mockToolCall(payload.structured_output, output));
+  }
+  if (behaviour === 'undeclared_tool') {
+    toolCalls.push(mockToolCall('shell_exec', {}));
+  }
+  message['tool_calls'] = toolCalls;
+  return {
+    id: 'chatcmpl-mock',
+    object: 'chat.completion',
+    created: 0,
+    model,
+    choices: [{
+      index: 0,
+      message,
+      finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
+    }],
+    usage: {
+      prompt_tokens: MOCK_USAGE.input_tokens,
+      completion_tokens: MOCK_USAGE.output_tokens,
+      total_tokens: MOCK_USAGE.input_tokens + MOCK_USAGE.output_tokens,
+    },
+  };
+}
+
+function mockToolCall(name: string, value: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: `call-${name}`,
+    type: 'function',
+    function: { name, arguments: JSON.stringify(value) },
+  };
+}
 
 function answer(body: Record<string, unknown>, behaviour: MockBehaviour): Record<string, unknown> {
   const purpose = String(body['purpose'] ?? '');
@@ -386,6 +608,13 @@ function multiProductPlan(
     interpretation: '本次问题按每个数据产品各自的已发布受治理契约拆分为独立查询，不跨产品合并数据。',
     parts: parts.map((part) => ({ product: part.ref, query: part.compiled.query })),
   };
+  if (behaviour === 'five_parts_plan') {
+    // Spec section 15: one compound question plans at most four subqueries.
+    const template = parts[0];
+    if (template !== undefined) {
+      plan['parts'] = Array.from({ length: 5 }, () => ({ product: template.ref, query: template.compiled.query }));
+    }
+  }
   if (behaviour === 'cross_product_join_plan') {
     // A join is exactly the cross-product composition the platform never accepts.
     plan['join'] = { left: parts[0]?.ref ?? '', right: parts[1]?.ref ?? '', on: 'city' };

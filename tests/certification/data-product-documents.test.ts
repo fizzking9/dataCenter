@@ -213,7 +213,7 @@ function search(
 ): SearchResponse {
   const result = command(
     fixture,
-    ['product', 'query', '--product', productId, '--request', jsonFile(fixture, 'document-search', request)],
+    ['product', 'query', '--product', productId, '--request', jsonFile(fixture, 'document-search', { include_totals: true, ...request })],
     { token },
   );
   assert.equal(result.status, 0, result.stderr);

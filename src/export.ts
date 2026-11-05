@@ -16,7 +16,6 @@ import { findUserById, workspaceRoleOf } from './platform.js';
 import { queryDataProduct } from './product-query.js';
 import { releasedVersion } from './product-release.js';
 import { requireReadableProduct } from './products.js';
-import { purgeRevoked } from './retention.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
 /** A curated export is readable only through a reauthorized, short-lived download. */
@@ -330,19 +329,25 @@ export function downloadExport(options: {
     (candidate) => candidate.export_id === options.exportId && candidate.actor_user_id === actor.user.user_id,
   );
   if (!record) {
-    // A purged export stays explicitly retention-expired instead of silently absent.
-    const ledger = session.state.purge_ledger.find((entry) => entry.purged.some(
-      (recorded) => recorded.record_kind === 'export' && recorded.record_id === options.exportId,
-    ));
-    if (purgeRevoked(session.state, 'export', options.exportId)) {
-      reject(
-        session,
-        actorLabel(actor.user),
-        ledger?.scope.workspace_id == null ? context : { ...context, workspace_id: ledger.scope.workspace_id },
-        'RETENTION_EXPIRED',
-        'This export has expired under the retention policy and was purged.',
-        'Produce the export again to receive a fresh short-lived download.',
+    // A purged export is retention-expired only to the Consumer who produced it.
+    // To everyone else it stays indistinguishable from an export that never
+    // existed, so a purged id never discloses someone else's activity.
+    for (const ledger of session.state.purge_ledger) {
+      const purged = ledger.purged.find(
+        (recorded) => recorded.record_kind === 'export' && recorded.record_id === options.exportId,
       );
+      if (purged === undefined) continue;
+      if (purged.owner_user_id === actor.user.user_id) {
+        reject(
+          session,
+          actorLabel(actor.user),
+          ledger.scope.workspace_id == null ? context : { ...context, workspace_id: ledger.scope.workspace_id },
+          'RETENTION_EXPIRED',
+          'This export has expired under the retention policy and was purged.',
+          'Produce the export again to receive a fresh short-lived download.',
+        );
+      }
+      break;
     }
   }
   if (!record || workspaceRoleOf(session.state, actor.user.user_id, record.workspace_id) === null) {

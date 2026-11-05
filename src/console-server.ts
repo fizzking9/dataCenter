@@ -1,5 +1,6 @@
-import { createReadStream, existsSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { extname, join, resolve, sep } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -27,7 +28,7 @@ import { publishGrant, revokeGrant } from './grants.js';
 import { createExport, downloadExport, listExports, listOwnExports, revokeExport } from './export.js';
 import { showDataProductGovernance } from './product-governance.js';
 import { showWorkspaceAudit } from './audit-view.js';
-import { login, logout, verifyStepUpAuthentication } from './auth.js';
+import { login, logout, USER_SESSION_COOKIE, verifyStepUpAuthentication } from './auth.js';
 import {
   adoptConnection,
   connectionPacing,
@@ -163,12 +164,12 @@ import {
 } from './recovery.js';
 import { openPlatform } from './session.js';
 import { deploymentStatus } from './status.js';
-import { readDeployment, recentEvidence } from './state.js';
-import { finalizeUpgrade, preflightUpgrade, readMigrationLedger, readUpgradeRecord, rollbackDeployment, rollbackWindow, verifyUpgrade } from './upgrade.js';
+import { readDeployment, recentEvidence, recordEvidence, writeJsonFile } from './state.js';
+import { applicationRollbackWindow, finalizeUpgrade, preflightUpgrade, readMigrationLedger, readUpgradeRecord, rollbackDeployment, verifyUpgrade } from './upgrade.js';
 
 export const SESSION_COOKIE = 'dc_operator_console';
 /** Platform User sessions are a separate channel from the Operator Console. */
-export const USER_SESSION_COOKIE = 'dc_user_session';
+export { USER_SESSION_COOKIE };
 
 /** One governed JSON body is bounded before it reaches any governed module. */
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -215,21 +216,80 @@ class HttpError extends Error {
   }
 }
 
+/** The TLS material a non-loopback Console must present before it may bind. */
+export interface ConsoleTlsOptions {
+  certificateFile: string;
+  keyFile: string;
+}
+
 export interface ConsoleServerOptions {
   root: string;
   masterKey: string;
   port: number;
+  /** The address to bind; absent binds loopback, the host-local development surface. */
+  host?: string;
+  /** TLS certificate and key; required for every non-loopback bind. */
+  tls?: ConsoleTlsOptions;
   assets?: string;
   /** The off-host recovery target the Operator Console may inspect and restore. */
   backupRoot?: string;
   /** Where an isolated restoration is materialized, always in a new directory. */
   restoreRoot?: string;
+  /** The instant admission runs at, so a test can advance the clock deterministically. */
+  clock?: () => string;
+}
+
+/** The listener facts a status or evidence reader states, never a secret. */
+export interface ConsoleListener {
+  host: string;
+  port: number;
+  url: string;
+  exposure: 'loopback' | 'network';
+  tls: { enabled: boolean; certificate: string | null };
 }
 
 export interface ConsoleServer {
   url: string;
   port: number;
+  host: string;
+  tls: { enabled: boolean; certificate: string | null };
   close(): Promise<void>;
+}
+
+const DEFAULT_BIND_HOST = '127.0.0.1';
+
+/** True for every address that only this host can reach. */
+export function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/gu, '');
+  if (normalized === 'localhost' || normalized === '::1') return true;
+  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(normalized);
+  return octets !== null
+    && octets[1] === '127'
+    && octets.slice(1).every((octet) => Number(octet) <= 255);
+}
+
+function listenerStatePath(root: string): string {
+  return join(root, 'state', 'console-listener.json');
+}
+
+/** States the listener facts this host is serving, so status can disclose them. */
+function recordListener(root: string, listener: ConsoleListener & { bound_at: string }): void {
+  mkdirState(root);
+  writeJsonFile(listenerStatePath(root), listener);
+  recordEvidence(root, 'serve', 'listening', 'operator-console', { ...listener });
+}
+
+function clearListener(root: string): void {
+  try {
+    rmSync(listenerStatePath(root), { force: true });
+  } catch {
+    // A listener record that cannot be removed still only describes the past.
+  }
+}
+
+function mkdirState(root: string): void {
+  // The state directory holds governed session material; it is always private.
+  mkdirSync(join(root, 'state'), { recursive: true, mode: 0o700 });
 }
 
 function defaultAssetsDirectory(): string {
@@ -243,6 +303,29 @@ function defaultAssetsDirectory(): string {
  */
 export async function startConsoleServer(options: ConsoleServerOptions): Promise<ConsoleServer> {
   readDeployment(options.root);
+  const host = options.host ?? DEFAULT_BIND_HOST;
+  if (host.trim() === '') {
+    throw new OperatorError(
+      'CONSOLE_HOST_INVALID',
+      'The Operator Console bind host must name one address.',
+      'Use 127.0.0.1 for local development, or a configured host with TLS.',
+    );
+  }
+  const tls = options.tls;
+  // A listener reachable from another host carries every session, token, and
+  // governed answer over the network, so it is never served in clear text.
+  if (!isLoopbackHost(host) && tls === undefined) {
+    recordEvidence(options.root, 'serve', 'refused', 'operator-console', {
+      host,
+      tls_enabled: false,
+      error_code: 'TLS_REQUIRED_FOR_NON_LOOPBACK',
+    });
+    throw new OperatorError(
+      'TLS_REQUIRED_FOR_NON_LOOPBACK',
+      `The Operator Console refuses to bind ${host} without TLS.`,
+      'Bind 127.0.0.1 for local development, or configure a TLS certificate and key before binding a non-loopback host.',
+    );
+  }
   const assets = options.assets ?? defaultAssetsDirectory();
   if (!existsSync(join(assets, 'index.html'))) {
     throw new OperatorError(
@@ -255,27 +338,62 @@ export async function startConsoleServer(options: ConsoleServerOptions): Promise
   // client-supplied Host header, so no token can name another resource server.
   const identity: McpServerIdentity = { origin: '' };
   const handler = createHandler(options, assets, identity);
-  const server: Server = createServer((request, response) => {
+  const onRequest = (request: IncomingMessage, response: ServerResponse): void => {
     handler(request, response).catch((error: unknown) => {
       if (!response.headersSent) sendFailure(response, error);
       else response.end();
     });
-  });
+  };
+  let server: Server;
+  if (tls === undefined) {
+    server = createServer(onRequest);
+  } else {
+    let certificate: Buffer;
+    let key: Buffer;
+    try {
+      certificate = readFileSync(tls.certificateFile);
+      key = readFileSync(tls.keyFile);
+    } catch {
+      throw new OperatorError(
+        'TLS_CONFIGURATION_INVALID',
+        'The configured TLS certificate or key could not be read.',
+        'State a readable certificate and private key before binding a non-loopback host.',
+      );
+    }
+    server = createHttpsServer({ cert: certificate, key }, onRequest) as unknown as Server;
+  }
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once('error', rejectListen);
-    // The Console is a host-local surface: it never binds off the loopback address.
-    server.listen(options.port, '127.0.0.1', () => {
+    server.listen(options.port, host, () => {
       server.off('error', rejectListen);
-      identity.origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
       resolveListen();
     });
   });
   const address = server.address() as AddressInfo;
-  return {
-    url: `http://127.0.0.1:${address.port}`,
+  const scheme = tls === undefined ? 'http' : 'https';
+  const originHost = address.address.includes(':') ? `[${address.address}]` : address.address;
+  const origin = `${scheme}://${originHost}:${address.port}`;
+  identity.origin = origin;
+  const listener: ConsoleListener & { bound_at: string } = {
+    host: address.address,
     port: address.port,
+    url: origin,
+    exposure: isLoopbackHost(address.address) ? 'loopback' : 'network',
+    tls: {
+      enabled: tls !== undefined,
+      certificate: tls?.certificateFile ?? null,
+    },
+    bound_at: new Date().toISOString(),
+  };
+  recordListener(options.root, listener);
+  return {
+    url: origin,
+    port: address.port,
+    host: address.address,
+    tls: listener.tls,
     async close() {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+      clearListener(options.root);
     },
   };
 }
@@ -358,7 +476,12 @@ function createHandler(options: ConsoleServerOptions, assets: string, identity: 
       else await work();
       return;
     }
-    if (await handleMcpSurface({ root: options.root, masterKey: options.masterKey, identity }, request, response, url)) {
+    if (await handleMcpSurface({
+      root: options.root,
+      masterKey: options.masterKey,
+      identity,
+      ...(options.clock === undefined ? {} : { clock: options.clock }),
+    }, request, response, url)) {
       return;
     }
     await serveAsset(request, response, assets, url.pathname);
@@ -373,7 +496,7 @@ async function handleApi(
   lifecycleJobs: Map<string, LifecycleJob>,
 ): Promise<void> {
   const method = request.method ?? 'GET';
-  if (method !== 'GET' && !isSameOrigin(request)) {
+  if (method !== 'GET' && !isSameOrigin(request, options.tls === undefined ? 'http' : 'https')) {
     throw new HttpError(403, 'ORIGIN_NOT_ALLOWED', 'The request did not originate from this Operator Console.');
   }
 
@@ -508,7 +631,7 @@ async function handleApi(
   }
 
   // Post-installation lifecycle: one signed maintenance window at a time, with
-  // its durable record, locked migration ledger, rollback window, and evidence
+  // its durable record, locked migration ledger, Application Rollback window, and evidence
   // readable between every step. The browser calls the same governed modules the
   // CLI calls; no lifecycle decision is made in the browser or in this route.
   if (pathname === '/api/operator/lifecycle' && method === 'GET') {
@@ -522,7 +645,7 @@ async function handleApi(
       },
       upgrade: readUpgradeRecord(options.root) ?? null,
       ledger: readMigrationLedger(options.root),
-      rollback_window: rollbackWindow(options.root),
+      application_rollback_window: applicationRollbackWindow(options.root),
       evidence: recentEvidence(options.root, LIFECYCLE_EVIDENCE_OPERATIONS, 12),
       job: publicJob(lifecycleJobs.get(options.root)),
       checked_at: new Date().toISOString(),
@@ -1002,6 +1125,7 @@ async function handleApi(
       ...(conversation === '' ? {} : { conversation }),
       ...(bindingId === '' ? {} : { bindingId }),
       ...(at === '' ? {} : { now: at }),
+      ...(options.clock === undefined ? {} : { admissionAt: options.clock() }),
     }));
     return;
   }
@@ -1030,6 +1154,7 @@ async function handleApi(
       token,
       reportId: decodeURIComponent(reportRoute[1]!),
       workspaceId: activeWorkspace(request),
+      ...(options.clock === undefined ? {} : { admissionAt: options.clock() }),
     }));
     return;
   }
@@ -1091,6 +1216,7 @@ async function handleApi(
       token,
       reportTemplateId: decodeURIComponent(reportTemplateGenerateRoute[1]!),
       workspaceId: workspaceFromBody(body),
+      ...(options.clock === undefined ? {} : { admissionAt: options.clock() }),
     }));
     return;
   }
@@ -1264,6 +1390,7 @@ async function handleApi(
       workspaceId: activeWorkspace(request),
       dataProductId: decodeURIComponent(productQueryRoute[1]!),
       request: jsonDocument(body, 'request'),
+      ...(options.clock === undefined ? {} : { admissionAt: options.clock() }),
     }));
     return;
   }
@@ -1874,6 +2001,7 @@ async function handleApi(
       workspaceId: decodeURIComponent(queryRoute[1]!),
       dataProductId: decodeURIComponent(queryRoute[2]!),
       request: await readJson(request),
+      ...(options.clock === undefined ? {} : { admissionAt: options.clock() }),
     }));
     return;
   }
@@ -2789,11 +2917,15 @@ function searchParam(request: IncomingMessage, name: string): string | null {
   return value === null || value === '' ? null : value;
 }
 
-/** The browser never reads this cookie, and it never outlives the session. */
+/**
+ * The browser never reads this cookie, and it never outlives the session. It is
+ * `SameSite=Lax` so the OAuth authorization endpoint receives it on a top-level
+ * navigation from a client; cross-site POSTs still never carry it.
+ */
 function sessionCookie(token: string, expiresAt: unknown): string {
   const remaining = Date.parse(String(expiresAt)) - Date.now();
   const maxAge = token === '' || !Number.isFinite(remaining) ? 0 : Math.max(0, Math.floor(remaining / 1000));
-  return `${USER_SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
+  return `${USER_SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
 }
 
 /** Reads the Bearer credential a published Data Product API path presents. */
@@ -2822,11 +2954,11 @@ function cookieValueFor(request: IncomingMessage, name: string): string | undefi
 }
 
 /** A cross-origin form cannot forge this: only the Console's own origin is accepted. */
-function isSameOrigin(request: IncomingMessage): boolean {
+function isSameOrigin(request: IncomingMessage, scheme: 'http' | 'https'): boolean {
   const origin = request.headers.origin;
   if (origin === undefined) return true;
   const host = request.headers.host;
-  return host !== undefined && origin === `http://${host}`;
+  return host !== undefined && origin === `${scheme}://${host}`;
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -3056,6 +3188,11 @@ const STATUS_BY_CODE: Record<string, number> = {
   STEP_UP_AUTHENTICATION_FAILED: 401,
   AUTHORIZATION_DENIED: 403,
   WORKSPACE_ACCESS_DENIED: 403,
+  // Admission refusals are explicit capacity answers, never truncated success.
+  AGENT_RATE_LIMITED: 429,
+  AGENT_CONCURRENCY_LIMIT: 429,
+  PLATFORM_CONCURRENCY_LIMIT: 429,
+  WORKSPACE_QUEUE_FULL: 429,
   ROLE_INVALID: 400,
   MEMBERSHIP_NOT_FOUND: 404,
   LAST_ADMINISTRATOR_PROTECTED: 409,
@@ -3120,6 +3257,7 @@ const STATUS_BY_CODE: Record<string, number> = {
   REPORT_NOT_AVAILABLE: 404,
   REPORT_WITHDRAWN: 409,
   REPORT_GENERATION_FAILED: 422,
+  REPORT_TIMEOUT: 504,
   REPORT_TEMPLATE_NOT_AVAILABLE: 404,
   REPORT_TEMPLATE_VERSION_NOT_FOUND: 404,
   REPORT_TEMPLATE_NOT_PUBLISHED: 409,

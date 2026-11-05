@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { acquireOperation, releaseOperation } from './admission.js';
 import { resolveActor } from './auth.js';
 import {
   actorLabel,
@@ -36,6 +37,13 @@ import {
   type WorkspaceModelBindingRecord,
 } from './catalog.js';
 import { canonicalDigest } from './crypto.js';
+import {
+  DeadlineExceeded,
+  REPORT_TIMEOUT_MS,
+  timeoutBudgetFromEnv,
+  withDeadline,
+  type Deadline,
+} from './deadline.js';
 import { isRecord, readJsonDocument } from './documents.js';
 import type { Fail } from './errors.js';
 import { classifyResult, freshnessOf, narrationFacts, narrativeViolation } from './governed-result.js';
@@ -895,6 +903,30 @@ export interface GenerateReportOptions {
  * narrative is generated, and only after the engine has answered.
  */
 export async function generateReport(options: GenerateReportOptions): Promise<ReportRecord> {
+  const budget = timeoutBudgetFromEnv('DC_REPORT_TIMEOUT_MS', REPORT_TIMEOUT_MS);
+  try {
+    return await withDeadline((deadline) => generateReportWithinBudget(options, deadline), budget);
+  } catch (error) {
+    if (error instanceof DeadlineExceeded) {
+      throw new ReportGenerationFailure(
+        'REPORT_TIMEOUT',
+        `Report generation exceeded its ${String(Math.round(budget / 1000))}-second hard timeout before a complete answer existed.`,
+        'Narrow the Report Template question or retry when the inference endpoint is responsive.',
+      );
+    }
+    throw error;
+  }
+}
+
+/**
+ * The generation work itself, run under the settled Report hard timeout. The
+ * deterministic read may finish late, but a Report is committed only while the
+ * deadline still holds: an expired generation stores nothing.
+ */
+async function generateReportWithinBudget(
+  options: GenerateReportOptions,
+  deadline: Deadline,
+): Promise<ReportRecord> {
   const { session, reader, template, version } = options;
   if (session.license?.status === 'expired') {
     throw new ReportGenerationFailure(
@@ -946,6 +978,9 @@ export async function generateReport(options: GenerateReportOptions): Promise<Re
   // One report is one metered operation, so the identifier the narrative is
   // metered under is the identifier the immutable Report carries.
   const reportId = randomUUID();
+  // Narration is the only slow, model-backed step; an expired deadline stops
+  // before it spends anything more.
+  deadline.ensure();
   const narrated = await narrate(session, template.workspace_id, version, product, result, reference, {
     root: session.root,
     class: 'report',
@@ -981,6 +1016,9 @@ export async function generateReport(options: GenerateReportOptions): Promise<Re
     withdrawn_at: null,
     withdrawn_by: null,
   };
+  // The commit point: a generation whose deadline passed while the narrative
+  // was being produced stores no Report and audits no success.
+  deadline.ensure();
   session.state.reports.push(report);
   session.audit({
     ...context,
@@ -1261,6 +1299,8 @@ export async function generateTemplateReport(options: {
   /** The Workspace the browser named, so a Template of another Workspace never resolves. */
   workspaceId?: string;
   now?: Date;
+  /** The instant admission is decided at, so a serving surface can inject its clock. */
+  admissionAt?: string;
 }): Promise<Record<string, unknown>> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = {
@@ -1300,45 +1340,64 @@ export async function generateTemplateReport(options: {
   const role = workspaceRoleOf(session.state, actor.user.user_id, template.workspace_id);
   const reader = memberReader(session, actor.user, role);
   const now = options.now ?? new Date();
-  let report: ReportRecord;
+  const admissionAt = options.admissionAt;
+  // A generated Report is one LLM-backed Consumer operation. The lease is held
+  // for the whole generation and released whether it succeeds or is refused.
+  const leaseId = acquireOperation({
+    root: options.root,
+    operation: 'report_generation',
+    class: 'llm',
+    workspace_id: template.workspace_id,
+    user_id: actor.user.user_id,
+    ...(admissionAt === undefined ? {} : { at: admissionAt }),
+  });
   try {
-    report = await generateReport({
-      session,
-      generatedBy: actor.user.user_id,
-      reader,
-      template,
-      version,
-      now,
-      trigger: 'explicit',
-    });
-  } catch (error) {
-    if (error instanceof ReportGenerationFailure) {
-      reject(session, actorLabel(actor.user), { ...context, workspace_id: template.workspace_id }, error.code, error.message, error.nextStep);
+    let report: ReportRecord;
+    try {
+      report = await generateReport({
+        session,
+        generatedBy: actor.user.user_id,
+        reader,
+        template,
+        version,
+        now,
+        trigger: 'explicit',
+      });
+    } catch (error) {
+      if (error instanceof ReportGenerationFailure) {
+        reject(session, actorLabel(actor.user), { ...context, workspace_id: template.workspace_id }, error.code, error.message, error.nextStep);
+      }
+      reject(
+        session,
+        actorLabel(actor.user),
+        { ...context, workspace_id: template.workspace_id },
+        'REPORT_GENERATION_FAILED',
+        error instanceof Error ? error.message : 'The Report could not be generated.',
+      );
     }
-    reject(
-      session,
-      actorLabel(actor.user),
-      { ...context, workspace_id: template.workspace_id },
-      'REPORT_GENERATION_FAILED',
-      error instanceof Error ? error.message : 'The Report could not be generated.',
-    );
+    return {
+      origin: 'generated',
+      summary: `已按模板第 ${version.version} 版生成新的报告。`,
+      report: reportView(report),
+      authorization: authorizationView(
+        template.workspace_id,
+        role ?? '',
+        [{
+          data_product_id: report.data_product.data_product_id,
+          restricted: report.security.restricted,
+          columns: report.security.columns,
+          row_filter_count: report.security.row_filter_count,
+          scope_fingerprint: report.security.scope_fingerprint,
+        }],
+      ),
+    };
+  } finally {
+    releaseOperation({
+      root: options.root,
+      leaseId,
+      ...(admissionAt === undefined ? {} : { at: admissionAt }),
+    });
   }
-  return {
-    origin: 'generated',
-    summary: `已按模板第 ${version.version} 版生成新的报告。`,
-    report: reportView(report),
-    authorization: authorizationView(
-      template.workspace_id,
-      role ?? '',
-      [{
-        data_product_id: report.data_product.data_product_id,
-        restricted: report.security.restricted,
-        columns: report.security.columns,
-        row_filter_count: report.security.row_filter_count,
-        scope_fingerprint: report.security.scope_fingerprint,
-      }],
-    ),
-  };
 }
 
 /** One refused Report retrieval, so every surface answers with the same code. */
@@ -1553,6 +1612,8 @@ export function showReport(options: {
   /** The Workspace the browser named, so a Report of another Workspace never resolves. */
   workspaceId?: string;
   now?: Date;
+  /** The instant admission is decided at, so a serving surface can inject its clock. */
+  admissionAt?: string;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
@@ -1586,6 +1647,16 @@ export function showReport(options: {
     deny(session, actorLabel(actor.user), context, 'REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
   }
   const reader = memberReader(session, actor.user, role);
+  const admissionAt = options.admissionAt;
+  // A stored Report read is one direct Consumer operation; it holds no model.
+  const leaseId = acquireOperation({
+    root: options.root,
+    operation: 'report_read',
+    class: 'direct',
+    workspace_id: report.workspace_id,
+    user_id: actor.user.user_id,
+    ...(admissionAt === undefined ? {} : { at: admissionAt }),
+  });
   try {
     return readReportForReader({
       session,
@@ -1600,6 +1671,12 @@ export function showReport(options: {
       deny(session, actorLabel(actor.user), { ...context, workspace_id: report.workspace_id }, error.code, error.message);
     }
     throw error;
+  } finally {
+    releaseOperation({
+      root: options.root,
+      leaseId,
+      ...(admissionAt === undefined ? {} : { at: admissionAt }),
+    });
   }
 }
 

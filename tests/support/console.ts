@@ -27,10 +27,19 @@ const BROWSER_REFUSED_PORTS = new Set([
   3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
 ]);
 
+export interface ConsoleStartOptions {
+  backupRoot?: string;
+  restoreRoot?: string;
+  /** The bind host; absent uses the Console's loopback default. */
+  host?: string;
+  /** TLS material, which a non-loopback bind must present. */
+  tls?: { certificateFile: string; keyFile: string };
+}
+
 /** Starts the browser application on an address a Chromium browser will accept. */
 export async function startConsole(
   fixture: PlatformFixture,
-  options: { backupRoot?: string; restoreRoot?: string } = {},
+  options: ConsoleStartOptions = {},
 ): Promise<ConsoleHandle> {
   // A refused port is rare but not impossible, so the server is restarted on a
   // fresh assignment instead of handing the browser a URL it can never open.
@@ -44,15 +53,19 @@ export async function startConsole(
 
 async function startConsoleOnce(
   fixture: PlatformFixture,
-  options: { backupRoot?: string; restoreRoot?: string },
+  options: ConsoleStartOptions,
 ): Promise<ConsoleHandle> {
-  const recovery = [
+  const transport = [
+    ...(options.host === undefined ? [] : ['--host', options.host]),
+    ...(options.tls === undefined
+      ? []
+      : ['--tls-cert', options.tls.certificateFile, '--tls-key', options.tls.keyFile]),
     ...(options.backupRoot === undefined ? [] : ['--backup-root', options.backupRoot]),
     ...(options.restoreRoot === undefined ? [] : ['--restore-root', options.restoreRoot]),
   ];
   const child = spawn(
     process.execPath,
-    [cliPath, 'console', 'serve', '--root', fixture.root, '--master-key', fixture.masterKey, '--port', '0', ...recovery],
+    [cliPath, 'console', 'serve', '--root', fixture.root, '--master-key', fixture.masterKey, '--port', '0', ...transport],
     { env: { ...process.env, ...fixture.docker }, stdio: ['ignore', 'pipe', 'pipe'] },
   );
   const listening = await waitForListening(child);

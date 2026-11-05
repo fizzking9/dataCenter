@@ -1,5 +1,16 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { issueAccessToken, OAuthError, resolveAccessToken } from './agents.js';
+import {
+  approveAuthorization,
+  denyAuthorization,
+  describeAuthorization,
+  issueAccessToken,
+  OAuthAuthorizationError,
+  OAuthError,
+  resolveAccessToken,
+  type AuthorizationConsentView,
+} from './agents.js';
+import { USER_SESSION_COOKIE } from './auth.js';
+import { OperatorError } from './errors.js';
 import { callTool, findTool, listTools, TOOL_CONTRACT_VERSION } from './mcp-tools.js';
 import { openPlatform } from './session.js';
 
@@ -26,6 +37,8 @@ export interface McpSurfaceOptions {
   root: string;
   masterKey: string;
   identity: McpServerIdentity;
+  /** The instant admission runs at, so a test can advance the clock deterministically. */
+  clock?: () => string;
 }
 
 /** One structured failure of the transport, before or beside a JSON-RPC message. */
@@ -62,6 +75,10 @@ export async function handleMcpSurface(
     await handleToken(options, request, response);
     return true;
   }
+  if (url.pathname === '/oauth/authorize') {
+    await handleAuthorization(options, request, response, url);
+    return true;
+  }
   if (url.pathname === '/.well-known/oauth-protected-resource' || url.pathname === '/.well-known/oauth-protected-resource/mcp') {
     sendJson(response, 200, protectedResourceMetadata(options.identity));
     return true;
@@ -88,8 +105,11 @@ export function protectedResourceMetadata(identity: McpServerIdentity): Record<s
 export function authorizationServerMetadata(identity: McpServerIdentity): Record<string, unknown> {
   return {
     issuer: identity.origin,
+    authorization_endpoint: `${identity.origin}/oauth/authorize`,
     token_endpoint: `${identity.origin}/oauth/token`,
-    grant_types_supported: ['client_credentials'],
+    grant_types_supported: ['client_credentials', 'authorization_code'],
+    response_types_supported: ['code'],
+    code_challenge_methods_supported: ['S256'],
     token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'],
     scopes_supported: ['mcp:read', 'mcp:nlq'],
     resource_indicators_supported: true,
@@ -302,7 +322,13 @@ async function resolveAuthenticated(
       { required: [...tool.scopes] },
     );
   }
-  return callTool(session, grant, tool, context.params['arguments']);
+  return callTool(
+    session,
+    grant,
+    tool,
+    context.params['arguments'],
+    options.clock === undefined ? {} : { at: options.clock() },
+  );
 }
 
 /** Reads the Bearer credential a request presents, or nothing at all. */
@@ -350,6 +376,218 @@ async function handleToken(
   }
 }
 
+/**
+ * The authorization endpoint. A platform User must already hold a session; the
+ * request names one pre-registered client, one exact redirect URI, one
+ * Workspace, and a PKCE S256 challenge. GET states the consent, and only an
+ * explicit POST approval issues the short-lived single-use code.
+ */
+async function handleAuthorization(
+  options: McpSurfaceOptions,
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+): Promise<void> {
+  try {
+    const method = request.method ?? 'GET';
+    if (method !== 'GET' && method !== 'POST') {
+      throw new McpFailure(
+        405,
+        'OAUTH_AUTHORIZE_METHOD_UNSUPPORTED',
+        'The authorization endpoint accepts GET and POST only.',
+        -1,
+        { allow: 'GET, POST' },
+      );
+    }
+    let params: Record<string, string>;
+    if (method === 'GET') {
+      params = {};
+      for (const [name, value] of url.searchParams) params[name] = value;
+    } else {
+      // A consent decision is a state change: it must come from this origin,
+      // and the SameSite=Lax session cookie is never sent by a cross-site POST.
+      const origin = headerOne(request.headers.origin);
+      if (origin !== undefined && origin !== '' && origin !== options.identity.origin) {
+        throw new McpFailure(
+          403,
+          'OAUTH_ORIGIN_NOT_ALLOWED',
+          'The authorization request came from an Origin this Deployment does not serve.',
+          -1,
+        );
+      }
+      if (!mediaTypeIs(headerOne(request.headers['content-type']), 'application/x-www-form-urlencoded')) {
+        throw new McpFailure(
+          415,
+          'OAUTH_AUTHORIZE_CONTENT_TYPE_UNSUPPORTED',
+          'A consent decision must be posted as application/x-www-form-urlencoded.',
+          -1,
+        );
+      }
+      params = await readForm(request);
+    }
+    const token = cookieValueFor(request, USER_SESSION_COOKIE);
+    if (token === undefined || token === '') {
+      sendHtml(response, 401, authorizationErrorPage('需要登录', 'session_required'));
+      return;
+    }
+    if (method === 'GET') {
+      const view = describeAuthorization({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        params,
+      });
+      sendHtml(response, 200, consentPage(view));
+      return;
+    }
+    const decision = params['decision'];
+    if (decision === 'approve') {
+      sendRedirect(response, approveAuthorization({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        params,
+      }).location);
+      return;
+    }
+    if (decision === 'deny') {
+      sendRedirect(response, denyAuthorization({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        params,
+      }).location);
+      return;
+    }
+    // An unrecognized decision is stated locally, never redirected to a URI
+    // this request has not proven against the registered client.
+    throw new OAuthAuthorizationError(400, 'invalid_request', 'The consent decision must be approve or deny.');
+  } catch (error) {
+    if (error instanceof OAuthAuthorizationError) {
+      if (error.redirectUri !== null) {
+        sendOAuthErrorRedirect(response, error.redirectUri, error.error, error.state);
+      } else {
+        sendHtml(response, error.status, authorizationErrorPage('授权请求无效', error.error));
+      }
+      return;
+    }
+    if (error instanceof OperatorError) {
+      if (error.code === 'SESSION_INVALID') {
+        sendHtml(response, 401, authorizationErrorPage('需要登录', 'session_required'));
+        return;
+      }
+      sendHtml(response, 503, authorizationErrorPage('授权服务暂不可用', 'oauth_unavailable'));
+      return;
+    }
+    if (error instanceof McpFailure) {
+      sendFailure(response, error, null);
+      return;
+    }
+    throw error;
+  }
+}
+
+/** One authorization error redirected to the exact URI the client registered. */
+function sendOAuthErrorRedirect(
+  response: ServerResponse,
+  redirectUri: string,
+  error: string,
+  state: string | null,
+): void {
+  const location = new URL(redirectUri);
+  location.searchParams.set('error', error);
+  if (state !== null) location.searchParams.set('state', state);
+  sendRedirect(response, location.toString());
+}
+
+function sendRedirect(response: ServerResponse, location: string): void {
+  response.statusCode = 303;
+  response.setHeader('location', location);
+  response.setHeader('cache-control', 'no-store');
+  response.end();
+}
+
+/** Reads one cookie value; the platform session cookie is the only one read here. */
+function cookieValueFor(request: IncomingMessage, name: string): string | undefined {
+  const header = headerOne(request.headers.cookie);
+  if (header === undefined) return undefined;
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator === -1) continue;
+    if (part.slice(0, separator).trim() === name) return part.slice(separator + 1).trim();
+  }
+  return undefined;
+}
+
+/** The consent page names exactly what the User is being asked to delegate. */
+function consentPage(view: AuthorizationConsentView): string {
+  const hidden = (name: string, value: string): string =>
+    `<input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">`;
+  const state = view.state === null ? '' : hidden('state', view.state);
+  return `<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>授权委托访问</title></head>
+<body>
+<main>
+<h1>授权委托访问</h1>
+<p>代理身份 <strong>${escapeHtml(view.agent.name)}</strong> 请求代表你（${escapeHtml(view.user.username)}）在工作区 <strong>${escapeHtml(view.workspace.name)}</strong> 中读取受治理数据。</p>
+<dl>
+<dt>客户端</dt><dd>${escapeHtml(view.client.client_name)}（${escapeHtml(view.client.client_id)}）</dd>
+<dt>权限范围</dt><dd>${escapeHtml(view.scopes.join(' '))}</dd>
+<dt>重定向地址</dt><dd>${escapeHtml(view.redirect_uri)}</dd>
+</dl>
+<p>同意后，代理身份只能读取你的当前权限与其自身授权的交集，且仅限本工作区；你可以随时在工作区中撤销委托。</p>
+<form method="post" action="/oauth/authorize">
+${hidden('response_type', 'code')}
+${hidden('client_id', view.client.client_id)}
+${hidden('redirect_uri', view.redirect_uri)}
+${hidden('scope', view.scopes.join(' '))}
+${state}
+${hidden('code_challenge', view.code_challenge)}
+${hidden('code_challenge_method', 'S256')}
+${hidden('workspace_id', view.workspace.workspace_id)}
+<button type="submit" name="decision" value="approve">同意授权</button>
+<button type="submit" name="decision" value="deny">拒绝</button>
+</form>
+</main>
+</body>
+</html>`;
+}
+
+/** User-facing authorization errors stay in Simplified Chinese; the code stays machine-readable. */
+const AUTHORIZATION_ERROR_COPY: Record<string, string> = {
+  session_required: '授权委托访问需要一个已登录的平台用户会话。',
+  invalid_request: '授权请求无效，或缺少必需的 PKCE S256 参数。',
+  unsupported_response_type: '本部署只签发授权码。',
+  invalid_scope: '请求的权限范围超出该代理身份的上限。',
+  access_denied: '该委托同意未生效或已被撤销。',
+  oauth_unavailable: '授权服务暂不可用，请稍后重试。',
+};
+
+function authorizationErrorPage(title: string, code: string): string {
+  const message = AUTHORIZATION_ERROR_COPY[code] ?? '授权请求无法完成。';
+  return `<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title></head>
+<body>
+<main>
+<h1>${escapeHtml(title)}</h1>
+<p>${escapeHtml(message)}</p>
+<p><code>${escapeHtml(code)}</code></p>
+</main>
+</body>
+</html>`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
 async function readForm(request: IncomingMessage): Promise<Record<string, string>> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -357,7 +595,7 @@ async function readForm(request: IncomingMessage): Promise<Record<string, string
     const buffer = chunk as Buffer;
     size += buffer.length;
     if (size > MAX_MCP_BODY_BYTES) {
-      throw new McpFailure(413, 'OAUTH_REQUEST_TOO_LARGE', 'The token request is too large.', -1);
+      throw new McpFailure(413, 'OAUTH_REQUEST_TOO_LARGE', 'The OAuth request body is too large.', -1);
     }
     chunks.push(buffer);
   }
@@ -440,6 +678,18 @@ function sendFailure(response: ServerResponse, failure: McpFailure, id: unknown)
 
 function sendJsonRpc(response: ServerResponse, status: number, payload: unknown): void {
   sendJson(response, status, payload);
+}
+
+function sendHtml(response: ServerResponse, status: number, html: string): void {
+  response.statusCode = status;
+  response.setHeader('content-type', 'text/html; charset=utf-8');
+  response.setHeader('cache-control', 'no-store');
+  // The consent form posts back to this same origin; nothing else is loadable.
+  response.setHeader(
+    'content-security-policy',
+    "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
+  );
+  response.end(html);
 }
 
 function sendJson(

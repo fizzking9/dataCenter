@@ -789,3 +789,17 @@ test('an expired license keeps stored Reports readable and answers ephemerally w
     'Template reads stay available and no Template was added',
   );
 });
+
+test('Report generation past the settled hard timeout answers REPORT_TIMEOUT without storing a Report', async (t) => {
+  const s = await readySurface();
+  t.after(() => s.endpoint.close());
+  const before = stockedReports(s, s.workspaceAdministratorToken).length;
+  const timedOut = await commandAsync(
+    s.fixture,
+    ['report', 'generate', '--template', s.templateId],
+    { token: s.workspaceAdministratorToken, env: { DC_REPORT_TIMEOUT_MS: '1' } },
+  );
+  assert.equal(timedOut.status, 2, timedOut.stdout);
+  assert.equal(timedOut.error['code'], 'REPORT_TIMEOUT');
+  assert.equal(stockedReports(s, s.workspaceAdministratorToken).length, before, 'a timed-out generation stores nothing');
+});

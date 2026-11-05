@@ -37,13 +37,13 @@ export const REFUSED_KEYS = [
   'relationship', 'relationships', 'select', 'where', 'having',
 ];
 
-const RECORD_KEYS = ['kind', 'filters', 'limit', 'window', 'cursor', 'release', 'major', 'include'];
+const RECORD_KEYS = ['kind', 'filters', 'limit', 'window', 'cursor', 'release', 'major', 'include', 'include_totals'];
 const AGGREGATE_KEYS = [
   'kind', 'group_by', 'metrics', 'filters', 'metric_filters',
   'include_totals', 'sort', 'limit', 'window', 'comparison', 'cursor', 'release', 'major', 'include',
 ];
 /** A search reads the same page cursor and Release a record query does; a suggestion never pages. */
-const SEARCH_KEYS = ['kind', 'q', 'limit', 'cursor', 'release', 'major'];
+const SEARCH_KEYS = ['kind', 'q', 'limit', 'cursor', 'release', 'major', 'include_totals'];
 /** A query states the text it looks for; it never hands the platform a document to read. */
 const MAX_QUERY_LENGTH = 1024;
 
@@ -88,13 +88,14 @@ export interface QueryTarget {
 }
 
 export type ParsedQuery =
-  | { kind: 'records'; filters: QueryFilter[]; limit: number; window?: Window; include: IncludeSpec[] }
+  | { kind: 'records'; filters: QueryFilter[]; limit: number; includeTotals: boolean; window?: Window; include: IncludeSpec[] }
   | {
     kind: 'search';
     /** The capability the Contract declared, already proven to exist. */
     search: DataProductSearch;
     terms: string[];
     limit: number;
+    includeTotals: boolean;
   }
   | { kind: 'suggest'; search: DataProductSearch; q: string; limit: number }
   | {
@@ -471,10 +472,7 @@ function readAggregate(
   if (comparison !== undefined && window === undefined) {
     fail(REFUSED, 'A comparison window compares against a time window, so the query must state both.');
   }
-  const includeTotals = parsed['include_totals'] ?? false;
-  if (typeof includeTotals !== 'boolean') {
-    fail(MALFORMED, 'include_totals must be true or false.');
-  }
+  const includeTotals = readIncludeTotals(parsed, fail);
   return {
     kind: 'aggregate',
     groupBy,
@@ -517,6 +515,15 @@ export function readQueryTarget(parsed: Record<string, unknown>, fail: Fail): Qu
   };
 }
 
+/** Exact totals are opt-in: a query that states nothing gets no population count. */
+function readIncludeTotals(parsed: Record<string, unknown>, fail: Fail): boolean {
+  const includeTotals = parsed['include_totals'] ?? false;
+  if (typeof includeTotals !== 'boolean') {
+    fail(MALFORMED, 'include_totals must be true or false.');
+  }
+  return includeTotals;
+}
+
 /**
  * Reads the Data Product Query a Consumer composes against the Contract. Every
  * surface it names — fields, dimensions, metrics, operators, windows, and the
@@ -539,6 +546,7 @@ export function readQuery(
       kind: 'records',
       filters: readFilters(parsed['filters'], contract, schema, fail),
       limit: readLimit(parsed['limit'], contract, fail),
+      includeTotals: readIncludeTotals(parsed, fail),
       ...(window === undefined ? {} : { window }),
       include,
     };
@@ -582,7 +590,7 @@ export function readQuery(
     if (terms.length > search.max_terms) {
       fail(REFUSED, `This search states ${terms.length} terms, beyond the ${search.max_terms} the Contract permits.`);
     }
-    return { kind: 'search', search, terms, limit };
+    return { kind: 'search', search, terms, limit, includeTotals: readIncludeTotals(parsed, fail) };
   }
   fail(MALFORMED, 'A Data Product Query must state whether it reads records, aggregates, searches, or suggests.');
 }

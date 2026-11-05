@@ -1134,8 +1134,21 @@ export interface ReportScheduleRecord {
 // Governed generation: Model Profiles, Workspace Model Bindings, and Proposals.
 // ---------------------------------------------------------------------------
 
-/** How a Model Profile Version speaks to its administrator-supplied endpoint. */
-export type ModelAdapterKind = 'hosted' | 'generic_local';
+/**
+ * How a Model Profile Version speaks to its administrator-supplied endpoint.
+ *
+ * `alibaba_qwen` is the DashScope-style Qwen native protocol, `deepseek` the
+ * DeepSeek native chat protocol, and `openai_compatible` the generic OpenAI
+ * Chat Completions protocol a customer-operated local service can expose.
+ * `hosted` and `generic_local` remain the platform's own declarative contract,
+ * so a Version published before the provider adapters keeps its behavior.
+ */
+export type ModelAdapterKind =
+  | 'hosted'
+  | 'generic_local'
+  | 'alibaba_qwen'
+  | 'deepseek'
+  | 'openai_compatible';
 
 /** The generation purposes a Model Profile Version supports. */
 export type ModelPurpose =
@@ -2372,6 +2385,11 @@ export interface PurgePlanEntry {
   purged?: boolean;
   /** Set when a dependency or Hold appeared after the plan was made. */
   deferred?: boolean;
+  /**
+   * The User a purged record belonged to, so a later retention answer can be
+   * given to that owner alone without disclosing the record to anyone else.
+   */
+  owner_user_id?: string | null;
 }
 
 /** One durable Purge request and its asynchronous deletion work. */
@@ -2404,5 +2422,7 @@ export interface PurgeLedgerEntry {
     record_kind: PurgeRecordKind;
     record_id: string;
     data_class: RetentionDataClass;
+    /** The owner of a purged user-owned record, when the ledger can state it. */
+    owner_user_id?: string | null;
   }>;
 }
