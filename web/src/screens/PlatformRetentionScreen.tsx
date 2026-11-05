@@ -232,7 +232,7 @@ function PurgeJobsPanel({
             <DefinitionList
               rows={view.ledger.map((entry) => ({
                 term: `#${entry.sequence}`,
-                value: `${entry.recorded_at} · ${scopeSummary(entry.scope)} · ${entry.purged.length}`,
+                value: `${formatInstant(entry.recorded_at)} · ${scopeSummary(entry.scope)} · ${entry.purged.length}`,
                 mono: true,
               }))}
             />
@@ -782,7 +782,7 @@ export function WorkspaceRetention({ workspaceId, onSessionLost }: WorkspaceView
             label={t('workspace.retention.holds.reviewAt')}
             value={holdDraft.reviewAt}
             onChange={(value) => updateHoldDraft({ reviewAt: value })}
-            hint="例如 2026-12-31T00:00:00Z"
+            hint={t('value.timestampHint')}
             mono
           />
         </div>
@@ -1233,7 +1233,7 @@ export function DeploymentRetention({ onSessionLost }: DeploymentRetentionProps)
               <Field id="policy-raw" label={t('workspace.retention.override.raw')} value={draft.raw} onChange={(value) => setDraft((current) => ({ ...current, raw: value }))} inputMode="numeric" />
               <Field id="policy-history" label={t('workspace.retention.override.history')} value={draft.history} onChange={(value) => setDraft((current) => ({ ...current, history: value }))} inputMode="numeric" />
               <Field id="policy-report" label={t('workspace.retention.override.report')} value={draft.report} onChange={(value) => setDraft((current) => ({ ...current, report: value }))} inputMode="numeric" />
-              <Field id="policy-audit" label="审计事件（天）" value={draft.audit} onChange={(value) => setDraft((current) => ({ ...current, audit: value }))} inputMode="numeric" />
+              <Field id="policy-audit" label={t('deployment.retention.policy.audit')} value={draft.audit} onChange={(value) => setDraft((current) => ({ ...current, audit: value }))} inputMode="numeric" />
               <Field id="policy-raw-min" label={`${classLabel('raw_acquisition')} ${t('deployment.retention.policy.boundsMin')}`} value={draft.rawMin} onChange={(value) => setDraft((current) => ({ ...current, rawMin: value }))} inputMode="numeric" />
               <Field id="policy-raw-max" label={`${classLabel('raw_acquisition')} ${t('deployment.retention.policy.boundsMax')}`} value={draft.rawMax} onChange={(value) => setDraft((current) => ({ ...current, rawMax: value }))} inputMode="numeric" />
               <Field id="policy-history-min" label={`${classLabel('dataset_release_history')} ${t('deployment.retention.policy.boundsMin')}`} value={draft.historyMin} onChange={(value) => setDraft((current) => ({ ...current, historyMin: value }))} inputMode="numeric" />
@@ -1279,7 +1279,7 @@ export function DeploymentRetention({ onSessionLost }: DeploymentRetentionProps)
             label={t('deployment.retention.holds.reviewAt')}
             value={holdReviewAt}
             onChange={setHoldReviewAt}
-            hint="例如 2026-12-31T00:00:00Z"
+            hint={t('value.timestampHint')}
             mono
           />
         </div>

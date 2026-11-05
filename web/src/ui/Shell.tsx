@@ -22,7 +22,7 @@ export function Shell({ name, tagline, account, accountLabel, onSignOut, childre
       <header className="topbar">
         <div className="topbar__identity">
           <span className="topbar__mark" aria-hidden="true">
-            数
+            {t('app.mark')}
           </span>
           <span className="topbar__titles">
             <span className="topbar__name">{name ?? t('app.name')}</span>

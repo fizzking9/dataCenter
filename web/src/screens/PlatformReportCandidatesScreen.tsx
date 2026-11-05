@@ -5,7 +5,7 @@ import {
   type ReportCandidateView,
   type ReportView,
 } from '../api.js';
-import { apiFailureText, formatInstant } from '../format.js';
+import { apiFailureText, formatInstant, formatNumber } from '../format.js';
 import { message, t } from '../i18n/zh-CN.js';
 import { Button } from '../ui/Button.js';
 import { Field } from '../ui/Field.js';
@@ -291,7 +291,7 @@ export function WorkspaceReportCandidates({ workspaceId, onDecided, onSessionLos
                     <span>
                       {t('workspace.reportCandidates.similarityThreshold')}
                       {' '}
-                      {similarity.threshold}
+                      {formatNumber(similarity.threshold)}
                     </span>
                   </p>
                   {similarity.nominations.length === 0 ? (
@@ -310,7 +310,7 @@ export function WorkspaceReportCandidates({ workspaceId, onDecided, onSessionLos
                           <tr key={`${nomination.kind}:${nomination.target_id}`}>
                             <td>{nominationKindLabel(nomination.kind)}</td>
                             <td>{nomination.question}</td>
-                            <td>{nomination.score.toFixed(3)}</td>
+                            <td>{formatNumber(nomination.score)}</td>
                           </tr>
                         ))}
                       </tbody>

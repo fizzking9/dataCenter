@@ -16,6 +16,14 @@ export function daysUntil(value: string | undefined): number | undefined {
 }
 
 /**
+ * One governed number exactly as the Contract states it. Presentation never
+ * rounds, rescales, or regroups a governed value.
+ */
+export function formatNumber(value: number): string {
+  return String(value);
+}
+
+/**
  * Governed Role values stay ASCII at the boundary; only the label the User reads
  * is Chinese, and it comes from the one catalog.
  */

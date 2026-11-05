@@ -4,6 +4,7 @@
  */
 export const catalog = {
   'app.name': '数据中心运维控制台',
+  'app.mark': '数',
   'app.tagline': '安装后生命周期与只读运行状态',
   'app.skipToContent': '跳到主要内容',
   'app.sessionLabel': '当前运维账号',
@@ -362,6 +363,8 @@ export const catalog = {
 
   'value.yes': '是',
   'value.no': '否',
+  'value.null': '空值',
+  'value.timestampHint': '例如 2026-12-31T00:00:00Z',
   'value.healthy': '健康',
   'value.degraded': '降级',
   'value.closed': '已关闭',
@@ -567,6 +570,7 @@ export const catalog = {
   'workspace.productGovernance.evolution.required': '请先预览变更影响，再发布新版本。',
   'workspace.productGovernance.evolution.impactTitle': '契约变更影响',
   'workspace.productGovernance.evolution.version': '新契约版本',
+  'workspace.productGovernance.evolution.contractVersion': '契约 {version}',
   'workspace.productGovernance.evolution.change': '变更类型',
   'workspace.productGovernance.evolution.base': '基线数据产品版本',
   'workspace.productGovernance.evolution.hash': '候选契约摘要',
@@ -1074,6 +1078,8 @@ export const catalog = {
   'productProposal.check.grain.unique': '记录粒度唯一',
   'productProposal.check.dataset_release.current': '数据集版本为当前版本',
   'productProposal.preview.title': '代表性预览',
+  'productProposal.preview.pins': '通用 {common} · 工作区 {workspace}',
+  'productProposal.preview.emptyMetric': '无值',
   'productProposal.preview.description': '预览通过真实查询引擎读取数据集版本，只返回代表性结果，不写入任何数据产品或发布。',
   'productProposal.preview.empty': '尚未运行代表性预览。',
   'productProposal.preview.run': '运行代表性预览',
@@ -2569,6 +2575,7 @@ export const catalog = {
   'deployment.retention.policy.bounds': '工作区覆盖边界（天）',
   'deployment.retention.policy.boundsMin': '最小',
   'deployment.retention.policy.boundsMax': '最大',
+  'deployment.retention.policy.audit': '审计事件（天）',
   'deployment.retention.publish.title': '发布新的保留策略版本',
   'deployment.retention.publish.description': '留空的字段保持当前值；发布后立即适用于既有数据与未来数据。',
   'deployment.retention.publish.submit': '发布保留策略',
@@ -3405,14 +3412,33 @@ export const catalog = {
 
 export type MessageKey = keyof typeof catalog;
 
-/** Text lookup; the catalog is the only source of user-facing copy. */
+/**
+ * Vite replaces this at build time. A direct Node or test load has no build
+ * flag, and counts as development so a missing entry is never silent there.
+ */
+const DEVELOPMENT = typeof __DEV__ === 'boolean' ? __DEV__ : true;
+
+/**
+ * Text lookup; the catalog is the only source of user-facing copy. A key with no
+ * entry is a programming error, and fails loudly rather than rendering an ASCII
+ * identifier in place of Chinese copy.
+ */
 export function t(key: MessageKey): string {
-  return catalog[key];
+  const text = catalog[key];
+  if (text === undefined) {
+    throw new Error(`missing Simplified Chinese catalog entry: ${String(key)}`);
+  }
+  return text;
 }
 
-/** Looks up an optional value key, so unknown server codes never leak raw English. */
+/**
+ * Looks up an optional value key, so unknown server codes never leak raw English.
+ * In development a missing entry renders a visible marker: a newly governed code
+ * must be given copy rather than silently falling through to its ASCII value.
+ */
 export function optional(key: string): string | undefined {
-  return Object.hasOwn(catalog, key) ? catalog[key as MessageKey] : undefined;
+  if (Object.hasOwn(catalog, key)) return catalog[key as MessageKey];
+  return DEVELOPMENT ? `〔缺少文案：${key}〕` : undefined;
 }
 
 /**
@@ -3420,7 +3446,7 @@ export function optional(key: string): string | undefined {
  * the sentence; the caller supplies only the governed identifiers it names.
  */
 export function message(key: MessageKey, values: Record<string, string>): string {
-  return catalog[key].replace(
+  return t(key).replace(
     /\{([a-z_]+)\}/gu,
     (placeholder: string, name: string) => values[name] ?? placeholder,
   );
