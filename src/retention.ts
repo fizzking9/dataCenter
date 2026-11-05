@@ -837,6 +837,8 @@ interface PurgeCandidate {
   /** The Dataset Release is its Dataset's latest, or a current Product Release binds it. */
   current: boolean;
   terminal: boolean;
+  /** The User who owned the record, where only its owner may learn it was purged. */
+  owner_user_id?: string | null;
 }
 
 function reportCandidates(state: PlatformState, reports: ReportRecord[]): PurgeCandidate[] {
@@ -858,6 +860,7 @@ function reportCandidates(state: PlatformState, reports: ReportRecord[]): PurgeC
       target_id: report.report_id,
       current: false,
       terminal: true,
+      owner_user_id: null,
     };
   });
 }
@@ -881,6 +884,7 @@ function exportCandidates(state: PlatformState, exports: ExportRecord[]): PurgeC
       target_id: record.export_id,
       current: false,
       terminal: true,
+      owner_user_id: record.actor_user_id,
     };
   });
 }
@@ -905,6 +909,7 @@ function datasetReleaseCandidates(
     target_id: null,
     current: latest !== undefined && latest.release === release.release,
     terminal: true,
+    owner_user_id: null,
   };
 }
 
@@ -927,6 +932,7 @@ function proposalCandidates(proposals: ArtifactProposalRecord[]): PurgeCandidate
       target_id: proposal.proposal_id,
       current: false,
       terminal: true,
+      owner_user_id: null,
     }));
 }
 
@@ -1162,6 +1168,7 @@ function judgeCandidate(
     reason: 'within_retention',
     held_by: [],
     dependencies: [],
+    ...(candidate.owner_user_id === null || candidate.owner_user_id === undefined ? {} : { owner_user_id: candidate.owner_user_id }),
   };
   entry.held_by = holds.filter((hold) => holdCovers(hold, candidate)).map((hold) => hold.hold_id);
   if (entry.held_by.length > 0) {
@@ -1534,6 +1541,9 @@ function executeJob(session: PlatformSession, job: PurgeJobRecord, at: Date): vo
         record_kind: entry.record_kind,
         record_id: entry.record_id,
         data_class: entry.data_class,
+        ...(entry.owner_user_id === undefined || entry.owner_user_id === null
+          ? {}
+          : { owner_user_id: entry.owner_user_id }),
       })),
     };
     session.state.purge_ledger.push(ledger);

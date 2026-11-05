@@ -15,7 +15,10 @@ import {
 } from '../support/model-endpoint.js';
 import {
   command,
+  createUser,
+  grantRole,
   jsonFile,
+  sessionFor,
   textFile,
   type PlatformFixture,
   type WorkspaceFixture,
@@ -818,4 +821,46 @@ test('Reports and exports follow their settled retention clocks while current re
     { token: s.workspaceAdministratorToken },
   ));
   assertChineseCopy(hold['summary']);
+});
+
+test('a purged export discloses its retention only to the Consumer who produced it', () => {
+  const s = surface();
+  const exported = ok(command(
+    s.fixture,
+    ['export', 'create', '--product', s.dataProductId, '--request', jsonFile(s.fixture, 'retention-export-owner', {
+      kind: 'aggregate',
+      metrics: ['handled_total'],
+      include_totals: true,
+      limit: 100,
+    })],
+    { token: s.consumerToken },
+  ));
+  const exportId = String(exported['export_id']);
+  editState(s.fixture, (state) => {
+    for (const record of state.exports) {
+      if (record.export_id === exportId) {
+        record.created_at = daysAgo(8);
+        record.expires_at = daysAgo(7);
+      }
+    }
+  });
+  tick(s, new Date());
+  assert.equal(stateOf(s.fixture).exports.length, 0);
+
+  // The producer still learns the exact retention outcome.
+  const owner = command(s.fixture, ['export', 'download', '--export', exportId], { token: s.consumerToken });
+  assert.equal(owner.status, 2, owner.stdout);
+  assert.equal(owner.error['code'], 'RETENTION_EXPIRED');
+
+  // Another Consumer in the same Workspace, and an unknown id, learn nothing:
+  // unauthorized and nonexistent stay indistinguishable.
+  createUser(s.fixture, s.deploymentAdministratorToken, 'colleague@example.invalid', 'colleague-consumer');
+  grantRole(s.fixture, s.workspaceAdministratorToken, s.workspaceId, 'colleague@example.invalid', 'Consumer');
+  const colleagueToken = sessionFor(s.fixture, 'colleague@example.invalid', 'colleague-consumer');
+  const colleague = command(s.fixture, ['export', 'download', '--export', exportId], { token: colleagueToken });
+  assert.equal(colleague.status, 2, colleague.stdout);
+  assert.equal(colleague.error['code'], 'EXPORT_NOT_AVAILABLE');
+  const unknown = command(s.fixture, ['export', 'download', '--export', 'does-not-exist'], { token: s.consumerToken });
+  assert.equal(unknown.status, 2, unknown.stdout);
+  assert.equal(unknown.error['code'], 'EXPORT_NOT_AVAILABLE');
 });
