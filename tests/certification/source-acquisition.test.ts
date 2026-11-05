@@ -667,7 +667,7 @@ test('Source configuration and acquisition stay Workspace-scoped, default-deny, 
     // A Deployment Administrator holds no implicit Workspace content.
     const deploymentPage = await open(browser, consoleServer.url, '/app');
     await signIn(deploymentPage, world.deploymentAdministrator);
-    await deploymentPage.getByRole('heading', { name: '工作区' }).waitFor();
+    await deploymentPage.getByRole('heading', { name: '工作区', exact: true }).waitFor();
     await deploymentPage.goto(`${consoleServer.url}/app/w/${world.operations}/sources`);
     await deploymentPage.getByRole('heading', { name: '工作区不可用' }).waitFor();
     const deploymentCookie = await cookieHeader(deploymentPage.context());
