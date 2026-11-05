@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createBundleFixture } from './bundle.js';
+import { createBundleFixture, type BundleFixture } from './bundle.js';
 import { fakeDockerEnvironment } from './fake-docker.js';
 import { issueLicense } from './license.js';
 import { runOperator, type OperatorResult } from './operator.js';
@@ -20,6 +20,8 @@ export interface PlatformFixture {
   masterKey: string;
   docker: NodeJS.ProcessEnv;
   scratch: string;
+  /** The installed Release Bundle, so a test can sign a chained upgrade bundle. */
+  bundle: BundleFixture;
   administrator: AdministratorCredentials;
 }
 
@@ -46,7 +48,9 @@ export function totpSecretFor(fixture: PlatformFixture, username: string): strin
  * Installs, licenses, and initializes a Deployment through the Operator
  * lifecycle commands, leaving one bootstrapped Deployment Administrator.
  */
-export function initializePlatform(options: { administratorPassword?: string } = {}): PlatformFixture {
+export function initializePlatform(
+  options: { administratorPassword?: string; highestEligibleRelease?: string } = {},
+): PlatformFixture {
   const scratch = mkdtempSync(join(tmpdir(), 'dc-platform-'));
   const bundle = createBundleFixture(scratch);
   const root = join(scratch, 'deployment');
@@ -69,7 +73,9 @@ export function initializePlatform(options: { administratorPassword?: string } =
     release: string;
   };
   const licensePath = join(scratch, 'deployment-license.json');
-  issueLicense(licensePath, bundle, request);
+  issueLicense(licensePath, bundle, request, {
+    ...(options.highestEligibleRelease === undefined ? {} : { highestEligibleRelease: options.highestEligibleRelease }),
+  });
   const imported = runOperator(['import-license', '--root', root, '--license', licensePath, '--operator', 'certification@example.invalid']);
   if (imported.status !== 0) {
     throw new Error(`import-license failed: ${imported.stderr}`);
@@ -89,6 +95,7 @@ export function initializePlatform(options: { administratorPassword?: string } =
     masterKey,
     docker,
     scratch,
+    bundle,
     administrator: {
       username: String(initialized.output.admin_username ?? 'bootstrap@example.invalid'),
       password,
@@ -229,8 +236,10 @@ export interface WorkspaceFixture {
  * One Workspace holding a Workspace Administrator and a Consumer, which is the
  * shape every governed Workspace Artifact lifecycle needs.
  */
-export function workspaceFixture(): WorkspaceFixture {
-  const fixture = initializePlatform();
+export function workspaceFixture(
+  options: { highestEligibleRelease?: string } = {},
+): WorkspaceFixture {
+  const fixture = initializePlatform(options);
   const deploymentAdministratorToken = sessionFor(
     fixture,
     fixture.administrator.username,

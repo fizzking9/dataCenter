@@ -24,7 +24,13 @@ export function issueLicense(
   path: string,
   bundle: BundleFixture,
   request: LicenseRequest,
-  options: { deploymentId?: string; notBefore?: string; expiresAt?: string } = {},
+  options: {
+    deploymentId?: string;
+    notBefore?: string;
+    expiresAt?: string;
+    /** The highest release the entitlement allows; upgrades to it stay eligible. */
+    highestEligibleRelease?: string;
+  } = {},
 ): string {
   const now = Date.now();
   const payload = {
@@ -34,7 +40,7 @@ export function issueLicense(
     deployment_id: options.deploymentId ?? request.deployment_id,
     not_before: options.notBefore ?? new Date(now - 60_000).toISOString(),
     expires_at: options.expiresAt ?? new Date(now + 30 * 24 * 60 * 60 * 1000).toISOString(),
-    highest_eligible_release: request.release,
+    highest_eligible_release: options.highestEligibleRelease ?? request.release,
     issued_at: new Date(now).toISOString(),
   };
   const signature = sign(null, Buffer.from(canonical(payload)), bundle.licensePrivateKey).toString('base64');
