@@ -418,7 +418,10 @@ export function publishGrant(options: {
   /** The member whose reads to narrow, or the Agent Identity instead. */
   username?: string;
   agentIdentityId?: string;
-  requestPath: string;
+  /** The Grant request as a file, as the lifecycle CLI states it. */
+  requestPath?: string;
+  /** The same request a browser form already parsed on the server. */
+  request?: unknown;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'data_product_grant_publication', scope: 'workspace' };
@@ -453,12 +456,14 @@ export function publishGrant(options: {
       'Create the Agent Identity for this Workspace before narrowing what it may read.',
     );
   }
-  const request = readJsonDocument(
-    options.requestPath,
-    fail,
-    'GRANT_REQUEST_INVALID',
-    'The Grant request must contain valid JSON.',
-  );
+  const request = options.request !== undefined
+    ? options.request
+    : readJsonDocument(
+      options.requestPath ?? '',
+      fail,
+      'GRANT_REQUEST_INVALID',
+      'The Grant request must contain valid JSON.',
+    );
   if (!isRecord(request)) {
     fail('GRANT_REQUEST_INVALID', 'A Grant request must be a JSON object.');
   }

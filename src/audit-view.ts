@@ -6,7 +6,7 @@ import {
   requireWorkspaceAdministrator,
   type ActionContext,
 } from './authz.js';
-import { isDeploymentAdministrator } from './platform.js';
+import { findUserById, isDeploymentAdministrator } from './platform.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
 function administeredWorkspaces(session: PlatformSession, userId: string): Set<string> {
@@ -72,11 +72,26 @@ const DEPLOYMENT_ACTS: ReadonlySet<string> = new Set(['workspace_creation']);
 const WORKSPACE_AUDIT_LIMIT = 200;
 
 /**
+ * The delegated User an Audit Event attributes beside its Actor. Only this one
+ * attribution field is projected; tokens, client secrets, and every other
+ * payload element stay on the server.
+ */
+function delegatedUsername(session: PlatformSession, event: AuditEvent): string | null {
+  const detail = event.detail;
+  if (detail === undefined) return null;
+  if (typeof detail['delegated_username'] === 'string') return detail['delegated_username'];
+  if (typeof detail['delegated_user_id'] === 'string') {
+    return findUserById(session.state, detail['delegated_user_id'])?.username ?? null;
+  }
+  return null;
+}
+
+/**
  * Reads one administered Workspace's Audit Events, newest first, projected to
- * attribution only: who acted, on what, in which scope, with which outcome.
- * Another Workspace's events, deployment-scope acts, and the stored detail
- * payloads are absent rather than redacted, so no unauthorized configuration
- * and no secret can reach this view.
+ * attribution only: who acted, which delegated User acted with them, on what, in
+ * which scope, with which outcome. Another Workspace's events, deployment-scope
+ * acts, and the remaining detail payloads are absent rather than redacted, so no
+ * unauthorized configuration and no secret can reach this view.
  */
 export function showWorkspaceAudit(options: {
   root: string;
@@ -105,6 +120,7 @@ export function showWorkspaceAudit(options: {
       event_id: event.event_id,
       occurred_at: event.occurred_at,
       actor: event.actor,
+      delegated_user: delegatedUsername(session, event),
       action: event.action,
       scope: event.scope,
       target: event.target ?? null,

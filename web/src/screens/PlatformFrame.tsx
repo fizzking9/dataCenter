@@ -45,7 +45,7 @@ function hrefOf(key: string, workspaceId: string | null): string | undefined {
   if (workspaceId === null || !key.startsWith('workspace.')) return undefined;
   const view = key.slice('workspace.'.length);
   if (view !== 'overview' && view !== 'sources' && view !== 'scrapers' && view !== 'products' && view !== 'context'
-    && view !== 'members' && view !== 'audit' && view !== 'models' && view !== 'proposals') return undefined;
+    && view !== 'members' && view !== 'audit' && view !== 'models' && view !== 'proposals' && view !== 'agents') return undefined;
   return `/app/w/${encodeURIComponent(workspaceId)}/${view}`;
 }
 

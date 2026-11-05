@@ -12,6 +12,7 @@ import { Button } from '../ui/Button.js';
 import { Confirmation } from '../ui/Confirm.js';
 import { Field } from '../ui/Field.js';
 import { Alert, DefinitionList, Panel } from '../ui/Panel.js';
+import { AgentIdentities } from './PlatformAgentScreen.js';
 
 export interface DeploymentAdminProps {
   onSessionLost: () => void;
@@ -304,6 +305,7 @@ export function DeploymentUsers({ onSessionLost }: DeploymentAdminProps) {
 
       <OwnershipTransfer onSessionLost={onSessionLost} />
       <ServiceIdentities onSessionLost={onSessionLost} />
+      <AgentIdentities onSessionLost={onSessionLost} />
     </Panel>
   );
 }

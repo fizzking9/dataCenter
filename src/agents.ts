@@ -281,7 +281,10 @@ export function registerOAuthClient(options: {
   masterKey: string;
   token: string;
   agentIdentityId: string;
-  metadataPath: string;
+  /** The Client ID Metadata Document as a file, as the lifecycle CLI states it. */
+  metadataPath?: string;
+  /** The same document as a browser form already read it. */
+  metadata?: unknown;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'oauth_client_registration', scope: 'deployment', target: options.agentIdentityId };
@@ -292,12 +295,14 @@ export function registerOAuthClient(options: {
     reject(session, actorLabel(actor.user), context, 'AGENT_NOT_FOUND', 'A client is registered for an active Agent Identity.');
   }
   const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), context, code, message, nextStep);
-  const metadata = readJsonDocument(
-    options.metadataPath,
-    fail,
-    'OAUTH_CLIENT_METADATA_INVALID',
-    'The Client ID Metadata Document must contain valid JSON.',
-  );
+  const metadata = options.metadata !== undefined
+    ? options.metadata
+    : readJsonDocument(
+      options.metadataPath ?? '',
+      fail,
+      'OAUTH_CLIENT_METADATA_INVALID',
+      'The Client ID Metadata Document must contain valid JSON.',
+    );
   if (!isRecord(metadata)) {
     fail('OAUTH_CLIENT_METADATA_INVALID', 'A Client ID Metadata Document must be a JSON object.');
   }

@@ -23,6 +23,7 @@ export type NavigationKey =
   | 'workspace.products'
   | 'workspace.context'
   | 'workspace.members'
+  | 'workspace.agents'
   | 'workspace.audit'
   | 'workspace.models'
   | 'workspace.proposals';
@@ -40,6 +41,7 @@ const WORKSPACE_NAVIGATION: Record<WorkspaceRole, NavigationKey[]> = {
     'workspace.products',
     'workspace.context',
     'workspace.members',
+    'workspace.agents',
     'workspace.audit',
     'workspace.models',
     'workspace.proposals',

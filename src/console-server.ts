@@ -13,6 +13,16 @@ import {
   tickSchedules,
   workAcquisition,
 } from './acquisition-run.js';
+import { listAgentIdentities, showWorkspaceAgentAccess } from './agent-admin.js';
+import {
+  createAgentDelegation,
+  createAgentIdentity,
+  registerOAuthClient,
+  revokeAgentDelegation,
+  revokeAgentIdentity,
+  revokeOAuthClient,
+} from './agents.js';
+import { publishGrant, revokeGrant } from './grants.js';
 import { showWorkspaceAudit } from './audit-view.js';
 import { login, logout } from './auth.js';
 import {
@@ -480,6 +490,74 @@ async function handleApi(
     return;
   }
 
+  // Agent Identities are Deployment-scoped principals, so only a Deployment
+  // Administrator creates, lists, or revokes them. The governed modules state
+  // every scope, Workspace binding, and capability; the browser only renders it.
+  if (pathname === '/api/deployment/agent-identities' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listAgentIdentities({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/agent-identities' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, createAgentIdentity({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      name: text(body, 'name'),
+      workspaceIds: identifiers(body, 'workspace_ids'),
+      scopes: identifiers(body, 'scopes'),
+    }));
+    return;
+  }
+
+  const agentRevokeRoute = /^\/api\/deployment\/agent-identities\/([^/]+)\/revoke$/u.exec(pathname);
+  if (agentRevokeRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, revokeAgentIdentity({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      agentIdentityId: decodeURIComponent(agentRevokeRoute[1]!),
+    }));
+    return;
+  }
+
+  const agentClientRoute = /^\/api\/deployment\/agent-identities\/([^/]+)\/clients$/u.exec(pathname);
+  if (agentClientRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    // The browser states the same Client ID Metadata Document a file would
+    // carry; the governed module validates every field and protects the claims
+    // the Deployment controls.
+    sendJson(response, 201, registerOAuthClient({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      agentIdentityId: decodeURIComponent(agentClientRoute[1]!),
+      metadata: {
+        client_id: text(body, 'client_id'),
+        client_name: text(body, 'client_name'),
+        redirect_uris: identifiers(body, 'redirect_uris'),
+      },
+    }));
+    return;
+  }
+
+  const clientRevokeRoute = /^\/api\/deployment\/oauth-clients\/([^/]+)\/revoke$/u.exec(pathname);
+  if (clientRevokeRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, revokeOAuthClient({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      clientId: decodeURIComponent(clientRevokeRoute[1]!),
+    }));
+    return;
+  }
+
   if (pathname === '/api/workspace/data-products' && method === 'GET') {
     const token = userSession(request);
     sendJson(response, 200, listDataProducts({
@@ -487,6 +565,80 @@ async function handleApi(
       masterKey: options.masterKey,
       token,
       workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  // Agent access inside one Workspace. The Workspace Administrator sees only
+  // this Workspace's Grants and consents, publishes narrowings through the same
+  // governed module the CLI uses, and records only their own delegated consent.
+  if (pathname === '/api/workspace/agents' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, showWorkspaceAgentAccess({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/agent-grants' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const columnText = text(body, 'columns');
+    const columns = columnText
+      .split(/[,，\n]/u)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry !== '');
+    const rowFilters = jsonDocument(body, 'row_filters');
+    sendJson(response, 201, publishGrant({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      dataProductId: text(body, 'data_product_id'),
+      agentIdentityId: text(body, 'agent_identity_id'),
+      request: {
+        ...(columns.length === 0 ? {} : { columns }),
+        ...(rowFilters === undefined ? {} : { row_filters: rowFilters }),
+      },
+    }));
+    return;
+  }
+
+  const agentGrantRevokeRoute = /^\/api\/workspace\/agent-grants\/([^/]+)\/revoke$/u.exec(pathname);
+  if (agentGrantRevokeRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, revokeGrant({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      grantId: decodeURIComponent(agentGrantRevokeRoute[1]!),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/agent-delegations' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, createAgentDelegation({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      agentIdentityId: text(body, 'agent_identity_id'),
+      workspaceId: workspaceFromBody(body),
+    }));
+    return;
+  }
+
+  const agentDelegationRevokeRoute = /^\/api\/workspace\/agent-delegations\/([^/]+)\/revoke$/u.exec(pathname);
+  if (agentDelegationRevokeRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, revokeAgentDelegation({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      delegationId: decodeURIComponent(agentDelegationRevokeRoute[1]!),
     }));
     return;
   }
@@ -1477,6 +1629,23 @@ const STATUS_BY_CODE: Record<string, number> = {
   SERVICE_IDENTITY_NAME_CONFLICT: 409,
   SERVICE_IDENTITY_WORKSPACE_INVALID: 400,
   SERVICE_IDENTITY_NOT_FOUND: 404,
+  // An Agent Identity is an external Consumer principal with its own scope,
+  // Workspace-binding, client, and consent refusals.
+  AGENT_NAME_INVALID: 400,
+  AGENT_ALREADY_EXISTS: 409,
+  AGENT_WORKSPACE_INVALID: 400,
+  AGENT_SCOPE_INVALID: 400,
+  AGENT_NOT_FOUND: 404,
+  OAUTH_CLIENT_METADATA_INVALID: 400,
+  OAUTH_CLIENT_METADATA_PROTECTED: 400,
+  OAUTH_CLIENT_ALREADY_REGISTERED: 409,
+  OAUTH_CLIENT_NOT_FOUND: 404,
+  DELEGATION_NOT_AVAILABLE: 404,
+  GRANT_GRANTEE_NOT_FOUND: 404,
+  GRANT_REQUEST_INVALID: 400,
+  GRANT_COLUMNS_INVALID: 400,
+  GRANT_ROW_FILTER_INVALID: 400,
+  GRANT_NOT_AVAILABLE: 404,
   CONTEXT_NOT_PUBLISHED: 404,
   CONTEXT_SHADOWS_COMMON: 409,
   CROSS_WORKSPACE_REFERENCE: 409,
