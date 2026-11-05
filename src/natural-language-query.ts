@@ -15,7 +15,7 @@ import {
 import { isRecord } from './documents.js';
 import { OperatorError } from './errors.js';
 import { memberReader, type GrantReader, type GrantScope } from './grants.js';
-import { pinnedFor } from './model-profile.js';
+import { pinnedForBinding } from './model-profile.js';
 import {
   generateClarification,
   generateForPurpose,
@@ -60,7 +60,7 @@ interface ResolvedModel {
   binding: WorkspaceModelBindingRecord;
   profile: ModelProfileArtifact;
   version: ModelProfileVersion;
-  pin: ReturnType<typeof pinnedFor>;
+  pin: ReturnType<typeof pinnedForBinding>;
   narration: boolean;
   clarification: boolean;
 }
@@ -172,7 +172,7 @@ function resolveModel(
     binding,
     profile,
     version,
-    pin: pinnedFor(session, profile, version),
+    pin: pinnedForBinding(session, profile, version, binding),
     narration: binding.purposes.includes('grounded_narration')
       && version.purposes.includes('grounded_narration')
       && version.prompts.some((prompt) => prompt.id === 'grounded_narration'),

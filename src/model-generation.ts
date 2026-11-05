@@ -15,7 +15,6 @@ import { REFUSED_KEYS } from './product-query-document.js';
 /** The purposes a Model Profile Version may declare, in evaluation order. */
 export const MODEL_PURPOSES: ModelPurpose[] = [
   'integration_proposal',
-  'integration_proposal',
   'data_product_proposal',
   'grounded_narration',
   'clarification',
@@ -30,6 +29,15 @@ export const MODEL_DATA_CATEGORIES: ModelDataCategory[] = [
   'sample_records',
   'product_contract',
 ];
+
+/** The data categories a purpose's pinned input actually carries. */
+export const PURPOSE_CATEGORIES: Record<ModelPurpose, ModelDataCategory[]> = {
+  integration_proposal: ['dataset_schema', 'cleaning_rules', 'source_mapping'],
+  data_product_proposal: ['dataset_schema'],
+  grounded_narration: ['sample_records'],
+  clarification: [],
+  query_plan: ['product_contract'],
+};
 
 /** The declared structured-output shape each purpose has to answer with. */
 export const STRUCTURED_OUTPUT: Record<ModelPurpose, string> = {
@@ -101,6 +109,17 @@ export async function generateForPurpose(
   input: unknown,
   fail: AdapterFailure,
 ): Promise<GenerationResult> {
+  // A pinned permission set is the ceiling for every purpose, on every path: a
+  // generation whose evidence is outside it is refused before the endpoint sees it.
+  const unpermitted = PURPOSE_CATEGORIES[purpose].filter(
+    (category) => !profile.data_categories.includes(category),
+  );
+  if (unpermitted.length > 0) {
+    fail(
+      'MODEL_DATA_CATEGORY_NOT_PERMITTED',
+      `The pinned Model Profile permissions do not cover the data this ${purpose} generation carries: ${unpermitted.join(', ')}.`,
+    );
+  }
   const request: GenerationRequest = {
     purpose,
     prompt: promptOf(profile, purpose, fail),

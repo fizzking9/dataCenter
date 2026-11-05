@@ -704,3 +704,74 @@ test('the browser covers successful activation, evaluation failure, revocation, 
     await endpoint.close();
   }
 });
+
+/** The Deployment publishes its governed vocabulary once, so no surface restates it. */
+test('the Model Profile list publishes every governed purpose, data category, and adapter exactly once', async () => {
+  const fixture = initializePlatform();
+  const token = sessionFor(fixture, fixture.administrator.username, fixture.administrator.password);
+  const consoleServer = await startConsole(fixture);
+  try {
+    const listed = await callApi(consoleServer.url, '/api/deployment/model-profiles', {
+      cookie: userCookie(token),
+    });
+    assert.equal(listed.status, 200, listed.text);
+    const vocabulary = asRecord(listed.body['vocabulary']);
+    assert.deepEqual(vocabulary['purposes'], [
+      'integration_proposal',
+      'data_product_proposal',
+      'grounded_narration',
+      'clarification',
+      'query_plan',
+    ]);
+    assert.deepEqual(vocabulary['data_categories'], [
+      'dataset_schema',
+      'cleaning_rules',
+      'source_mapping',
+      'sample_records',
+      'product_contract',
+    ]);
+    assert.deepEqual(vocabulary['adapters'], ['hosted', 'generic_local']);
+  } finally {
+    await consoleServer.stop();
+  }
+});
+
+/** The browser renders the server's vocabulary, so a governed value cannot go missing. */
+test('the Model Profile form renders every purpose and data category the server publishes', async () => {
+  const current = world();
+  const consoleServer = await startConsole(current.fixture);
+  let browser: Browser | undefined;
+  try {
+    browser = await chromium.launch({ channel: 'msedge', headless: true });
+    const page = await browser.newPage();
+    page.setDefaultTimeout(20_000);
+    await page.goto(`${consoleServer.url}/app`);
+    await signIn(page, current.deploymentAdministrator);
+    await page.getByRole('heading', { name: '工作区' }).waitFor();
+    await page.getByRole('link', { name: '模型档案' }).click();
+    await page.getByRole('heading', { name: '模型档案' }).waitFor();
+
+    for (const purpose of [
+      'integration_proposal',
+      'data_product_proposal',
+      'grounded_narration',
+      'clarification',
+      'query_plan',
+    ]) {
+      assert.equal(await page.getByLabel(purpose, { exact: true }).count(), 1, purpose);
+    }
+    for (const category of [
+      'dataset_schema',
+      'cleaning_rules',
+      'source_mapping',
+      'sample_records',
+      'product_contract',
+    ]) {
+      assert.equal(await page.getByLabel(category, { exact: true }).count(), 1, category);
+    }
+    assert.equal(await page.getByLabel('适配方式').locator('option').count(), 2);
+  } finally {
+    await browser?.close();
+    await consoleServer.stop();
+  }
+});

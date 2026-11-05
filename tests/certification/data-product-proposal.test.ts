@@ -207,6 +207,31 @@ async function bindProposal(s: Surface, profile: Profile): Promise<string> {
   return String(bound.output['binding_id']);
 }
 
+/** Binds one exact Version to the purposes and data categories a test states. */
+async function bindNarrow(
+  s: Surface,
+  profile: Profile,
+  purposes: string[],
+  dataCategories: string[],
+): Promise<string> {
+  const bound = await commandAsync(
+    s.fixture,
+    [
+      'binding', 'publish',
+      '--workspace', s.workspaceId,
+      '--profile', profile.modelProfileId,
+      '--config', jsonFile(s.fixture, `binding-${purposes.join('-')}`, {
+        model_profile_version: profile.version,
+        purposes,
+        data_categories: dataCategories,
+      }),
+    ],
+    { token: s.workspaceAdministratorToken },
+  );
+  assert.equal(bound.status, 0, bound.stderr);
+  return String(bound.output['binding_id']);
+}
+
 let sequence = 0;
 
 function generate(s: Surface, bindingId: string, document: Config): Promise<CommandResult> {
@@ -810,5 +835,36 @@ test('every Data Product Proposal string this ticket introduces is Simplified Ch
     const entry = introduced.find((candidate) => candidate.key === key);
     assert.ok(entry !== undefined, `missing copy for ${key}`);
     assert.ok(cjk(entry.value) >= 2, `${key} is not Simplified Chinese: ${entry.value}`);
+  }
+});
+
+/** A Binding's permitted data categories narrow every generation path, not only publication. */
+test('a Binding that permits fewer data categories refuses a generation whose evidence leaves its set', async () => {
+  const endpoint = await startMockModelEndpoint();
+  try {
+    const current = surface();
+    const profile = await activatedProfile(current, endpoint, 'hosted', '窄范围档案');
+
+    // This Binding permits only the Proposal purpose and the Schema it sends. The
+    // Version still declares grounded narration, whose evidence is sample records.
+    const narrowBindingId = await bindNarrow(current, profile, ['data_product_proposal'], ['dataset_schema']);
+    const generated = await generate(current, narrowBindingId, { name: '设备处理量台账', requirement: REQUIREMENT });
+    assert.equal(generated.status, 0, generated.stderr);
+    const proposalId = String(generated.output['proposal_id']);
+    assert.equal(validateProposal(current, proposalId).status, 0);
+
+    // The preview's narrative would send sample records the Binding forbids, so it
+    // is refused rather than quietly sent or silently skipped.
+    const refused = await previewProposal(current, proposalId);
+    assert.equal(refused.status, 2, refused.stdout);
+    assert.equal(refused.error['code'], 'MODEL_DATA_CATEGORY_NOT_PERMITTED');
+    assert.match(String(refused.error['message']), /sample_records/u);
+
+    // Permitting the narration categories restores the whole lifecycle unchanged.
+    const permittedBindingId = await bindProposal(current, profile);
+    const permitted = await prepared(current, permittedBindingId);
+    assert.equal(permitted.generated.status, 0);
+  } finally {
+    await endpoint.close();
   }
 });

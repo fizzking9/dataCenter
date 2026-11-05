@@ -1,4 +1,4 @@
-import type { ModelAdapterKind, ModelPurpose } from './catalog.js';
+import type { ModelAdapterKind, ModelDataCategory, ModelPurpose } from './catalog.js';
 
 /**
  * The one declarative generation contract this release speaks over HTTP.
@@ -26,6 +26,11 @@ export interface PinnedModelProfile {
   tools: string[];
   /** The exact prompts this Version pinned, one per declared purpose. */
   prompts: ModelPromptPin[];
+  /**
+   * The data categories this generation may send: the Version's declared set,
+   * narrowed to a Binding's permitted set whenever a Binding resolved the pin.
+   */
+  data_categories: ModelDataCategory[];
 }
 
 /** One prompt an exact Model Profile Version pins for one purpose. */

@@ -41,7 +41,7 @@ import {
   type IntegrationRules,
 } from './datasets.js';
 import { generateIntegrationCandidate } from './model-generation.js';
-import { pinnedFor } from './model-profile.js';
+import { pinnedForBinding } from './model-profile.js';
 import { openPlatform, type PlatformSession } from './session.js';
 import { requireAdministeredSource } from './sources.js';
 
@@ -359,10 +359,11 @@ export async function generateProposal(options: {
 
   const bound = requireBinding(session, actorName, scoped, options.bindingId, source.workspace_id);
   const dictionary = readDictionary(session, actorName, scoped, options.evidencePath);
-  const pinned = pinnedFor(
+  const pinned = pinnedForBinding(
     session,
     findModelProfile(session.state.model_profiles, bound.pin.model_profile_id)!,
     bound.version,
+    bound.binding,
   );
   const candidate = await generateIntegrationCandidate(
     pinned,
