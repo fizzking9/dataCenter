@@ -5,11 +5,12 @@ import { PlatformDeploymentScreen } from './screens/PlatformDeploymentScreen.js'
 import { PlatformFrame } from './screens/PlatformFrame.js';
 import { PlatformPicker } from './screens/PlatformPicker.js';
 import { PlatformSignInScreen } from './screens/PlatformSignInScreen.js';
+import { WorkspaceAudit, WorkspaceMembers } from './screens/PlatformWorkspaceAdminScreen.js';
 import { WorkspaceContext, WorkspaceOverview, WorkspaceProducts } from './screens/PlatformWorkspaceScreen.js';
 import { Alert, Panel } from './ui/Panel.js';
 import { Shell } from './ui/Shell.js';
 
-const VIEWS = ['overview', 'products', 'context'] as const;
+const VIEWS = ['overview', 'products', 'context', 'members', 'audit'] as const;
 type View = (typeof VIEWS)[number];
 
 interface Route {
@@ -23,7 +24,15 @@ const HOME: Route = { workspaceId: null, view: 'overview', deployment: false };
 const DEPLOYMENT: Route = { workspaceId: null, view: 'overview', deployment: true };
 
 function viewOf(value: string | undefined): View {
-  return value === 'products' || value === 'context' ? value : 'overview';
+  switch (value) {
+    case 'products':
+    case 'context':
+    case 'members':
+    case 'audit':
+      return value;
+    default:
+      return 'overview';
+  }
 }
 
 function decode(value: string): string {
@@ -275,6 +284,10 @@ export function PlatformApp() {
     <WorkspaceProducts workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'context' ? (
     <WorkspaceContext workspaceId={activeId} onSessionLost={sessionLost} />
+  ) : route.view === 'members' ? (
+    <WorkspaceMembers workspaceId={activeId} onSessionLost={sessionLost} />
+  ) : route.view === 'audit' ? (
+    <WorkspaceAudit workspaceId={activeId} onSessionLost={sessionLost} />
   ) : (
     <WorkspaceOverview
       workspaceName={activeName}

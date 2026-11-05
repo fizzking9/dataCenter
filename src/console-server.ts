@@ -3,11 +3,12 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { showWorkspaceAudit } from './audit-view.js';
 import { login, logout } from './auth.js';
-import { showContext } from './context.js';
+import { publishWorkspaceContext, showContext, showContextHistory } from './context.js';
 import { browserIdentity, browserNavigation } from './navigation.js';
 import { listDataProducts } from './products.js';
-import { listWorkspaces } from './workspaces.js';
+import { grantMembership, listMemberships, listWorkspaces, revokeMembership } from './workspaces.js';
 import {
   exchangeOperatorEnrollment,
   resolveOperatorSession,
@@ -343,6 +344,79 @@ async function handleApi(
     return;
   }
 
+  if (pathname === '/api/workspace/memberships' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listMemberships({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/memberships' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 200, grantMembership({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: workspaceFromBody(body),
+      username: text(body, 'username'),
+      role: text(body, 'role'),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/memberships/revoke' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 200, revokeMembership({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: workspaceFromBody(body),
+      username: text(body, 'username'),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/context/history' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, showContextHistory({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/context/publish' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 200, publishWorkspaceContext({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: workspaceFromBody(body),
+      entries: body['entries'],
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/audit' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, showWorkspaceAudit({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
   throw new HttpError(404, 'API_NOT_FOUND', 'No such application API.');
 }
 
@@ -383,6 +457,15 @@ function userSession(request: IncomingMessage): string {
 function activeWorkspace(request: IncomingMessage): string {
   const workspaceId = searchParam(request, 'workspace_id');
   if (workspaceId === null) {
+    throw new HttpError(400, 'WORKSPACE_REQUIRED', 'The request must name one Workspace.');
+  }
+  return workspaceId;
+}
+
+/** A write names its Workspace in the body, and an unauthorized one fails closed. */
+function workspaceFromBody(body: Record<string, unknown>): string {
+  const workspaceId = text(body, 'workspace_id');
+  if (workspaceId === '') {
     throw new HttpError(400, 'WORKSPACE_REQUIRED', 'The request must name one Workspace.');
   }
   return workspaceId;
@@ -520,7 +603,17 @@ const STATUS_BY_CODE: Record<string, number> = {
   SESSION_INVALID: 401,
   AUTHORIZATION_DENIED: 403,
   WORKSPACE_ACCESS_DENIED: 403,
+  ROLE_INVALID: 400,
+  MEMBERSHIP_NOT_FOUND: 404,
+  LAST_ADMINISTRATOR_PROTECTED: 409,
   CONTEXT_NOT_PUBLISHED: 404,
+  CONTEXT_SHADOWS_COMMON: 409,
+  CROSS_WORKSPACE_REFERENCE: 409,
+  CONTEXT_REFERENCE_NOT_QUALIFIED: 400,
+  CONTEXT_REFERENCE_UNRESOLVED: 409,
+  CONTEXT_ENTRY_INVALID: 400,
+  CONTEXT_ENTRY_DUPLICATE: 400,
+  CONTEXT_ENTRIES_UNREADABLE: 400,
   // A Data Product Query failure is a governed answer, not a server fault.
   DATA_PRODUCT_QUERY_INVALID: 400,
   DATA_PRODUCT_QUERY_CURSOR_INVALID: 400,

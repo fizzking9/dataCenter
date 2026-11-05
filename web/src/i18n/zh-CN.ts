@@ -311,6 +311,79 @@ export const catalog = {
 
   'clarification.question': '请确认要统计的时间范围是哪一段？',
   'clarification.pending': '模型需要补充业务范围后才能继续。',
+
+  // Workspace administration: the membership roster, the Business Context
+  // version history with its Artifact pins, and this Workspace's Audit Events.
+  'nav.entry.workspace.members': '成员',
+  'nav.entry.workspace.audit': '审计',
+
+  'workspace.members.title': '工作区成员',
+  'workspace.members.description': '成员与角色只作用于当前工作区，变更在下一次请求即生效。',
+  'workspace.members.account': '账号',
+  'workspace.members.role': '角色',
+  'workspace.members.grantedAt': '加入时间',
+  'workspace.members.grant': '授予角色',
+  'workspace.members.granted': '角色已授予：{username}，下一次请求即生效。',
+  'workspace.members.remove': '移除 {username}',
+  'workspace.members.removed': '成员已移除：{username}，下一次请求即失效。',
+  'workspace.members.empty': '当前工作区尚未添加其他成员。',
+  'workspace.members.actions': '操作',
+  'workspace.members.roleHint': '工作区管理员可管理成员与业务上下文；消费方只能读取数据产品。',
+  'workspace.members.enrollment.title': '一次性注册信息',
+  'workspace.members.enrollment.description': '请当面交付给该成员；这些信息只显示这一次，不会再次返回。',
+  'workspace.members.enrollment.secret': '动态验证码密钥',
+  'workspace.members.enrollment.recoveryCodes': '恢复码',
+  'workspace.members.enrollment.uri': '注册链接',
+
+  'workspace.context.history': '版本历史',
+  'workspace.context.history.empty': '当前工作区尚未发布业务上下文版本。',
+  'workspace.context.versionHeading': '版本 {version}',
+  'workspace.context.publishedAt': '发布时间',
+  'workspace.context.publishedBy': '发布人',
+  'workspace.context.entryCount': '条目数',
+  'workspace.context.commonVersion': '通用上下文版本',
+  'workspace.context.previousVersion': '上一个工作区版本',
+  'workspace.context.affectedArtifacts': '受影响的对象',
+  'workspace.context.affectedArtifacts.empty': '尚无对象固定在此版本。',
+  'workspace.context.publish.title': '发布工作区扩展',
+  'workspace.context.publish.description': '工作区扩展是通用上下文的附加项，不能覆盖通用定义，也不能引用其他工作区。',
+  'workspace.context.publish.entries': '业务上下文条目（JSON）',
+  'workspace.context.publish.submit': '发布上下文版本',
+  'workspace.context.publish.published': '工作区上下文版本已发布。',
+  'workspace.context.publish.invalidJson': '条目必须是合法的 JSON 数组。',
+
+  'workspace.audit.title': '审计事件',
+  'workspace.audit.description': '当前工作区的审计事件，只包含归属信息，不包含配置载荷或凭据。',
+  'workspace.audit.occurredAt': '发生时间',
+  'workspace.audit.actor': '操作人',
+  'workspace.audit.action': '操作',
+  'workspace.audit.scope': '范围',
+  'workspace.audit.target': '对象',
+  'workspace.audit.outcome': '结果',
+  'workspace.audit.empty': '当前工作区尚无审计事件。',
+  'workspace.audit.broken': '审计链校验失败，请立即联系部署管理员。',
+
+  'value.auditOutcome.succeeded': '成功',
+  'value.auditOutcome.denied': '拒绝',
+  'value.auditOutcome.failed': '失败',
+  'value.auditScope.deployment': '部署',
+  'value.auditScope.workspace': '工作区',
+  'value.artifact.integration_configuration': '集成配置',
+  'value.artifact.dataset_release': '数据集发布',
+
+  'error.api.WORKSPACE_ACCESS_DENIED': '该工作区不存在或当前账号无权访问。',
+  'error.api.AUTHORIZATION_DENIED': '当前账号无权执行该操作。',
+  'error.api.ROLE_INVALID': '角色必须是工作区管理员或消费方。',
+  'error.api.MEMBERSHIP_NOT_FOUND': '该账号不是当前工作区的成员。',
+  'error.api.LAST_ADMINISTRATOR_PROTECTED': '工作区的最后一名管理员不能被移除或降级。',
+  'error.api.CONTEXT_SHADOWS_COMMON': '工作区扩展不能覆盖部署通用定义。',
+  'error.api.CROSS_WORKSPACE_REFERENCE': '业务上下文不能引用其他工作区。',
+  'error.api.CONTEXT_REFERENCE_NOT_QUALIFIED': '业务上下文引用必须标明 common 或当前工作区。',
+  'error.api.CONTEXT_REFERENCE_UNRESOLVED': '业务上下文引用无法解析到当前版本。',
+  'error.api.CONTEXT_ENTRY_INVALID': '业务上下文条目格式不正确，请检查键、类型与值。',
+  'error.api.CONTEXT_ENTRY_DUPLICATE': '同一业务上下文条目键只能出现一次。',
+  'error.api.CONTEXT_ENTRIES_UNREADABLE': '业务上下文条目必须是合法的 JSON 数组。',
+  'error.api.CONTEXT_NOT_PUBLISHED': '当前工作区尚未发布业务上下文。',
 } as const;
 
 export type MessageKey = keyof typeof catalog;
@@ -323,4 +396,15 @@ export function t(key: MessageKey): string {
 /** Looks up an optional value key, so unknown server codes never leak raw English. */
 export function optional(key: string): string | undefined {
   return Object.hasOwn(catalog, key) ? catalog[key as MessageKey] : undefined;
+}
+
+/**
+ * Fills the named placeholders of one catalog template. The catalog still owns
+ * the sentence; the caller supplies only the governed identifiers it names.
+ */
+export function message(key: MessageKey, values: Record<string, string>): string {
+  return catalog[key].replace(
+    /\{([a-z_]+)\}/gu,
+    (placeholder: string, name: string) => values[name] ?? placeholder,
+  );
 }

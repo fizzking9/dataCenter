@@ -3,6 +3,7 @@ import { resolveActor } from './auth.js';
 import {
   actorLabel,
   deny,
+  requireWorkspaceAdministrator,
   type ActionContext,
 } from './authz.js';
 import { isDeploymentAdministrator } from './platform.js';
@@ -58,4 +59,63 @@ export function listAuditEvents(options: {
   }
   session.audit({ ...context, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { events_returned: visible.length } });
   return { chain_valid: true, events: visible };
+}
+
+/**
+ * Deployment acts that name a Workspace without being the Workspace's own
+ * events. Creating a Workspace is the Deployment's decision, so it belongs to
+ * the deployment-scope audit view rather than this one.
+ */
+const DEPLOYMENT_ACTS: ReadonlySet<string> = new Set(['workspace_creation']);
+
+/** One page of the Workspace's newest events; the log itself stays unbounded. */
+const WORKSPACE_AUDIT_LIMIT = 200;
+
+/**
+ * Reads one administered Workspace's Audit Events, newest first, projected to
+ * attribution only: who acted, on what, in which scope, with which outcome.
+ * Another Workspace's events, deployment-scope acts, and the stored detail
+ * payloads are absent rather than redacted, so no unauthorized configuration
+ * and no secret can reach this view.
+ */
+export function showWorkspaceAudit(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  workspaceId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'audit_read',
+    scope: 'workspace',
+    workspace_id: options.workspaceId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  requireWorkspaceAdministrator(session, actor, context, options.workspaceId);
+  const events = readAuditEvents(session.root);
+  const visible = events
+    .filter(
+      (event) => event.scope === 'workspace'
+        && event.workspace_id === options.workspaceId
+        && !DEPLOYMENT_ACTS.has(event.action),
+    )
+    .sort((left, right) => right.sequence - left.sequence)
+    .slice(0, WORKSPACE_AUDIT_LIMIT)
+    .map((event) => ({
+      event_id: event.event_id,
+      occurred_at: event.occurred_at,
+      actor: event.actor,
+      action: event.action,
+      scope: event.scope,
+      target: event.target ?? null,
+      outcome: event.outcome,
+    }));
+
+  const integrity = verifyAuditChain(events)
+    && verifyAuditCheckpoint(events, readAuditCheckpoint(session.root), session.dataKey);
+  if (!integrity) {
+    return { workspace_id: options.workspaceId, chain_valid: false, events: visible };
+  }
+  session.audit({ ...context, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { events_returned: visible.length } });
+  return { workspace_id: options.workspaceId, chain_valid: true, events: visible };
 }
