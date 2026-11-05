@@ -42,13 +42,20 @@ export async function copyLeaks(page: Page): Promise<CopyLeak[]> {
       (text.match(/[A-Za-z][A-Za-z'-]*/gu) ?? [])
         .filter((word) => !BRANDS.has(word) && word.length >= 3 && /[a-z]/u.test(word));
 
+    // English prose joins words with spaces; a Chinese sentence naming two
+    // branded services ("对象存储 MinIO、数据库 PostgreSQL") does not.
+    const englishPhrase = (text: string): boolean =>
+      /[A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*)+/u.test(text);
+
     const leaks = (text: string, strict: boolean): boolean => {
       const value = text.replace(/\s+/gu, ' ').trim();
       if (value === '' || /^\d[\d\s.,:%+-]*$/u.test(value)) return false;
       const words = englishWords(value);
       if (words.length === 0) return false;
       if (looksLikeToken(value)) return false;
-      if (CJK.test(value)) return words.length >= 2;
+      // A Chinese value may name product brands and acronyms; only an English
+      // phrase is prose the shipped UI must not carry.
+      if (CJK.test(value)) return englishPhrase(value);
       return strict ? words.length >= 1 : words.length >= 2;
     };
 
@@ -201,6 +208,11 @@ export interface ChinesePageReport {
   failures: string[];
 }
 
+/** Waits for lazy surface data before a gate judges rendered copy or focus. */
+async function settle(page: Page): Promise<void> {
+  await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => undefined);
+}
+
 /**
  * Inspects one surface without throwing, so certification can record every
  * surface result rather than stopping at the first failure.
@@ -213,6 +225,7 @@ export async function inspectChineseSurface(page: Page, heading: string): Promis
   } catch {
     failures.push(`one page heading reads ${heading}`);
   }
+  await settle(page);
   const lang = await page.locator('html').getAttribute('lang');
   if (lang !== 'zh-CN') failures.push(`the document language is ${String(lang)}, not zh-CN`);
   if (!/[\u4e00-\u9fff]/u.test(await page.title())) failures.push('the document title is not Chinese');
@@ -245,6 +258,7 @@ export async function assertChineseSurface(page: Page, heading: string): Promise
 
 /** Tabs through the page and proves each focused control shows a visible focus indicator. */
 export async function assertKeyboardFocus(page: Page, steps: number): Promise<void> {
+  await settle(page);
   await page.locator('body').click({ position: { x: 4, y: 4 } });
   await page.keyboard.press('Tab');
   for (let step = 0; step < steps; step += 1) {
