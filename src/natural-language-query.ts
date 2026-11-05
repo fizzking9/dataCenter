@@ -1,5 +1,5 @@
 import { resolveActor } from './auth.js';
-import { actorLabel, reject, type ActionContext } from './authz.js';
+import { actorLabel, deny, reject, type ActionContext } from './authz.js';
 import {
   findModelBinding,
   findModelProfile,
@@ -8,6 +8,8 @@ import {
   latestDataProductVersion,
   type DataProductArtifact,
   type DataProductContract,
+  type DataProductRelease,
+  type DataProductVersion,
   type ModelProfileArtifact,
   type ModelProfileVersion,
   type WorkspaceModelBindingRecord,
@@ -23,6 +25,13 @@ import {
   isSimplifiedChinese,
   queryPlanFailure,
 } from './model-generation.js';
+import {
+  decodeConversation,
+  encodeConversation,
+  encodeProductHandle,
+  normalizeQuestion,
+  type ConversationPayload,
+} from './nlq-handles.js';
 import { workspaceRoleOf } from './platform.js';
 import { executeDataProductQuery } from './product-query.js';
 import { contractView, productIdentity, requireReadableProduct } from './products.js';
@@ -35,7 +44,11 @@ export type NaturalLanguageOutcome =
   | 'empty'
   | 'no_evidence'
   | 'unavailable'
-  | 'refused';
+  | 'refused'
+  | 'partial';
+
+/** The outcome one independent part of a compound question may report. */
+type PartOutcome = Exclude<NaturalLanguageOutcome, 'clarification' | 'partial'>;
 
 /** One governed default the platform applied and therefore has to disclose. */
 interface AppliedDefault {
@@ -65,10 +78,41 @@ interface ResolvedModel {
   clarification: boolean;
 }
 
+/**
+ * One Data Product this turn may query, resolved from the current membership,
+ * Grants, Contract line, and Release. A target exists only while the actor may
+ * read it, so a plan can never name a Product the platform did not authorize.
+ */
+interface PartTarget {
+  /** The opaque handle this turn's plan input names the Product by. */
+  handle: string;
+  product: DataProductArtifact;
+  version: DataProductVersion;
+  release: DataProductRelease;
+  /** The Contract exactly as this reader may see it. */
+  authorized: Record<string, unknown>;
+  identity: Record<string, unknown>;
+}
+
+/** One independent part of the plan, from its raw request to its compiled request. */
+interface PlannedPart {
+  /** Nothing when the plan named a Product handle this turn never authorized. */
+  target: PartTarget | null;
+  /** The raw request the model stated, before compilation. */
+  raw: Record<string, unknown> | null;
+  /** The compiled request in the Contract's published vocabulary. */
+  request: Record<string, unknown> | null;
+  defaults: AppliedDefault[];
+  interpretation: string;
+  failure: { code: string; limitation: string } | null;
+}
+
 const ALL_TIME = /全部|所有|累计|历史|至今|总体|不限时间/u;
 const ALL_METRICS = /全部指标|所有指标|各指标|各项指标/u;
 const GROUPING = /各|按|每个|分别|分组/u;
 const CAUSAL = /因为|由于|导致|造成|引发|因此|所以|从而|使得|because|due to|caused|led to|therefore|as a result/iu;
+/** A narrative may not assert a relationship between governed facts, or across products. */
+const RELATIONAL = /关联|相关|成正比|反比|同步|联动|互为|彼此影响|互相影响|互相带动|存在关系|存在关联|correlat|relationship/iu;
 const NUMBERS = /\d+(?:\.\d+)?/gu;
 const PLAN_QUERY_KEYS = [
   'kind', 'filters', 'metric_filters', 'group_by', 'metrics', 'sort',
@@ -134,10 +178,20 @@ function filterNamesOf(contract: Record<string, unknown>): string[] {
   return stringsOf(contract['filters']);
 }
 
+/** The Contract a whole-question clarification is asked against, across parts. */
+function unionAuthorized(targets: PartTarget[]): Record<string, unknown> {
+  return {
+    metrics: targets.flatMap((target) => arrayOf(target.authorized['metrics'])),
+    dimensions: targets.flatMap((target) => dimensionNamesOf(target.authorized))
+      .filter((name, index, all) => all.indexOf(name) === index),
+    time: targets.some((target) => target.authorized['time'] !== null) ? {} : null,
+  };
+}
+
 /**
  * The one Workspace Model Binding this turn runs under. A named Binding must
- * belong to the Data Product's Workspace and permit query planning; without
- * one, the first active Binding that permits planning is used.
+ * belong to the Workspace and permit query planning; without one, the first
+ * active Binding that permits planning is used.
  */
 function resolveModel(
   session: PlatformSession,
@@ -265,6 +319,23 @@ function materialAmbiguity(
   return { missing: unique, candidates: candidatesFor(unique, authorized) };
 }
 
+/** The first part of a compound question whose own request is materially ambiguous. */
+function partAmbiguity(
+  parts: PlannedPart[],
+  question: string,
+): { ambiguity: Ambiguity; part: PartTarget } | null {
+  for (const part of parts) {
+    if (part.target === null || part.failure !== null || part.raw === null) continue;
+    const ambiguity = materialAmbiguity(
+      { action: 'query', query: part.raw },
+      question,
+      part.target.authorized,
+    );
+    if (ambiguity !== null) return { ambiguity, part: part.target };
+  }
+  return null;
+}
+
 function fallbackClarification(missing: string[]): string {
   if (missing.includes('metric')) return '请确认要统计哪个已发布的指标。';
   if (missing.includes('dimension')) return '请确认要按哪个已发布的维度分组。';
@@ -281,7 +352,7 @@ function clarificationLimitation(missing: string[]): string {
 }
 
 /**
- * Compiles a validated plan into the published query vocabulary. Release
+ * Compiles a validated part into the published query vocabulary. Release
  * pinning is refused rather than honoured: a Natural-Language Query always
  * reads the Data Product's current Release. Metrics, dimensions, and filters
  * are checked against the authorized Contract before the engine sees them, so
@@ -358,7 +429,7 @@ function compileQuery(
 }
 
 /** Classifies one executed result into a distinct structured outcome. */
-function classify(result: Record<string, unknown>): NaturalLanguageOutcome {
+function classify(result: Record<string, unknown>): PartOutcome {
   const kind = result['kind'];
   if (kind === 'aggregate') {
     const groups = arrayOf(result['groups']).filter(isRecord);
@@ -391,51 +462,106 @@ function groupLabel(group: Record<string, unknown>): string {
   return values.length === 0 ? '所选分组' : values.join(' / ');
 }
 
+/** One part whose result the narrative may cite, and the Product it is cited under. */
+interface NarratablePart {
+  name: string;
+  result: Record<string, unknown>;
+  release: Record<string, unknown>;
+}
+
+/** Reads one governed metric value as a number the narrative may cite, if it is numeric. */
+function numericFact(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  // A monetary or decimal metric is a JSON string, so its arithmetic value is
+  // what the narrative may restate; the governed rendering stays in the result.
+  if (typeof value === 'string' && /^-?\d+(?:\.\d+)?$/u.test(value)) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 /**
  * The evidence the narrative is allowed to state: only numbers the deterministic
- * engine computed, laid out as records so the shared grounding check applies.
+ * engine computed for the parts that actually answered, laid out as records so
+ * the shared grounding check applies. No cross-product number is computed here.
  */
 function narrationFacts(
-  result: Record<string, unknown>,
+  parts: NarratablePart[],
   question: string,
-): { question: string; records: Array<Record<string, unknown>>; filters: unknown[]; window: unknown; comparison_window: unknown; partial_period: boolean } {
+): {
+  question: string;
+  records: Array<Record<string, unknown>>;
+  filters: unknown[];
+  windows: unknown[];
+  comparison_windows: unknown[];
+  partial_period: boolean;
+  parts: Array<Record<string, unknown>>;
+} {
   const records: Array<Record<string, unknown>> = [];
-  const metrics = arrayOf(result['metrics']).filter(isRecord);
-  for (const group of arrayOf(result['groups']).filter(isRecord)) {
-    const values = objectOrNull(group['metrics']) ?? {};
-    const label = groupLabel(group);
-    for (const metric of metrics) {
-      const name = metric['name'];
-      const value = typeof name === 'string' ? values[name] : undefined;
-      if (typeof value === 'number') {
-        records.push({ label, value, metric: name, group: label });
+  const filters: unknown[] = [];
+  const windows: unknown[] = [];
+  const comparisonWindows: unknown[] = [];
+  let partial = false;
+  const named = parts.length > 1;
+  for (const part of parts) {
+    const result = part.result;
+    const metrics = arrayOf(result['metrics']).filter(isRecord);
+    const groups = arrayOf(result['groups']).filter(isRecord);
+    for (const group of groups) {
+      const values = objectOrNull(group['metrics']) ?? {};
+      const groupName = groupLabel(group);
+      for (const metric of metrics) {
+        const name = metric['name'];
+        const value = typeof name === 'string' ? numericFact(values[name]) : null;
+        if (value !== null) {
+          records.push({
+            label: named ? `${part.name} ${groupName}` : groupName,
+            value,
+            metric: name,
+            group: groupName,
+            ...(named ? { product: part.name } : {}),
+          });
+        }
       }
     }
-  }
-  if (records.length === 0) {
-    const totals = objectOrNull(result['totals']);
-    const totalsMetrics = totals === null ? null : objectOrNull(totals['metrics']);
-    for (const metric of metrics) {
-      const name = metric['name'];
-      const value = typeof name === 'string' && totalsMetrics !== null ? totalsMetrics[name] : undefined;
-      if (typeof value === 'number') {
-        records.push({ label: `合计 ${String(name)}`, value, metric: name, group: '合计' });
+    if (groups.length === 0) {
+      const totals = objectOrNull(result['totals']);
+      const totalsMetrics = totals === null ? null : objectOrNull(totals['metrics']);
+      for (const metric of metrics) {
+        const name = metric['name'];
+        const value = typeof name === 'string' && totalsMetrics !== null ? numericFact(totalsMetrics[name]) : null;
+        if (value !== null) {
+          records.push({
+            label: named ? `${part.name} 合计 ${String(name)}` : `合计 ${String(name)}`,
+            value,
+            metric: name,
+            group: '合计',
+            ...(named ? { product: part.name } : {}),
+          });
+        }
       }
     }
+    filters.push(...arrayOf(result['query']));
+    windows.push(result['window'] ?? null);
+    comparisonWindows.push(result['comparison_window'] ?? null);
+    if (objectOrNull(result['window'])?.['partial'] === true) partial = true;
   }
   return {
     question,
     records,
-    filters: arrayOf(result['query']),
-    window: result['window'] ?? null,
-    comparison_window: result['comparison_window'] ?? null,
-    partial_period: objectOrNull(result['window'])?.['partial'] === true,
+    filters,
+    windows,
+    comparison_windows: comparisonWindows,
+    partial_period: partial,
+    parts: parts.map((part) => ({ ...part.release })),
   };
 }
 
-/** A narrative may state no cause and no number the governed evidence lacks. */
+/** A narrative may state no cause, no invented relationship, and no ungoverned number. */
 function narrativeViolation(narrative: string, facts: unknown): string | null {
   if (CAUSAL.test(narrative)) return 'NARRATIVE_CAUSAL_CLAIM';
+  if (RELATIONAL.test(narrative)) return 'NARRATIVE_INVENTED_RELATIONSHIP';
   const governed = new Set(normalizedNumbers(JSON.stringify(facts)));
   for (const token of normalizedNumbers(narrative)) {
     if (!governed.has(token)) return 'NARRATIVE_NUMBER_NOT_GOVERNED';
@@ -483,6 +609,20 @@ function summaryOf(
   return '查询已执行。';
 }
 
+function multiSummary(
+  outcome: NaturalLanguageOutcome,
+  executed: number,
+  failed: number,
+): string {
+  if (outcome === 'answered') return `本次自然语言查询已分别完成 ${executed} 个独立数据产品查询，结果按各部分分别披露。`;
+  if (outcome === 'partial') return `本次自然语言查询有 ${failed} 个独立部分未能完成，结果不完整，已披露各部分状态。`;
+  if (outcome === 'unavailable') return '本次自然语言查询的各独立部分均未能完成，平台未返回任何数据。';
+  if (outcome === 'refused') return '本次自然语言查询的各独立部分均未通过已发布契约的校验，平台未执行查询。';
+  if (outcome === 'empty') return '查询已执行，但所选业务范围内没有记录。';
+  if (outcome === 'no_evidence') return '查询已执行，但所选业务范围内没有可引用的数值证据。';
+  return '查询已执行。';
+}
+
 function freshnessOf(provenance: Record<string, unknown> | null, window: Record<string, unknown> | null): Record<string, unknown> | null {
   if (provenance === null) return null;
   const coverage = window === null ? null : objectOrNull(window['coverage']);
@@ -498,6 +638,12 @@ function engineLimitation(code: string): string {
   if (code === 'DATA_PRODUCT_NOT_PUBLISHED' || code === 'DATASET_RELEASE_NOT_FOUND') {
     return '数据产品当前不可用，平台未执行查询。';
   }
+  if (code === 'DATA_PRODUCT_VERSION_WITHDRAWN'
+    || code === 'DATA_PRODUCT_MAJOR_WITHDRAWN'
+    || code === 'DATA_PRODUCT_RELEASE_NOT_FOUND'
+    || code === 'DATA_PRODUCT_VERSION_NOT_FOUND') {
+    return '数据产品当前没有可查询的发布版本，平台未执行查询。';
+  }
   if (code === 'DATA_PRODUCT_QUERY_LIMIT_EXCEEDED') return '查询条数超过契约允许的上限，平台已拒绝执行。';
   if (code === 'DATA_PRODUCT_QUERY_TOO_COMPLEX') return '查询扫描的数据量超过契约允许的上限，平台已拒绝执行。';
   if (code === 'DATA_PRODUCT_QUERY_RESULT_TOO_LARGE') return '查询形成的分组数量超过契约允许的上限，平台已拒绝执行。';
@@ -506,9 +652,16 @@ function engineLimitation(code: string): string {
   return '查询请求超出了已发布契约或授权范围，平台已拒绝执行。';
 }
 
+function partCompileLimitation(code: string): string {
+  if (code === 'NLQ_RELEASE_PIN_REFUSED') {
+    return '自然语言查询始终读取当前数据产品发布，不接受模型指定发布版本，平台已拒绝执行。';
+  }
+  return '该部分查询请求超出当前消费者可见的已发布契约，平台已拒绝执行。';
+}
+
 function planLimitation(code: string): string {
   if (code === 'QUERY_PLAN_CODE_REFUSED') {
-    return '模型给出的请求包含可执行数据库代码（SQL、公式或连接），平台已拒绝执行。';
+    return '模型给出的请求包含可执行数据库代码（SQL、公式、连接或跨产品关联），平台已拒绝执行。';
   }
   if (code === 'QUERY_PLAN_KEY_UNSUPPORTED') {
     return '模型给出的请求包含契约未发布的请求键，平台已拒绝执行。';
@@ -516,11 +669,13 @@ function planLimitation(code: string): string {
   if (code === 'QUERY_PLAN_NOT_SIMPLIFIED_CHINESE') {
     return '模型未用简体中文说明查询意图，平台已拒绝执行。';
   }
+  if (code === 'QUERY_PLAN_PARTS_REQUIRED' || code === 'QUERY_PLAN_PARTS_INVALID') {
+    return '模型未按各数据产品拆分为独立查询，平台已拒绝执行。';
+  }
+  if (code === 'QUERY_PLAN_PARTS_UNSUPPORTED') {
+    return '该查询只针对一个数据产品，模型却请求拆分多个部分，平台已拒绝执行。';
+  }
   return '模型给出的查询计划不符合已发布契约，平台已拒绝执行。';
-}
-
-function failureOf(error: unknown): NaturalLanguageFailure | null {
-  return error instanceof NaturalLanguageFailure ? error : null;
 }
 
 function errorCodeOf(error: unknown): string {
@@ -539,54 +694,165 @@ function generationLimitation(error: unknown): string {
   return '模型生成当前不可用，平台未执行查询。';
 }
 
-/**
- * Answers one Natural-Language Query against one published Data Product.
- *
- * The model only ever compiles the question into a *request* in the Contract's
- * own published vocabulary; it never sees the pre-Grant Contract and never
- * produces database code. Every number comes from `executeDataProductQuery`,
- * and the narrative is accepted only when it cites the governed evidence and
- * adds no cause and no number of its own.
- */
-export async function askDataProduct(options: {
-  root: string;
-  masterKey: string;
-  token: string;
-  dataProductId: string;
-  question: string;
-  clarification?: string;
-  bindingId?: string;
-}): Promise<Record<string, unknown>> {
-  const session = openPlatform(options.root, options.masterKey);
-  const context: ActionContext = {
-    action: 'natural_language_query',
-    scope: 'workspace',
-    target: options.dataProductId,
+/** A part that could not run still reports what it was and why it stopped. */
+function failedPart(
+  target: PartTarget | null,
+  outcome: 'refused' | 'unavailable',
+  code: string,
+  limitation: string,
+  interpretation: string,
+): Record<string, unknown> {
+  return {
+    name: target === null ? null : target.product.name,
+    data_product: target === null ? null : target.identity,
+    status: outcome,
+    outcome,
+    executed: false,
+    reason_code: code,
+    interpretation,
+    query: null,
+    resolved: null,
+    result: null,
+    window: null,
+    comparison_window: null,
+    partial_period: false,
+    defaults_applied: [] as AppliedDefault[],
+    provenance: null,
+    freshness: null,
+    evidence: null,
+    limitations: [limitation],
   };
-  const actor = resolveActor(session, options.token, context);
-  const question = options.question.trim();
-  if (question.length === 0) {
-    reject(session, actorLabel(actor.user), context, 'NLQ_QUESTION_REQUIRED', 'A Natural-Language Query must state a question.');
+}
+
+/** One executed part, disclosing its own Release, freshness, and evidence. */
+function executedPart(options: {
+  target: PartTarget;
+  interpretation: string;
+  request: Record<string, unknown>;
+  defaults: AppliedDefault[];
+  result: Record<string, unknown>;
+}): Record<string, unknown> {
+  const { target, result } = options;
+  const outcome = classify(result);
+  const window = objectOrNull(result['window']);
+  const comparisonWindow = objectOrNull(result['comparison_window']);
+  const partial = window?.['partial'] === true;
+  const provenance = objectOrNull(result['provenance']);
+  const metricsUsed = new Set(
+    arrayOf(result['metrics'])
+      .filter(isRecord)
+      .map((metric) => metric['name'])
+      .filter((name): name is string => typeof name === 'string'),
+  );
+  const definitions = arrayOf(target.authorized['metrics'])
+    .filter(isRecord)
+    .filter((metric) => typeof metric['name'] === 'string' && metricsUsed.has(metric['name']))
+    .map((metric) => ({ ...metric }));
+  const limitations: string[] = [];
+  if (outcome === 'empty') limitations.push('查询已执行，但所选业务范围内没有记录。');
+  if (outcome === 'no_evidence') limitations.push('查询已执行，但所选范围内没有可引用的数值。');
+  if (partial) limitations.push('查询窗口超出现有数据覆盖范围，结果为部分期间数据。');
+  if (options.defaults.length > 0) {
+    limitations.push(`已应用受治理默认值：${options.defaults.map((entry) => entry.name).join(', ')}。`);
   }
-  const product: DataProductArtifact = requireReadableProduct(session, actor, context, options.dataProductId);
-  const role = workspaceRoleOf(session.state, actor.user.user_id, product.workspace_id);
-  const reader: GrantReader = memberReader(session, actor.user, role);
-  const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
+  return {
+    name: target.product.name,
+    data_product: target.identity,
+    status: outcome,
+    outcome,
+    executed: true,
+    reason_code: outcome === 'answered' ? null : outcome === 'empty' ? 'NLQ_EMPTY_RESULT' : 'NLQ_NO_EVIDENCE',
+    interpretation: options.interpretation,
+    query: options.request,
+    resolved: {
+      interpretation: options.interpretation,
+      metrics: [...metricsUsed],
+      dimensions: stringsOf(result['grouped_by']),
+      filters: arrayOf(options.request['filters']).map((filter) => (isRecord(filter) ? { ...filter } : filter)),
+      window,
+      comparison_window: comparisonWindow,
+      partial_period: partial,
+      defaults_applied: options.defaults.map((entry) => ({ ...entry })),
+    },
+    result,
+    window,
+    comparison_window: comparisonWindow,
+    partial_period: partial,
+    defaults_applied: options.defaults.map((entry) => ({ ...entry })),
+    provenance,
+    freshness: freshnessOf(provenance, window),
+    evidence: {
+      query: options.request,
+      metrics: definitions,
+      provenance,
+      release: { ...target.identity },
+    },
+    limitations,
+  };
+}
 
-  const version = latestDataProductVersion(product);
-  const release = latestDataProductRelease(product);
-  const identity = version !== undefined && release !== undefined
-    ? productIdentity(product, version, release)
-    : null;
+/** The overall status of a turn: one part keeps the single-product outcome. */
+function overallOutcome(parts: Array<Record<string, unknown>>): NaturalLanguageOutcome {
+  if (parts.length === 1) return (parts[0]!['outcome'] as NaturalLanguageOutcome);
+  const executed = parts.filter((part) => part['executed'] === true);
+  if (executed.length === 0) {
+    return parts.every((part) => part['outcome'] === 'refused') ? 'refused' : 'unavailable';
+  }
+  if (executed.length < parts.length) return 'partial';
+  if (parts.some((part) => part['outcome'] === 'answered')) return 'answered';
+  if (parts.some((part) => part['outcome'] === 'no_evidence')) return 'no_evidence';
+  return 'empty';
+}
 
-  const response: Record<string, unknown> = {
+function overallReasonCode(outcome: NaturalLanguageOutcome, parts: Array<Record<string, unknown>>): string | null {
+  if (parts.length === 1) return parts[0]!['reason_code'] as string | null;
+  if (outcome === 'answered') return null;
+  if (outcome === 'empty') return 'NLQ_EMPTY_RESULT';
+  if (outcome === 'no_evidence') return 'NLQ_NO_EVIDENCE';
+  if (outcome === 'partial') return 'NLQ_INCOMPLETE_PARTS';
+  if (outcome === 'refused') return 'NLQ_PARTS_REFUSED';
+  return 'NLQ_PARTS_UNAVAILABLE';
+}
+
+/** The distinct as-of times a compound answer has to disclose per part. */
+function asOf(parts: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  return parts.map((part) => {
+    const freshness = objectOrNull(part['freshness']);
+    const identity = objectOrNull(part['data_product']);
+    return {
+      name: part['name'] ?? null,
+      data_product_id: identity?.['data_product_id'] ?? null,
+      data_product_release: identity?.['data_product_release'] ?? null,
+      executed: part['executed'] === true,
+      released_at: freshness?.['released_at'] ?? null,
+      data_through: freshness?.['data_through'] ?? null,
+    };
+  });
+}
+
+function distinctAsOf(asOfTimes: Array<Record<string, unknown>>): boolean {
+  const executed = asOfTimes.filter((entry) => entry['executed'] === true);
+  if (executed.length < 2) return false;
+  const stamps = new Set(executed.map((entry) => `${String(entry['released_at'])}|${String(entry['data_through'])}`));
+  return stamps.size > 1;
+}
+
+/** Base response every turn fills in, so a refusal never answers half a shape. */
+function baseResponse(question: string, workspaceId: string): Record<string, unknown> {
+  return {
     outcome: 'unavailable' as NaturalLanguageOutcome,
+    status: 'incomplete' as 'complete' | 'incomplete',
+    workspace_id: workspaceId,
     question,
-    reason_code: 'DATA_PRODUCT_NOT_PUBLISHED',
+    normalized_question: question,
+    follow_up: false,
+    reason_code: null,
     executed: false,
     summary: '当前无法完成该自然语言查询，平台未执行查询。',
-    limitations: ['数据产品当前没有可查询的发布版本，平台未执行查询。'],
-    data_product: identity,
+    limitations: [] as string[],
+    data_product: null,
+    parts: [] as Array<Record<string, unknown>>,
+    as_of: [] as Array<Record<string, unknown>>,
     binding: null,
     model: null,
     interpretation: null,
@@ -601,47 +867,196 @@ export async function askDataProduct(options: {
     defaults_applied: [] as AppliedDefault[],
     provenance: null,
     freshness: null,
+    conversation: null as string | null,
   };
-  const finish = (): Record<string, unknown> => {
-    const outcome = response['outcome'] as NaturalLanguageOutcome;
-    session.audit({
-      ...scoped,
-      actor: reader.label,
-      outcome: outcome === 'refused' ? 'denied' : outcome === 'unavailable' ? 'failed' : 'succeeded',
-      detail: {
-        nlq_outcome: outcome,
-        executed: response['executed'] === true,
-        reason_code: String(response['reason_code'] ?? 'none'),
-        ...(release === undefined ? {} : { data_product_release: release.release }),
-        ...(isRecord(response['binding']) && typeof response['binding']['binding_id'] === 'string'
-          ? { binding_id: response['binding']['binding_id'] }
-          : {}),
-        ...(isRecord(response['model']) && typeof response['model']['model_profile_version'] === 'number'
-          ? { model_profile_version: response['model']['model_profile_version'] }
-          : {}),
-      },
+}
+
+/** The Data Products one Workspace turn may query, in a stable order. */
+function visibleTargets(
+  session: PlatformSession,
+  reader: GrantReader,
+  userId: string,
+  workspaceId: string,
+): PartTarget[] {
+  return session.state.data_products
+    .filter((product) => product.workspace_id === workspaceId && product.releases.length > 0)
+    .sort((left, right) => {
+      if (left.name === right.name) return left.data_product_id < right.data_product_id ? -1 : 1;
+      return left.name < right.name ? -1 : 1;
+    })
+    .flatMap((product) => {
+      const target = targetFor(session, reader, userId, workspaceId, product);
+      return target === null ? [] : [target];
     });
-    return response;
+}
+
+/** One Product as this turn may read it, or nothing when no scope applies. */
+function targetFor(
+  session: PlatformSession,
+  reader: GrantReader,
+  userId: string,
+  workspaceId: string,
+  product: DataProductArtifact,
+): PartTarget | null {
+  const version = latestDataProductVersion(product);
+  const release = latestDataProductRelease(product);
+  if (!version || !release) return null;
+  const scope = reader.scopeOf(product, version.contract);
+  if (scope === null) return null;
+  return {
+    handle: encodeProductHandle(session.dataKey, {
+      userId,
+      workspaceId,
+      dataProductId: product.data_product_id,
+    }),
+    product,
+    version,
+    release,
+    authorized: authorizedContract(version.contract, scope),
+    identity: productIdentity(product, version, release),
   };
-  if (version === undefined || release === undefined) {
-    return finish();
+}
+
+/** What one turn was asked, whichever surface reached it. */
+interface TurnOptions {
+  root: string;
+  masterKey: string;
+  token: string;
+  question: string;
+  clarification?: string;
+  bindingId?: string;
+  conversation?: string;
+  /** The one Product a single-product turn reads, or nothing for a Workspace turn. */
+  dataProductId?: string;
+  workspaceId?: string;
+}
+
+/**
+ * Answers one Natural-Language Query turn.
+ *
+ * The model only ever compiles the question into independent *requests* in each
+ * Contract's own published vocabulary; it never sees a pre-Grant Contract, never
+ * produces database code, and never composes products into one request. Every
+ * number comes from `executeDataProductQuery` within one Product's own Release,
+ * and a narrative is accepted only when it cites the governed evidence, adds no
+ * cause, invents no relationship, and states no number of its own.
+ *
+ * A follow-up is normalized and reauthorized from the current state: the
+ * conversation handle only records what the previous turn said, so a revoked
+ * membership, changed Grant, or advanced Release takes effect on the next turn.
+ */
+async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<string, unknown>> {
+  const session = openPlatform(options.root, options.masterKey);
+  const entry: ActionContext = {
+    action: 'natural_language_query',
+    scope: 'workspace',
+    ...(options.dataProductId === undefined ? {} : { target: options.dataProductId }),
+  };
+  const actor = resolveActor(session, options.token, entry);
+  const question = normalizeQuestion(options.question);
+  if (question.length === 0) {
+    reject(session, actorLabel(actor.user), entry, 'NLQ_QUESTION_REQUIRED', 'A Natural-Language Query must state a question.');
   }
 
-  const contract = version.contract;
-  const scope = reader.scopeOf(product, contract);
-  if (scope === null) {
-    response['outcome'] = 'refused';
-    response['reason_code'] = 'NLQ_SCOPE_UNAVAILABLE';
-    response['limitations'] = ['当前授权范围无法应用于该数据产品契约，平台未执行查询。'];
-    return finish();
+  const requestedProduct = options.dataProductId === undefined
+    ? null
+    : requireReadableProduct(session, actor, entry, options.dataProductId);
+  const workspaceId = requestedProduct?.workspace_id ?? options.workspaceId ?? '';
+  const role = workspaceRoleOf(session.state, actor.user.user_id, workspaceId);
+  if (role === null) {
+    deny(
+      session,
+      actorLabel(actor.user),
+      { ...entry, workspace_id: workspaceId },
+      'WORKSPACE_ACCESS_DENIED',
+      'The Workspace is not available to this actor.',
+    );
   }
-  const authorized = authorizedContract(contract, scope);
-  const model = resolveModel(session, product.workspace_id, options.bindingId);
+  const reader = memberReader(session, actor.user, role);
+  const scoped: ActionContext = {
+    ...entry,
+    workspace_id: workspaceId,
+    ...(requestedProduct === null ? {} : { target: requestedProduct.data_product_id }),
+  };
+  const response = baseResponse(question, workspaceId);
+
+  let prior: ConversationPayload = { workspaceId, userId: actor.user.user_id, questions: [], productIds: [] };
+  if (options.conversation !== undefined) {
+    try {
+      prior = decodeConversation(
+        session.dataKey,
+        { userId: actor.user.user_id, workspaceId },
+        options.conversation,
+        (code, message) => {
+          throw new NaturalLanguageFailure(code, message);
+        },
+      );
+    } catch (error) {
+      response['outcome'] = 'refused';
+      response['reason_code'] = errorCodeOf(error);
+      response['limitations'] = ['会话句柄不是本部署为该用户在此工作空间签发的，平台未执行查询。'];
+      response['summary'] = summaryOf('refused', null);
+      return finishTurn(session, scoped, reader, response, question, prior);
+    }
+  }
+  response['follow_up'] = prior.questions.length > 0;
+
+  let identity: Record<string, unknown> | null = null;
+  if (requestedProduct !== null) {
+    const version = latestDataProductVersion(requestedProduct);
+    const release = latestDataProductRelease(requestedProduct);
+    identity = version !== undefined && release !== undefined
+      ? productIdentity(requestedProduct, version, release)
+      : null;
+  }
+  response['data_product'] = identity;
+
+  let targets: PartTarget[];
+  if (requestedProduct !== null) {
+    const version = latestDataProductVersion(requestedProduct);
+    const release = latestDataProductRelease(requestedProduct);
+    if (!version || !release) {
+      response['outcome'] = 'unavailable';
+      response['reason_code'] = 'DATA_PRODUCT_NOT_PUBLISHED';
+      response['limitations'] = ['数据产品当前没有可查询的发布版本，平台未执行查询。'];
+      return finishTurn(session, scoped, reader, response, question, prior);
+    }
+    const scope = reader.scopeOf(requestedProduct, version.contract);
+    if (scope === null) {
+      response['outcome'] = 'refused';
+      response['reason_code'] = 'NLQ_SCOPE_UNAVAILABLE';
+      response['limitations'] = ['当前授权范围无法应用于该数据产品契约，平台未执行查询。'];
+      return finishTurn(session, scoped, reader, response, question, prior);
+    }
+    targets = [{
+      handle: encodeProductHandle(session.dataKey, {
+        userId: actor.user.user_id,
+        workspaceId,
+        dataProductId: requestedProduct.data_product_id,
+      }),
+      product: requestedProduct,
+      version,
+      release,
+      authorized: authorizedContract(version.contract, scope),
+      identity: productIdentity(requestedProduct, version, release),
+    }];
+  } else {
+    targets = visibleTargets(session, reader, actor.user.user_id, workspaceId);
+    if (targets.length === 0) {
+      response['outcome'] = 'unavailable';
+      response['reason_code'] = 'NLQ_NO_VISIBLE_PRODUCT';
+      response['limitations'] = ['该工作空间没有当前消费者可查询的已发布数据产品，平台未执行查询。'];
+      return finishTurn(session, scoped, reader, response, question, prior);
+    }
+  }
+  const byHandle = new Map(targets.map((target) => [target.handle, target]));
+
+  const model = resolveModel(session, workspaceId, options.bindingId);
   if (model === null) {
     response['outcome'] = 'unavailable';
     response['reason_code'] = 'NLQ_BINDING_UNAVAILABLE';
     response['limitations'] = ['该工作空间没有可用于自然语言查询的模型绑定，平台未执行查询。'];
-    return finish();
+    return finishTurn(session, scoped, reader, response, question, prior);
   }
   response['binding'] = bindingView(model.binding);
   response['model'] = modelView(model);
@@ -649,13 +1064,29 @@ export async function askDataProduct(options: {
   const adapterFail = (code: string, message: string): never => {
     throw new NaturalLanguageFailure(code, message);
   };
-  const planInput = {
-    question,
-    clarification: options.clarification === undefined ? null : options.clarification,
-    today: new Date().toISOString().slice(0, 10),
-    contract: authorized,
-    defaults: { limit: contract.default_limit },
-  };
+  const planInput = requestedProduct === null
+    ? {
+      question,
+      clarification: options.clarification === undefined ? null : options.clarification,
+      today: new Date().toISOString().slice(0, 10),
+      follow_up: prior.questions.length > 0,
+      prior_questions: [...prior.questions],
+      products: targets.map((target) => ({
+        ref: target.handle,
+        name: target.product.name,
+        defaults: { limit: target.version.contract.default_limit },
+        ...target.authorized,
+      })),
+    }
+    : {
+      question,
+      clarification: options.clarification === undefined ? null : options.clarification,
+      today: new Date().toISOString().slice(0, 10),
+      follow_up: prior.questions.length > 0,
+      prior_questions: [...prior.questions],
+      contract: targets[0]!.authorized,
+      defaults: { limit: targets[0]!.version.contract.default_limit },
+    };
 
   let plan: Record<string, unknown>;
   try {
@@ -669,10 +1100,10 @@ export async function askDataProduct(options: {
     response['outcome'] = code.startsWith('QUERY_PLAN_') ? 'refused' : 'unavailable';
     response['reason_code'] = code;
     response['limitations'] = [generationLimitation(error)];
-    return finish();
+    return finishTurn(session, scoped, reader, response, question, prior);
   }
 
-  const planFailure = queryPlanFailure(plan);
+  const planFailure = queryPlanFailure(plan, requestedProduct === null ? 'parts' : 'query');
   const interpretation = typeof plan['interpretation'] === 'string' ? plan['interpretation'].trim() : '';
   if (planFailure !== null || !isSimplifiedChinese(interpretation)) {
     const code = planFailure ?? 'QUERY_PLAN_NOT_SIMPLIFIED_CHINESE';
@@ -681,163 +1112,417 @@ export async function askDataProduct(options: {
     // A refused plan's prose is never published: it failed the language gate.
     response['interpretation'] = null;
     response['limitations'] = [planLimitation(code)];
-    return finish();
+    return finishTurn(session, scoped, reader, response, question, prior);
   }
   response['interpretation'] = interpretation;
 
-  const ambiguity = materialAmbiguity(plan, question, authorized);
-  if (ambiguity !== null) {
-    let asked = fallbackClarification(ambiguity.missing);
-    if (model.clarification) {
-      try {
-        const answer = await generateClarification(
-          model.pin,
-          {
-            question,
-            interpretation,
-            missing: ambiguity.missing,
-            candidates: ambiguity.candidates,
-          },
-          adapterFail,
-        );
-        asked = String(answer['question']);
-      } catch {
-        asked = fallbackClarification(ambiguity.missing);
-      }
+  // A whole-question clarification executes nothing and asks, in Chinese, for
+  // the business scope the plan cannot resolve on its own.
+  if (plan['action'] === 'clarify') {
+    const ambiguity = materialAmbiguity(
+      plan,
+      question,
+      requestedProduct === null ? unionAuthorized(targets) : targets[0]!.authorized,
+    );
+    if (ambiguity === null) {
+      response['outcome'] = 'refused';
+      response['reason_code'] = 'QUERY_PLAN_MISSING_UNDECLARED';
+      response['limitations'] = [planLimitation('QUERY_PLAN_MISSING_UNDECLARED')];
+      return finishTurn(session, scoped, reader, response, question, prior);
     }
+    response['clarification'] = await askClarification(
+      model,
+      question,
+      interpretation,
+      ambiguity,
+      null,
+      targets.length,
+      adapterFail,
+    );
     response['outcome'] = 'clarification';
     response['reason_code'] = 'NLQ_CLARIFICATION_REQUIRED';
     response['summary'] = summaryOf('clarification', null);
     response['limitations'] = [clarificationLimitation(ambiguity.missing)];
-    response['resolved'] = {
-      interpretation,
-      metrics: [],
-      dimensions: [],
-      filters: [],
-      window: null,
-      comparison_window: null,
-      partial_period: false,
-      defaults_applied: [],
-    };
-    response['clarification'] = {
-      question: asked,
-      missing: [...ambiguity.missing],
-      candidates: [...ambiguity.candidates],
-    };
-    return finish();
+    response['resolved'] = emptyResolved(interpretation);
+    return finishTurn(session, scoped, reader, response, question, prior);
   }
 
-  let compiled: { request: Record<string, unknown>; defaults: AppliedDefault[] };
-  try {
-    compiled = compileQuery(plan, authorized, contract.default_limit);
-  } catch (error) {
-    const failure = failureOf(error);
-    response['outcome'] = 'refused';
-    response['reason_code'] = failure?.code ?? 'NLQ_QUERY_REFUSED';
-    response['limitations'] = [failure?.code === 'NLQ_RELEASE_PIN_REFUSED'
-      ? '自然语言查询始终读取当前数据产品发布，不接受模型指定发布版本，平台已拒绝执行。'
-      : '模型给出的查询请求超出当前消费者可见的已发布契约，平台已拒绝执行。'];
-    return finish();
+  // Assemble the independent parts: a single-product turn plans one query, a
+  // Workspace turn plans one part per Product handle this turn authorized.
+  const planned: PlannedPart[] = [];
+  if (requestedProduct !== null) {
+    planned.push({
+      target: targets[0]!,
+      raw: objectOrNull(plan['query']),
+      request: null,
+      defaults: [],
+      interpretation,
+      failure: null,
+    });
+  } else {
+    const seen = new Set<string>();
+    for (const raw of arrayOf(plan['parts'])) {
+      const record = isRecord(raw) ? raw : {};
+      const handle = typeof record['product'] === 'string' ? record['product'] : '';
+      const target = byHandle.get(handle) ?? null;
+      const duplicate = target !== null && seen.has(target.product.data_product_id);
+      if (target !== null) seen.add(target.product.data_product_id);
+      if (target === null || duplicate) {
+        // No part is answered from a Product this turn did not authorize, and
+        // one Product is never counted twice inside the same answer.
+        planned.push({
+          target,
+          raw: null,
+          request: null,
+          defaults: [],
+          interpretation,
+          failure: {
+            code: target === null ? 'NLQ_PART_NOT_AUTHORIZED' : 'NLQ_PART_DUPLICATED',
+            limitation: target === null
+              ? '该部分请求的数据产品不在当前可访问范围内，平台未执行该部分查询。'
+              : '同一数据产品被重复拆分为多个部分，平台已拒绝该重复部分。',
+          },
+        });
+        continue;
+      }
+      planned.push({
+        target,
+        raw: objectOrNull(record['query']),
+        request: null,
+        defaults: [],
+        interpretation,
+        failure: null,
+      });
+    }
   }
-  response['query'] = compiled.request;
-  response['defaults_applied'] = compiled.defaults;
+
+  const ambiguity = partAmbiguity(planned, question);
+  if (ambiguity !== null) {
+    response['clarification'] = await askClarification(
+      model,
+      question,
+      interpretation,
+      ambiguity.ambiguity,
+      ambiguity.part,
+      targets.length,
+      adapterFail,
+    );
+    response['outcome'] = 'clarification';
+    response['reason_code'] = 'NLQ_CLARIFICATION_REQUIRED';
+    response['summary'] = summaryOf('clarification', null);
+    response['limitations'] = [clarificationLimitation(ambiguity.ambiguity.missing)];
+    response['resolved'] = emptyResolved(interpretation);
+    return finishTurn(session, scoped, reader, response, question, prior);
+  }
+
+  for (const part of planned) {
+    if (part.target === null || part.failure !== null || part.raw === null) continue;
+    try {
+      const compiled = compileQuery(
+        { action: 'query', query: part.raw },
+        part.target.authorized,
+        part.target.version.contract.default_limit,
+      );
+      part.request = compiled.request;
+      part.defaults = compiled.defaults;
+    } catch (error) {
+      const code = errorCodeOf(error);
+      part.failure = { code, limitation: partCompileLimitation(code) };
+    }
+  }
 
   const engineFail = (code: string, message: string): never => {
     throw new NaturalLanguageFailure(code, message);
   };
-  let result: Record<string, unknown>;
-  try {
-    result = executeDataProductQuery({
-      session,
-      reader,
-      product,
-      context: {
-        action: 'data_product_query',
-        scope: 'workspace',
-        workspace_id: product.workspace_id,
-        target: product.data_product_id,
-      },
-      request: compiled.request,
-      fail: engineFail,
-    });
-  } catch (error) {
-    const code = errorCodeOf(error);
-    const unavailable = code === 'DATA_PRODUCT_NOT_PUBLISHED' || code === 'DATASET_RELEASE_NOT_FOUND';
-    response['outcome'] = unavailable ? 'unavailable' : 'refused';
-    response['reason_code'] = code;
-    response['limitations'] = [engineLimitation(code)];
-    return finish();
+  const parts: Array<Record<string, unknown>> = [];
+  for (const part of planned) {
+    if (part.target === null || part.failure !== null || part.request === null) {
+      parts.push(failedPart(
+        part.target,
+        'refused',
+        part.failure?.code ?? 'NLQ_QUERY_REFUSED',
+        part.failure?.limitation ?? '该部分查询未能执行，平台未返回任何数据。',
+        part.interpretation,
+      ));
+      continue;
+    }
+    try {
+      const result = executeDataProductQuery({
+        session,
+        reader,
+        product: part.target.product,
+        context: {
+          action: 'data_product_query',
+          scope: 'workspace',
+          workspace_id: workspaceId,
+          target: part.target.product.data_product_id,
+        },
+        request: part.request,
+        fail: engineFail,
+      });
+      parts.push(executedPart({
+        target: part.target,
+        interpretation: part.interpretation,
+        request: part.request,
+        defaults: part.defaults,
+        result,
+      }));
+    } catch (error) {
+      const code = errorCodeOf(error);
+      const unavailable = code === 'DATA_PRODUCT_NOT_PUBLISHED'
+        || code === 'DATASET_RELEASE_NOT_FOUND'
+        || code === 'DATA_PRODUCT_VERSION_WITHDRAWN'
+        || code === 'DATA_PRODUCT_MAJOR_WITHDRAWN'
+        || code === 'DATA_PRODUCT_RELEASE_NOT_FOUND'
+        || code === 'DATA_PRODUCT_VERSION_NOT_FOUND';
+      parts.push(failedPart(
+        part.target,
+        unavailable ? 'unavailable' : 'refused',
+        code,
+        engineLimitation(code),
+        part.interpretation,
+      ));
+    }
   }
-  response['executed'] = true;
-  response['result'] = result;
 
-  const outcome = classify(result);
+  response['parts'] = parts;
+  response['executed'] = parts.some((part) => part['executed'] === true);
+  const outcome = overallOutcome(parts);
   response['outcome'] = outcome;
-  response['reason_code'] = outcome === 'answered'
-    ? null
-    : outcome === 'empty'
-      ? 'NLQ_EMPTY_RESULT'
-      : 'NLQ_NO_EVIDENCE';
+  response['reason_code'] = overallReasonCode(outcome, parts);
+  response['status'] = parts.length > 0 && parts.every((part) => part['executed'] === true)
+    ? 'complete'
+    : 'incomplete';
+  const asOfTimes = asOf(parts);
+  response['as_of'] = asOfTimes;
 
-  const window = objectOrNull(result['window']);
-  const comparisonWindow = objectOrNull(result['comparison_window']);
-  const partial = window?.['partial'] === true;
-  response['window'] = window;
-  response['comparison_window'] = comparisonWindow;
-  response['partial_period'] = partial;
-  const provenance = objectOrNull(result['provenance']);
-  response['provenance'] = provenance;
-  response['freshness'] = freshnessOf(provenance, window);
+  const executedCount = parts.filter((part) => part['executed'] === true).length;
+  const failedCount = parts.length - executedCount;
+  response['summary'] = parts.length === 1
+    ? summaryOf(outcome, objectOrNull(parts[0]!['result']))
+    : multiSummary(outcome, executedCount, failedCount);
 
+  // A compound answer discloses every part's own limitation, named by its Product.
   const limitations: string[] = [];
-  if (outcome === 'empty') limitations.push('查询已执行，但所选业务范围内没有记录。');
-  if (outcome === 'no_evidence') limitations.push('查询已执行，但所选范围内没有可引用的数值。');
-  if (partial) limitations.push('查询窗口超出现有数据覆盖范围，结果为部分期间数据。');
-  if (compiled.defaults.length > 0) {
-    const names = compiled.defaults.map((entry) => entry.name).join(', ');
-    limitations.push(`已应用受治理默认值：${names}。`);
+  const named = parts.length > 1;
+  for (const part of parts) {
+    const name = typeof part['name'] === 'string' ? part['name'] : null;
+    for (const line of stringsOf(part['limitations'])) {
+      limitations.push(named && name !== null ? `${name}部分：${line}` : line);
+    }
+  }
+  if (named && distinctAsOf(asOfTimes)) {
+    limitations.push('各部分的数据截止时间不同，已按各自的发布版本分别披露。');
+  }
+  if (options.conversation !== undefined && requestedProduct === null) {
+    const visibleIds = new Set(targets.map((target) => target.product.data_product_id));
+    const dropped = prior.productIds.filter((id) => !visibleIds.has(id));
+    if (dropped.length > 0) {
+      limitations.push('会话中引用的上一轮数据产品当前不可访问，平台未将其纳入本次查询。');
+    }
   }
 
-  response['resolved'] = {
-    interpretation,
-    metrics: arrayOf(result['metrics'])
-      .filter(isRecord)
-      .map((metric) => metric['name'])
-      .filter((name): name is string => typeof name === 'string'),
-    dimensions: stringsOf(result['grouped_by']),
-    filters: arrayOf(compiled.request['filters']).map((filter) => (isRecord(filter) ? { ...filter } : filter)),
-    window,
-    comparison_window: comparisonWindow,
-    partial_period: partial,
-    defaults_applied: compiled.defaults.map((entry) => ({ ...entry })),
-  };
-  response['summary'] = summaryOf(outcome, result);
+  // Project the single part onto the legacy top-level shape, so a one-product
+  // question keeps exactly the answer shape it always had.
+  if (parts.length === 1) {
+    const part = parts[0]!;
+    response['data_product'] = part['data_product'];
+    response['interpretation'] = part['interpretation'];
+    response['query'] = part['query'];
+    response['resolved'] = part['resolved'];
+    response['result'] = part['result'];
+    response['window'] = part['window'];
+    response['comparison_window'] = part['comparison_window'];
+    response['partial_period'] = part['partial_period'];
+    response['defaults_applied'] = part['defaults_applied'];
+    response['provenance'] = part['provenance'];
+    response['freshness'] = part['freshness'];
+  }
 
-  if (outcome === 'answered' && result['kind'] === 'aggregate' && model.narration) {
-    const facts = narrationFacts(result, question);
-    if (facts.records.length > 0) {
-      try {
-        const narrativeAnswer = await generateGroundedNarration(model.pin, facts, adapterFail);
-        const narrative = String(narrativeAnswer['narrative'] ?? '');
-        const violation = narrativeViolation(narrative, facts);
-        if (violation !== null) {
-          limitations.push(violation === 'NARRATIVE_CAUSAL_CLAIM'
-            ? '模型叙述包含证据不支持的因果表述，已丢弃叙述。'
-            : '模型叙述包含证据之外的数值，已丢弃叙述。');
-          response['reason_code'] = violation;
-        } else {
-          response['answer'] = {
-            narrative,
-            evidence_refs: arrayOf(narrativeAnswer['evidence_refs']).map((reference) => (isRecord(reference) ? { ...reference } : reference)),
-            model: modelView(model),
-          };
+  if (outcome === 'answered' && model.narration) {
+    const narratable: NarratablePart[] = [];
+    for (const part of parts) {
+      if (part['outcome'] !== 'answered' || part['executed'] !== true) continue;
+      const result = objectOrNull(part['result']);
+      const release = objectOrNull(part['data_product']);
+      if (result === null || release === null) continue;
+      narratable.push({ name: String(part['name'] ?? '数据产品'), result, release });
+    }
+    if (narratable.length > 0) {
+      const facts = narrationFacts(narratable, question);
+      if (facts.records.length > 0) {
+        try {
+          const narrativeAnswer = await generateGroundedNarration(model.pin, facts, adapterFail);
+          const narrative = String(narrativeAnswer['narrative'] ?? '');
+          const violation = narrativeViolation(narrative, facts);
+          if (violation !== null) {
+            limitations.push(violation === 'NARRATIVE_CAUSAL_CLAIM'
+              ? '模型叙述包含证据不支持的因果表述，已丢弃叙述。'
+              : violation === 'NARRATIVE_INVENTED_RELATIONSHIP'
+                ? '模型叙述包含证据不支持的跨产品关联表述，已丢弃叙述。'
+                : '模型叙述包含证据之外的数值，已丢弃叙述。');
+            response['reason_code'] = violation;
+          } else {
+            response['answer'] = {
+              narrative,
+              evidence_refs: arrayOf(narrativeAnswer['evidence_refs']).map((reference) => (isRecord(reference) ? { ...reference } : reference)),
+              model: modelView(model),
+            };
+          }
+        } catch (error) {
+          limitations.push(generationLimitation(error));
+          response['reason_code'] = errorCodeOf(error);
         }
-      } catch (error) {
-        limitations.push(generationLimitation(error));
-        response['reason_code'] = errorCodeOf(error);
       }
     }
   }
   response['limitations'] = limitations;
-  return finish();
+
+  response['conversation'] = encodeConversation(session.dataKey, {
+    workspaceId,
+    userId: actor.user.user_id,
+    questions: [...prior.questions, question],
+    productIds: planned.flatMap((part) => (part.target === null ? [] : [part.target.product.data_product_id])),
+  });
+  return finishTurn(session, scoped, reader, response, question, prior);
+}
+
+/** A clarification names the part it is about when a question spans several. */
+async function askClarification(
+  model: ResolvedModel,
+  question: string,
+  interpretation: string,
+  ambiguity: Ambiguity,
+  part: PartTarget | null,
+  targetCount: number,
+  adapterFail: (code: string, message: string) => never,
+): Promise<Record<string, unknown>> {
+  let asked = fallbackClarification(ambiguity.missing);
+  if (model.clarification) {
+    try {
+      const answer = await generateClarification(
+        model.pin,
+        {
+          question,
+          interpretation,
+          missing: ambiguity.missing,
+          candidates: ambiguity.candidates,
+          product: part === null ? null : { name: part.product.name, title: part.authorized['title'] ?? null },
+        },
+        adapterFail,
+      );
+      asked = String(answer['question']);
+    } catch {
+      asked = fallbackClarification(ambiguity.missing);
+    }
+  }
+  return {
+    question: part !== null && targetCount > 1 ? `${part.product.name}部分：${asked}` : asked,
+    missing: [...ambiguity.missing],
+    candidates: [...ambiguity.candidates],
+    part: part === null ? null : { name: part.product.name, data_product_id: part.product.data_product_id },
+  };
+}
+
+function emptyResolved(interpretation: string): Record<string, unknown> {
+  return {
+    interpretation,
+    metrics: [],
+    dimensions: [],
+    filters: [],
+    window: null,
+    comparison_window: null,
+    partial_period: false,
+    defaults_applied: [],
+  };
+}
+
+/** Records the turn durably and returns it, so no answer is audited late. */
+function finishTurn(
+  session: PlatformSession,
+  scoped: ActionContext,
+  reader: GrantReader,
+  response: Record<string, unknown>,
+  question: string,
+  prior: ConversationPayload,
+): Record<string, unknown> {
+  const outcome = response['outcome'] as NaturalLanguageOutcome;
+  const binding = objectOrNull(response['binding']);
+  const model = objectOrNull(response['model']);
+  session.audit({
+    ...scoped,
+    actor: reader.label,
+    outcome: outcome === 'refused' ? 'denied' : outcome === 'unavailable' ? 'failed' : 'succeeded',
+    detail: {
+      nlq_outcome: outcome,
+      nlq_status: String(response['status'] ?? 'incomplete'),
+      executed: response['executed'] === true,
+      parts: arrayOf(response['parts']).length,
+      parts_executed: arrayOf(response['parts']).filter((part) => isRecord(part) && part['executed'] === true).length,
+      follow_up: prior.questions.length > 0,
+      normalized_question: question,
+      reason_code: String(response['reason_code'] ?? 'none'),
+      ...(binding === null || typeof binding['binding_id'] !== 'string'
+        ? {}
+        : { binding_id: binding['binding_id'] }),
+      ...(model === null || typeof model['model_profile_version'] !== 'number'
+        ? {}
+        : { model_profile_version: model['model_profile_version'] }),
+    },
+  });
+  return response;
+}
+
+/**
+ * Answers one Natural-Language Query against one published Data Product. A
+ * follow-up may present the conversation handle the previous turn returned, and
+ * is normalized and reauthorized against the current state before it executes.
+ */
+export async function askDataProduct(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  dataProductId: string;
+  question: string;
+  clarification?: string;
+  bindingId?: string;
+  conversation?: string;
+}): Promise<Record<string, unknown>> {
+  return askNaturalLanguageQuery({
+    root: options.root,
+    masterKey: options.masterKey,
+    token: options.token,
+    question: options.question,
+    dataProductId: options.dataProductId,
+    ...(options.clarification === undefined ? {} : { clarification: options.clarification }),
+    ...(options.bindingId === undefined ? {} : { bindingId: options.bindingId }),
+    ...(options.conversation === undefined ? {} : { conversation: options.conversation }),
+  });
+}
+
+/**
+ * Answers one Natural-Language Query across the Data Products one Workspace
+ * visibly publishes. Each part runs against its own Product's current Release,
+ * so a compound answer never shares a snapshot and never joins products.
+ */
+export async function askWorkspaceQuery(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  workspaceId: string;
+  question: string;
+  clarification?: string;
+  bindingId?: string;
+  conversation?: string;
+}): Promise<Record<string, unknown>> {
+  return askNaturalLanguageQuery({
+    root: options.root,
+    masterKey: options.masterKey,
+    token: options.token,
+    question: options.question,
+    workspaceId: options.workspaceId,
+    ...(options.clarification === undefined ? {} : { clarification: options.clarification }),
+    ...(options.bindingId === undefined ? {} : { bindingId: options.bindingId }),
+    ...(options.conversation === undefined ? {} : { conversation: options.conversation }),
+  });
 }

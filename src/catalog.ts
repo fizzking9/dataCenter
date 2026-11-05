@@ -7,9 +7,9 @@
 
 /**
  * First release acquisition types: a hand-uploaded file, a declarative JSON
- * endpoint, or an uploaded bundle of documents.
+ * endpoint, an uploaded bundle of documents, or a human-approved Scraper Service.
  */
-export type SourceType = 'file' | 'http_json' | 'document';
+export type SourceType = 'file' | 'http_json' | 'document' | 'scraper';
 
 /** The one connector this release ships, named and versioned so a Plan pins it. */
 export const HTTP_JSON_CONNECTOR = { name: 'http-json', version: 1 } as const;
@@ -141,7 +141,7 @@ export interface AcquisitionRunRecord {
   acquisition_run_id: string;
   workspace_id: string;
   source_id: string;
-  mode: 'manual_upload' | 'connector';
+  mode: 'manual_upload' | 'connector' | 'scraper';
   trigger: 'manual' | 'scheduled';
   /** The window a manual backfill states; null for a normal Run. */
   backfill: { start: string; end: string } | null;
@@ -149,6 +149,8 @@ export interface AcquisitionRunRecord {
   attempts: number;
   status: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled';
   queued_at: string;
+  /** The schedule instant a scheduled Run was due; null for a manual Run. */
+  scheduled_for: string | null;
   started_at: string | null;
   completed_at: string | null;
   raw_acquisition_ids: string[];
@@ -232,6 +234,27 @@ export interface AcquisitionCheckpointState {
   generation: number;
 }
 
+/**
+ * How often a scheduled Source reads and how late its Run may start.
+ *
+ * The tolerance is the promise the schedule makes: a Run that begins within it
+ * started on time, and one that begins later is a measurably missed start.
+ */
+export interface ConnectionSchedule {
+  every_minutes: number;
+  start_tolerance_seconds: number;
+}
+
+/**
+ * How quickly a Source's acquisition result must become current after the
+ * instant its Run was due. The pair states two measurement points, so a
+ * schedule is certified by the distribution it really produced.
+ */
+export interface ConnectionPublicationTargets {
+  p95_seconds: number;
+  p99_seconds: number;
+}
+
 /** One immutable Acquisition Connection Version: endpoint, auth scheme, and policy. */
 export interface AcquisitionConnectionVersion {
   version: number;
@@ -246,7 +269,9 @@ export interface AcquisitionConnectionVersion {
   retry: ConnectionRetryPolicy;
   pacing: ConnectionPacingPolicy;
   pagination: ConnectionPagination;
-  schedule: { every_minutes: number } | null;
+  schedule: ConnectionSchedule | null;
+  /** The publication latency the Connection promises; null when none is declared. */
+  publication_targets: ConnectionPublicationTargets | null;
   content_hash: string;
 }
 
@@ -1203,11 +1228,354 @@ export interface DataProductProposalRecord {
   publications: DataProductProposalPublicationRecord[];
 }
 
+// ---------------------------------------------------------------------------
+// Scraping: Scraper Tasks, Scraper Services, and the Runs that reuse them.
+// ---------------------------------------------------------------------------
+
+/** The one declarative scraper engine this release ships, pinned by every Service Version. */
+export const DECLARATIVE_SCRAPER_ENGINE = { name: 'declarative-scraper', version: 1 } as const;
+
 /**
- * Every Proposal the Deployment holds, of either kind. One collection keeps a
+ * The approved network scope of one Scraper Service: the exact origins and path
+ * prefixes it may reach. Every request, fixture, and live verification is
+ * checked against it, so a compiled candidate cannot widen its own reach.
+ */
+export interface ScraperNetworkScope {
+  origins: string[];
+  paths: string[];
+}
+
+/** Where one scraped page lives and how the page sequence is asked for. */
+export interface ScraperTarget {
+  /** The one endpoint origin the pages are read from. */
+  base_url: string;
+  /** A path template; `{parameter}` placeholders are filled from run parameters. */
+  path: string;
+  /** The query parameter that carries the page number; null reads one page only. */
+  page_parameter: string | null;
+  first_page: number;
+  page_size: number | null;
+  page_size_parameter: string | null;
+  /** The most pages one attempt may read; reaching it with records left fails. */
+  max_pages: number;
+}
+
+/** One output column and the element inside a record that carries its value. */
+export interface ScraperOutputField {
+  name: string;
+  /** `element`, `element.class`, or `element.class@attribute`. */
+  selector: string;
+}
+
+/** The logical output one Scraper Service returns: records and their columns. */
+export interface ScraperOutput {
+  /** The element that delimits one record, such as `tr.row`. */
+  record_selector: string;
+  fields: ScraperOutputField[];
+}
+
+/** One declared run parameter, never a value captured from the target. */
+export interface ScraperParameter {
+  name: string;
+  type: 'string' | 'integer';
+  required: boolean;
+  default: string | null;
+}
+
+/** The operational constraints one attempt is held to. */
+export interface ScraperConstraints {
+  timeout_ms: number;
+  max_bytes: number;
+  max_records: number;
+}
+
+/** One versioned fixture page: a frozen response and the output it must produce. */
+export interface ScraperFixturePage {
+  name: string;
+  /** The path the page answers, checked against the approved network scope. */
+  path: string;
+  content_type: string;
+  body: string;
+  expected_record_count: number;
+  /** The exact records the page must extract, when the fixture states them. */
+  expected_records?: Array<Record<string, string>>;
+}
+
+/** The fixtures one Scraper Task Version pins, so validation needs no live target. */
+export interface ScraperFixtureSet {
+  version: number;
+  pages: ScraperFixturePage[];
+}
+
+/** One immutable Scraper Task Version: every fact compilation draws on. */
+export interface ScraperTaskVersion {
+  version: number;
+  published_at: string;
+  published_by: string;
+  target: ScraperTarget;
+  network_scope: ScraperNetworkScope;
+  output: ScraperOutput;
+  parameters: ScraperParameter[];
+  fixtures: ScraperFixtureSet;
+  constraints: ScraperConstraints;
+  /** Names of stored credentials, never their values. */
+  credential_refs: string[];
+  fixtures_hash: string;
+  content_hash: string;
+}
+
+/** A versioned Workspace Artifact from which Scraper Services are compiled. */
+export interface ScraperTaskArtifact {
+  scraper_task_id: string;
+  workspace_id: string;
+  name: string;
+  owner_user_id: string;
+  created_at: string;
+  versions: ScraperTaskVersion[];
+}
+
+/** Everything a published Scraper Service Version carries; no secret is among it. */
+export interface ScraperServiceContent {
+  engine: { name: 'declarative-scraper'; version: 1 };
+  target: ScraperTarget;
+  network_scope: ScraperNetworkScope;
+  output: ScraperOutput;
+  parameters: ScraperParameter[];
+  constraints: ScraperConstraints;
+  credential_refs: string[];
+  /** The exact Scraper Task Version this Service was compiled from. */
+  source_task: { version: number; content_hash: string };
+  fixtures: { version: number; hash: string };
+}
+
+/** One immutable published Scraper Service Version, ready for repeated Runs. */
+export interface ScraperServiceVersion {
+  version: number;
+  published_at: string;
+  published_by: string;
+  content: ScraperServiceContent;
+  content_hash: string;
+  /** Set when the Version may no longer execute, while its history stays readable. */
+  withdrawn_at: string | null;
+}
+
+/** The Scraper Service Artifact one Scraper Task compiles into. */
+export interface ScraperServiceArtifact {
+  scraper_service_id: string;
+  workspace_id: string;
+  scraper_task_id: string;
+  name: string;
+  owner_user_id: string;
+  created_at: string;
+  versions: ScraperServiceVersion[];
+}
+
+/** The exact published Scraper Service Version one Source pins through Source Adoption. */
+export interface SourceScraperServiceRecord {
+  source_id: string;
+  workspace_id: string;
+  scraper_service_id: string;
+  adopted_version: number;
+  content_hash: string;
+  proposal_id: string;
+  adopted_at: string;
+  adopted_by: string;
+}
+
+/** One stored credential reference a Scraper Service may present; the value is sealed. */
+export interface ScraperCredentialRecord {
+  ref: string;
+  workspace_id: string;
+  location: 'bearer' | 'cookie';
+  cookie_name: string | null;
+  sealed: SealedSecret;
+  created_at: string;
+  created_by: string;
+}
+
+/** One structured, sanitized diagnostic a scraping attempt produced. */
+export interface ScraperDiagnostic {
+  code: string;
+  page: number | null;
+  message: string;
+}
+
+/** What one scraped page produced, and the response it was read from. */
+export interface ScraperManifestPage {
+  page: number;
+  url: string;
+  status: number;
+  response_hash: string;
+  response_bytes: number;
+  raw_id: string | null;
+  record_count: number;
+}
+
+/**
+ * The manifest and diagnostics one scraping attempt returns alongside its Raw
+ * Acquisitions. It never holds a credential value or a request header.
+ */
+export interface ScraperRunManifest {
+  manifest_id: string;
+  workspace_id: string;
+  source_id: string;
+  acquisition_run_id: string;
+  scraper_service_id: string;
+  scraper_service_version: number;
+  scraper_service_content_hash: string;
+  scraper_task_id: string;
+  scraper_task_version: number;
+  scraper_task_content_hash: string;
+  engine: { name: 'declarative-scraper'; version: 1 };
+  /** The resolved run parameters the attempt was held to. */
+  parameters: Record<string, string>;
+  pages: ScraperManifestPage[];
+  record_count: number;
+  diagnostics: ScraperDiagnostic[];
+  started_at: string;
+  completed_at: string | null;
+  status: 'running' | 'complete' | 'failed';
+}
+
+/** The Scraper Service Versions a Proposal was compiled against. */
+export interface ScraperProposalBase {
+  scraper_service_id: string | null;
+  scraper_service_version: number | null;
+  scraper_service_content_hash: string | null;
+}
+
+/** What the compiled Service was derived from, and how much of it there was. */
+export interface ScraperProposalEvidence {
+  task_hash: string;
+  fixtures_version: number;
+  fixtures_hash: string;
+  output_fields: string[];
+  network_scope: ScraperNetworkScope;
+}
+
+/** The one candidate Scraper Service a Proposal submits for all-or-nothing Approval. */
+export interface ScraperProposalCandidates {
+  service: ScraperServiceContent;
+  content_hash: string;
+}
+
+/** One deterministic check the validation evidence reports on. */
+export interface ScraperValidationCheck {
+  name: string;
+  passed: boolean;
+  detail: string | null;
+}
+
+/** What one versioned fixture page produced while validating. */
+export interface ScraperValidationFixture {
+  name: string;
+  path: string;
+  record_count: number;
+  expected_record_count: number;
+  records_hash: string;
+  body_hash: string;
+}
+
+/** The evidence one deterministic validation run against the pinned fixtures produced. */
+export interface ScraperValidationRecord {
+  validated_at: string;
+  validated_by: string;
+  checks: ScraperValidationCheck[];
+  fixtures: ScraperValidationFixture[];
+  passed: boolean;
+  evidence_hash: string;
+}
+
+/**
+ * The evidence one isolated live verification produced. It is recorded only
+ * after Approval and Publication, and it integrates nothing.
+ */
+export interface ScraperVerificationRecord {
+  verified_at: string;
+  verified_by: string;
+  scraper_service_version: number;
+  scraper_service_content_hash: string;
+  passed: boolean;
+  pages: ScraperManifestPage[];
+  record_count: number;
+  diagnostics: ScraperDiagnostic[];
+  evidence_hash: string;
+}
+
+/** The lineage every Approval, Publication, verification, and Adoption restates. */
+export interface ScraperProposalProvenance {
+  engine: { name: 'declarative-scraper'; version: 1 };
+  scraper_task_id: string;
+  scraper_task_version: number;
+  scraper_task_content_hash: string;
+  fixtures_hash: string;
+  validation_hash: string;
+  verification_hash: string;
+  candidate_content_hash: string;
+  proposal_hash: string;
+}
+
+/** One Workspace Administrator decision on one exact Scraper Proposal. */
+export interface ScraperDecisionRecord {
+  decided_at: string;
+  decided_by: string;
+  actor: string;
+  outcome: 'approved' | 'rejected';
+  reason: string | null;
+  evidence_hash: string;
+  provenance: ScraperProposalProvenance;
+}
+
+/** The lifecycle fact making the approved Scraper Service Version available. */
+export interface ScraperPublicationRecord {
+  published_at: string;
+  published_by: string;
+  actor: string;
+  scraper_service_version: number;
+  content_hash: string;
+  evidence_hash: string;
+  provenance: ScraperProposalProvenance;
+}
+
+/** The lifecycle fact explicitly binding one Source to the published Version. */
+export interface ScraperAdoptionRecord {
+  adopted_at: string;
+  adopted_by: string;
+  actor: string;
+  source_id: string;
+  scraper_service_version: number;
+  previous_adopted_version: number | null;
+  content_hash: string;
+  evidence_hash: string;
+  provenance: ScraperProposalProvenance;
+}
+
+/** One immutable review unit for one compiled Scraper Service candidate. */
+export interface ScraperProposalRecord {
+  kind: 'scraper';
+  proposal_id: string;
+  workspace_id: string;
+  scraper_task_id: string;
+  scraper_task_version: number;
+  created_at: string;
+  created_by: string;
+  created_by_user_id: string;
+  base: ScraperProposalBase;
+  evidence: ScraperProposalEvidence;
+  candidates: ScraperProposalCandidates;
+  proposal_hash: string;
+  validations: ScraperValidationRecord[];
+  verifications: ScraperVerificationRecord[];
+  decisions: ScraperDecisionRecord[];
+  publications: ScraperPublicationRecord[];
+  adoptions: ScraperAdoptionRecord[];
+}
+
+/**
+ * Every Proposal the Deployment holds, of any kind. One collection keeps a
  * Proposal one all-or-nothing review unit whichever Artifact it proposes.
  */
-export type ArtifactProposalRecord = IntegrationProposalRecord | DataProductProposalRecord;
+export type ArtifactProposalRecord = IntegrationProposalRecord | DataProductProposalRecord | ScraperProposalRecord;
 
 export function findModelProfile(
   profiles: ModelProfileArtifact[],
@@ -1235,4 +1603,54 @@ export function findArtifactProposal(
   proposalId: string,
 ): ArtifactProposalRecord | undefined {
   return proposals.find((proposal) => proposal.proposal_id === proposalId);
+}
+
+export function findScraperTask(tasks: ScraperTaskArtifact[], taskId: string): ScraperTaskArtifact | undefined {
+  return tasks.find((task) => task.scraper_task_id === taskId);
+}
+
+export function latestScraperTaskVersion(task: ScraperTaskArtifact | undefined): ScraperTaskVersion | undefined {
+  return task?.versions[task.versions.length - 1];
+}
+
+export function findScraperService(
+  services: ScraperServiceArtifact[],
+  serviceId: string,
+): ScraperServiceArtifact | undefined {
+  return services.find((service) => service.scraper_service_id === serviceId);
+}
+
+export function scraperServiceForTask(
+  services: ScraperServiceArtifact[],
+  taskId: string,
+): ScraperServiceArtifact | undefined {
+  return services.find((service) => service.scraper_task_id === taskId);
+}
+
+export function latestScraperServiceVersion(
+  service: ScraperServiceArtifact | undefined,
+): ScraperServiceVersion | undefined {
+  return service?.versions[service.versions.length - 1];
+}
+
+export function findScraperServiceVersion(
+  service: ScraperServiceArtifact | undefined,
+  version: number,
+): ScraperServiceVersion | undefined {
+  return service?.versions.find((candidate) => candidate.version === version);
+}
+
+export function findScraperCredential(
+  credentials: ScraperCredentialRecord[],
+  workspaceId: string,
+  ref: string,
+): ScraperCredentialRecord | undefined {
+  return credentials.find((credential) => credential.workspace_id === workspaceId && credential.ref === ref);
+}
+
+export function adoptedScraperService(
+  pins: SourceScraperServiceRecord[],
+  sourceId: string,
+): SourceScraperServiceRecord | undefined {
+  return pins.find((pin) => pin.source_id === sourceId);
 }

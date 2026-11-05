@@ -22,7 +22,7 @@ import { OperatorError } from './errors.js';
 import { workspaceRoleOf } from './platform.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
-const SOURCE_TYPES: SourceType[] = ['file', 'http_json', 'document'];
+const SOURCE_TYPES: SourceType[] = ['file', 'http_json', 'document', 'scraper'];
 const NAME_MINIMUM = 2;
 const NAME_MAXIMUM = 128;
 

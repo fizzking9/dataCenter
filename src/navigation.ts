@@ -15,6 +15,7 @@ import { openPlatform } from './session.js';
  */
 export type NavigationKey =
   | 'deployment.workspaces'
+  | 'deployment.users'
   | 'deployment.modelProfiles'
   | 'workspace.overview'
   | 'workspace.sources'
@@ -42,7 +43,11 @@ const WORKSPACE_NAVIGATION: Record<WorkspaceRole, NavigationKey[]> = {
   Consumer: ['workspace.overview', 'workspace.products'],
 };
 
-const DEPLOYMENT_NAVIGATION: NavigationKey[] = ['deployment.workspaces', 'deployment.modelProfiles'];
+const DEPLOYMENT_NAVIGATION: NavigationKey[] = [
+  'deployment.workspaces',
+  'deployment.users',
+  'deployment.modelProfiles',
+];
 
 export interface ActivityItem {
   activity_id: string;

@@ -95,13 +95,13 @@ function storeAcquisition(
   const actor = resolveActor(session, options.token, context);
   const source = requireAdministrableSource(session, actor, context, options.sourceId);
   const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
-  if (source.type === 'http_json') {
+  if (source.type === 'http_json' || source.type === 'scraper') {
     reject(
       session,
       actorLabel(actor.user),
       scoped,
       'ACQUISITION_MODE_MISMATCH',
-      'This Source is acquired by a connector, so it is never acquired by a hand upload.',
+      'This Source is acquired by an approved connector or Scraper Service, so it is never acquired by a hand upload.',
       'Queue an Acquisition Run for the Source instead.',
     );
   }
@@ -198,6 +198,7 @@ function storeAcquisition(
     attempts: 1,
     status: 'complete',
     queued_at: now,
+    scheduled_for: null,
     started_at: now,
     completed_at: now,
     raw_acquisition_ids: [rawId],

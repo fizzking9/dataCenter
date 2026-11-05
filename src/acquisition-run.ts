@@ -84,6 +84,7 @@ function queueRun(
   context: ActionContext,
   trigger: 'manual' | 'scheduled',
   queuedAt: string,
+  scheduledFor: string | null,
   backfill: { start: string; end: string } | null,
 ): AcquisitionRunRecord {
   const run: AcquisitionRunRecord = {
@@ -99,6 +100,7 @@ function queueRun(
     attempts: 0,
     status: 'queued',
     queued_at: queuedAt,
+    scheduled_for: scheduledFor,
     started_at: null,
     completed_at: null,
     raw_acquisition_ids: [],
@@ -158,7 +160,7 @@ export function enqueueAcquisition(options: {
   const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
   requireConnectorSource(session, actorLabel(actor.user), scoped, source);
   const backfill = readBackfill(session, actorLabel(actor.user), scoped, options.from, options.to);
-  const run = queueRun(session, source, actorLabel(actor.user), scoped, 'manual', new Date().toISOString(), backfill);
+  const run = queueRun(session, source, actorLabel(actor.user), scoped, 'manual', new Date().toISOString(), null, backfill);
   session.save();
   return {
     source_id: source.source_id,
@@ -460,7 +462,10 @@ export async function workAcquisition(options: {
     acquisition,
   });
   run.raw_acquisition_ids = outcome.rawIds;
-  run.completed_at = new Date().toISOString();
+  // The attempt completes on the clock that planned it, so a worker given an
+  // explicit instant reports one reproducible timeline: a scheduled Run's start
+  // and publication latencies are facts of the ledger, not of the test harness.
+  run.completed_at = at;
   plan.completed_at = run.completed_at;
 
   if (!outcome.complete) {
@@ -671,7 +676,7 @@ export function tickSchedules(options: {
     if (atMs < dueAt) continue;
 
     const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
-    const run = queueRun(session, source, actorLabel(actor.user), scoped, 'scheduled', at, null);
+    const run = queueRun(session, source, actorLabel(actor.user), scoped, 'scheduled', at, new Date(dueAt).toISOString(), null);
     enqueued.push({
       source_id: source.source_id,
       acquisition_run_id: run.acquisition_run_id,
@@ -756,6 +761,79 @@ export function resetAcquisitionCheckpoint(options: {
   session.audit({ ...scoped, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { checkpoint_reset: true } });
   session.save();
   return { source_id: source.source_id, checkpoint: { ...artifact.checkpoint } };
+}
+
+/**
+ * Reads the immutable Acquisition Plan — the manifest — one Run attempt left,
+ * together with the Raw Acquisition inventory that attempt kept.
+ *
+ * The Plan is durable before the first request and after every page, so a later
+ * process reads exactly the fragments and window the attempt really used rather
+ * than reconstructing them from the current checkpoint.
+ */
+export function readAcquisitionPlan(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  runId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'acquisition_plan_read', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const run = session.state.acquisition_runs.find(
+    (candidate) => candidate.acquisition_run_id === options.runId,
+  );
+  if (!run) {
+    reject(session, actorLabel(actor.user), context, 'ACQUISITION_RUN_NOT_FOUND', 'No Acquisition Run has this identifier.');
+  }
+  const source = requireAdministeredSource(session, actor, context, run.source_id);
+  const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
+  const plan = [...session.state.acquisition_plans]
+    .reverse()
+    .find((candidate) => candidate.acquisition_run_id === run.acquisition_run_id);
+  if (!plan) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      scoped,
+      'ACQUISITION_PLAN_NOT_FOUND',
+      'This Run has not durably planned an attempt.',
+      'Work the Run so its Plan is durable before reading its manifest.',
+    );
+  }
+  const rawAcquisitions = session.state.raw_acquisitions
+    .filter((raw) => raw.acquisition_run_id === run.acquisition_run_id)
+    .map((raw) => ({
+      raw_id: raw.raw_id,
+      content_hash: raw.content_hash,
+      byte_length: raw.byte_length,
+      received_at: raw.received_at,
+    }));
+  session.audit({
+    ...scoped,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: {
+      acquisition_run_id: run.acquisition_run_id,
+      plan_id: plan.plan_id,
+      raw_acquisition_count: rawAcquisitions.length,
+    },
+  });
+  return {
+    source_id: source.source_id,
+    acquisition_run_id: run.acquisition_run_id,
+    plan: {
+      ...plan,
+      window: plan.window === null ? null : { ...plan.window },
+      checkpoint_before: plan.checkpoint_before === null ? null : { ...plan.checkpoint_before },
+      checkpoint_after: plan.checkpoint_after === null ? null : { ...plan.checkpoint_after },
+      pages: plan.pages.map((page) => ({
+        ...page,
+        failed_attempts: page.failed_attempts.map((attempt) => ({ ...attempt })),
+      })),
+    },
+    raw_acquisitions: rawAcquisitions,
+  };
 }
 
 /** The Sources of a Workspace and the acquisition state each one holds. */

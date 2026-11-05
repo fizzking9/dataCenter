@@ -8,10 +8,12 @@ import {
   cancelAcquisition,
   enqueueAcquisition,
   listSourceAcquisition,
+  readAcquisitionPlan,
   resetAcquisitionCheckpoint,
   tickSchedules,
   workAcquisition,
 } from './acquisition-run.js';
+import { acquisitionTargets } from './acquisition-targets.js';
 import { listAuditEvents } from './audit-view.js';
 import { createAgentIdentity, registerOAuthClient, revokeAgentIdentity, revokeOAuthClient } from './agents.js';
 import { login, logout } from './auth.js';
@@ -36,7 +38,7 @@ import { adoptIntegrationConfiguration, publishIntegrationConfiguration } from '
 import { publishModelBinding, revokeModelBinding, showModelBinding } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, publishModelProfile, showModelProfile } from './model-profile.js';
 import { importLicense, readLicenseSummary } from './license.js';
-import { askDataProduct } from './natural-language-query.js';
+import { askDataProduct, askWorkspaceQuery } from './natural-language-query.js';
 import { queryDataProduct } from './product-query.js';
 import { listDataProductReleases, listDataProducts, publishDataProduct, withdrawDataProductVersion } from './products.js';
 import {
@@ -60,6 +62,18 @@ import {
 } from './product-proposal.js';
 import { createSource } from './sources.js';
 import { adoptSourceAcquisition, publishSourceAcquisition } from './source-acquisition.js';
+import {
+  adoptScraperProposal,
+  approveScraperProposal,
+  compileScraperService,
+  publishScraperProposal,
+  rejectScraperProposal,
+  showScraperProposal,
+  validateScraperProposal,
+  verifyScraperProposal,
+} from './scraper-service.js';
+import { publishScraperCredential, publishScraperTask, showScraperTask } from './scraper-task.js';
+import { runScraperService } from './scraper-run.js';
 import { deploymentStatus } from './status.js';
 import { readDeployment } from './state.js';
 import { createUser, deactivateUser, listUsers, transferOwnership } from './users.js';
@@ -69,6 +83,7 @@ const GROUPED_COMMANDS = new Set([
   'user', 'workspace', 'membership', 'ownership', 'context', 'audit',
   'source', 'connection', 'acquisition', 'acquisition-config', 'integration', 'dataset',
   'product', 'product-proposal', 'grant', 'export', 'console', 'agent', 'model', 'binding', 'proposal',
+  'scraper',
 ]);
 const BOOLEAN_FLAGS = new Set([
   'admin-password-stdin', 'password-stdin', 'deployment-administrator', 'credential-stdin',
@@ -381,6 +396,14 @@ async function main(): Promise<void> {
     emit(acquisitionCheckpoint({ ...governed(options), sourceId: required(options, 'source') }));
     return;
   }
+  if (command === 'acquisition' && subcommand === 'plan') {
+    emit(readAcquisitionPlan({ ...governed(options), runId: required(options, 'run') }));
+    return;
+  }
+  if (command === 'acquisition' && subcommand === 'targets') {
+    emit(acquisitionTargets({ ...governed(options), sourceId: required(options, 'source') }));
+    return;
+  }
   if (command === 'acquisition' && subcommand === 'checkpoint-reset') {
     emit(resetAcquisitionCheckpoint({ ...governed(options), sourceId: required(options, 'source') }));
     return;
@@ -462,13 +485,23 @@ async function main(): Promise<void> {
     return;
   }
   if (command === 'product' && subcommand === 'ask') {
-    emit(await askDataProduct({
+    // A Natural-Language Query names either one Data Product or one Workspace,
+    // never both, so the turn's authority is always explicit.
+    const dataProductId = options.get('product');
+    const workspaceId = options.get('workspace');
+    if ((dataProductId === undefined) === (workspaceId === undefined)) {
+      throw new Error('product ask requires exactly one of --product or --workspace.');
+    }
+    const shared = {
       ...governed(options),
-      dataProductId: required(options, 'product'),
       question: required(options, 'question'),
       ...(options.has('clarification') ? { clarification: required(options, 'clarification') } : {}),
       ...(options.has('binding') ? { bindingId: required(options, 'binding') } : {}),
-    }));
+      ...(options.has('conversation') ? { conversation: required(options, 'conversation') } : {}),
+    };
+    emit(dataProductId !== undefined
+      ? await askDataProduct({ ...shared, dataProductId })
+      : await askWorkspaceQuery({ ...shared, workspaceId: required(options, 'workspace') }));
     return;
   }
   if (command === 'grant' && subcommand === 'publish') {
@@ -709,6 +742,90 @@ async function main(): Promise<void> {
   }
   if (command === 'product-proposal' && subcommand === 'show') {
     emit(showProductProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'task') {
+    emit(publishScraperTask({
+      ...governed(options),
+      workspaceId: required(options, 'workspace'),
+      name: required(options, 'name'),
+      configPath: required(options, 'config'),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'task-show') {
+    emit(showScraperTask({
+      ...governed(options),
+      taskId: required(options, 'task'),
+      ...(options.has('version') ? { version: Number(required(options, 'version')) } : {}),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'credential') {
+    emit(publishScraperCredential({
+      ...governed(options),
+      workspaceId: required(options, 'workspace'),
+      ref: required(options, 'name'),
+      location: required(options, 'location'),
+      ...(options.has('cookie-name') ? { cookieName: required(options, 'cookie-name') } : {}),
+      ...(options.get('credential-stdin') === 'true' ? { credential: readStdin() } : {}),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'compile') {
+    emit(compileScraperService({
+      ...governed(options),
+      taskId: required(options, 'task'),
+      ...(options.has('version') ? { taskVersion: Number(required(options, 'version')) } : {}),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'validate') {
+    emit(validateScraperProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'reject') {
+    emit(rejectScraperProposal({
+      ...governed(options),
+      proposalId: required(options, 'proposal'),
+      reason: required(options, 'reason'),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'approve') {
+    emit(approveScraperProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'publish') {
+    emit(publishScraperProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'verify') {
+    emit(await verifyScraperProposal({
+      ...governed(options),
+      proposalId: required(options, 'proposal'),
+      ...(options.has('parameters') ? { parametersPath: required(options, 'parameters') } : {}),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'adopt') {
+    emit(adoptScraperProposal({
+      ...governed(options),
+      proposalId: required(options, 'proposal'),
+      sourceId: required(options, 'source'),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'show') {
+    emit(showScraperProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'run') {
+    emit(await runScraperService({
+      ...governed(options),
+      sourceId: required(options, 'source'),
+      ...(options.has('parameters') ? { parametersPath: required(options, 'parameters') } : {}),
+    }));
     return;
   }
   throw new Error(`Unsupported lifecycle command: ${[command, subcommand].filter(Boolean).join(' ')}.`);

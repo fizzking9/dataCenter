@@ -17,6 +17,11 @@ import type {
   SourceRecord,
   ArtifactProposalRecord,
   ModelProfileArtifact,
+  ScraperCredentialRecord,
+  ScraperRunManifest,
+  ScraperServiceArtifact,
+  ScraperTaskArtifact,
+  SourceScraperServiceRecord,
   WorkspaceModelBindingRecord,
 } from './catalog.js';
 import type { MfaRecord } from './enrollment.js';
@@ -27,7 +32,7 @@ export type DeploymentRole = 'Deployment Administrator';
 export type WorkspaceRole = 'Workspace Administrator' | 'Consumer';
 
 export const DEPLOYMENT_CONTEXT_ARTIFACT = 'deployment-business-context';
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 export const USERNAME_PATTERN = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,189}$/;
 
 export interface UserRecord {
@@ -77,6 +82,21 @@ export interface AgentIdentityRecord {
   workspace_ids: string[];
   scopes: string[];
   status: AgentIdentityStatus;
+  created_at: string;
+  created_by: string;
+  revoked_at: string | null;
+}
+
+/**
+ * A deployment-owned non-human principal for internal platform jobs, bound to
+ * the Workspaces where it executes. It is not an Agent Identity: it never holds
+ * Consumer grants, MCP scopes, or OAuth clients, and it owns no Artifact.
+ */
+export interface ServiceIdentityRecord {
+  service_identity_id: string;
+  name: string;
+  workspace_ids: string[];
+  status: 'active' | 'revoked';
   created_at: string;
   created_by: string;
   revoked_at: string | null;
@@ -147,6 +167,7 @@ export interface PlatformState {
   schema_version: number;
   users: UserRecord[];
   agent_identities: AgentIdentityRecord[];
+  service_identities: ServiceIdentityRecord[];
   oauth_clients: OAuthClientRecord[];
   access_tokens: AccessTokenRecord[];
   workspaces: WorkspaceRecord[];
@@ -170,6 +191,11 @@ export interface PlatformState {
   model_profiles: ModelProfileArtifact[];
   model_bindings: WorkspaceModelBindingRecord[];
   artifact_proposals: ArtifactProposalRecord[];
+  scraper_tasks: ScraperTaskArtifact[];
+  scraper_services: ScraperServiceArtifact[];
+  source_scraper_services: SourceScraperServiceRecord[];
+  scraper_credentials: ScraperCredentialRecord[];
+  scraper_runs: ScraperRunManifest[];
 }
 
 /** Every human identity is stated as one account identifier of the form name@domain. */
@@ -197,6 +223,7 @@ export function readPlatform(root: string): PlatformState {
         schema_version: CURRENT_SCHEMA_VERSION,
         users: [],
         agent_identities: [],
+        service_identities: [],
         oauth_clients: [],
         access_tokens: [],
         workspaces: [],
@@ -220,11 +247,19 @@ export function readPlatform(root: string): PlatformState {
         model_profiles: [],
         model_bindings: [],
         artifact_proposals: [],
+        scraper_tasks: [],
+        scraper_services: [],
+        source_scraper_services: [],
+        scraper_credentials: [],
+        scraper_runs: [],
       };
   // A Deployment installed under an earlier schema keeps working: the added
   // Collections start empty rather than failing the read closed.
   state.schema_version = CURRENT_SCHEMA_VERSION;
   state.agent_identities ??= [];
+  // A Deployment written before Service Identities existed has none, and every
+  // one it does have keeps exactly the bindings it was created with.
+  state.service_identities ??= [];
   state.oauth_clients ??= [];
   state.access_tokens ??= [];
   state.sources ??= [];
@@ -248,6 +283,11 @@ export function readPlatform(root: string): PlatformState {
   state.model_profiles ??= [];
   state.model_bindings ??= [];
   state.artifact_proposals ??= [];
+  state.scraper_tasks ??= [];
+  state.scraper_services ??= [];
+  state.source_scraper_services ??= [];
+  state.scraper_credentials ??= [];
+  state.scraper_runs ??= [];
   // A Run recorded before acquisition was queued still reads as a completed
   // manual attempt rather than a Run that never started.
   for (const run of state.acquisition_runs) {
@@ -345,6 +385,10 @@ export function findAgentIdentity(state: PlatformState, agentIdentityId: string)
   return state.agent_identities.find((agent) => agent.agent_identity_id === agentIdentityId);
 }
 
+export function findServiceIdentity(state: PlatformState, serviceIdentityId: string): ServiceIdentityRecord | undefined {
+  return state.service_identities.find((identity) => identity.service_identity_id === serviceIdentityId);
+}
+
 export function findOAuthClient(state: PlatformState, clientId: string): OAuthClientRecord | undefined {
   return state.oauth_clients.find((client) => client.client_id === clientId);
 }
@@ -363,20 +407,22 @@ export function isDeploymentAdministrator(user: UserRecord): boolean {
   return user.deployment_role === 'Deployment Administrator';
 }
 
+/** Active Workspace Administrators of one Workspace, used for orphan safeguards. */
+export function activeWorkspaceAdministrators(state: PlatformState, workspaceId: string): UserRecord[] {
+  return state.memberships
+    .filter((membership) => membership.workspace_id === workspaceId && membership.role === 'Workspace Administrator')
+    .map((membership) => findUserById(state, membership.user_id))
+    .filter((user): user is UserRecord => user !== undefined && user.status === 'active');
+}
+
 /** Active Workspace Administrators other than the named User, used for orphan safeguards. */
 export function otherActiveWorkspaceAdministrators(
   state: PlatformState,
   workspaceId: string,
   userId: string,
 ): UserRecord[] {
-  return state.memberships
-    .filter(
-      (membership) => membership.workspace_id === workspaceId
-        && membership.role === 'Workspace Administrator'
-        && membership.user_id !== userId,
-    )
-    .map((membership) => findUserById(state, membership.user_id))
-    .filter((user): user is UserRecord => user !== undefined && user.status === 'active');
+  return activeWorkspaceAdministrators(state, workspaceId)
+    .filter((user) => user.user_id !== userId);
 }
 
 export function findContextArtifact(state: PlatformState, artifactId: string): ContextArtifact | undefined {

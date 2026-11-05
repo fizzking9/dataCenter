@@ -103,6 +103,99 @@ export interface DeploymentWorkspace {
   name: string;
   created_at: string;
   role: string;
+  /** Governance metadata: how many active administrators keep it governable. */
+  active_administrators: number | null;
+}
+
+export interface CreatedWorkspace {
+  workspace_id: string;
+  name: string;
+  created_at: string;
+  administrator: string;
+  administrator_role: WorkspaceRoleValue;
+  totp_secret?: string;
+  recovery_codes?: string[];
+  enrollment_uri?: string;
+}
+
+export interface EmergencyAdministrator {
+  workspace_id: string;
+  workspace_name: string;
+  username: string;
+  role: WorkspaceRoleValue;
+  previous_role: WorkspaceRoleValue | null;
+  active_administrators: number;
+  totp_secret?: string;
+  recovery_codes?: string[];
+  enrollment_uri?: string;
+}
+
+/** One User of this Deployment, with accountability metadata only. */
+export interface DeploymentUserView {
+  user_id: string;
+  username: string;
+  status: 'active' | 'deactivated';
+  deployment_role: string | null;
+  mfa_enrolled: boolean;
+  owned_artifacts: number;
+  workspace_roles: Array<{
+    workspace_id: string;
+    workspace_name: string | null;
+    role: WorkspaceRoleValue;
+  }>;
+}
+
+export interface DeploymentUserList {
+  users: DeploymentUserView[];
+}
+
+/** A created account, with the one-time enrollment material an Administrator gets. */
+export interface DeploymentUserCreated {
+  user_id: string;
+  username: string;
+  deployment_role: string | null;
+  status: string;
+  mfa_enrolled: boolean;
+  totp_secret?: string;
+  recovery_codes?: string[];
+  enrollment_uri?: string;
+}
+
+export interface DeploymentUserDeactivated {
+  user_id: string;
+  username: string;
+  status: string;
+}
+
+export interface OwnershipTransferResult {
+  from: string;
+  owner: string;
+  transferred: number;
+  artifact_ids: string[];
+}
+
+/** What a Service Identity may do; it never consumes governed data. */
+export interface ServiceIdentityCapabilities {
+  executes_jobs: boolean;
+  consumes_data_products: boolean;
+  owns_artifacts: boolean;
+}
+
+export interface ServiceIdentityView {
+  service_identity_id: string;
+  name: string;
+  workspace_ids: string[];
+  workspaces: Array<{ workspace_id: string; name: string }>;
+  status: 'active' | 'revoked';
+  created_at: string;
+  created_by: string | null;
+  revoked_at: string | null;
+  capabilities: ServiceIdentityCapabilities;
+  already_revoked?: boolean;
+}
+
+export interface ServiceIdentityList {
+  service_identities: ServiceIdentityView[];
 }
 
 /** One Workspace membership, in the shape the administered Workspace lists it. */
@@ -575,6 +668,40 @@ export const platformApi = {
       workspaceId === undefined ? '/api/navigation' : `/api/navigation${workspaceQuery(workspaceId)}`,
     ),
   deploymentWorkspaces: () => request<{ workspaces: DeploymentWorkspace[] }>('/api/deployment/workspaces'),
+  createDeploymentWorkspace: (name: string, administrator: string) =>
+    request<CreatedWorkspace>('/api/deployment/workspaces', {
+      method: 'POST',
+      body: JSON.stringify({ name, administrator }),
+    }),
+  appointEmergencyAdministrator: (workspaceId: string, username: string) =>
+    request<EmergencyAdministrator>(
+      `/api/deployment/workspaces/${encodeURIComponent(workspaceId)}/emergency-administrator`,
+      { method: 'POST', body: JSON.stringify({ username }) },
+    ),
+  deploymentUsers: () => request<DeploymentUserList>('/api/deployment/users'),
+  createDeploymentUser: (body: { username: string; password: string; deployment_administrator: boolean }) =>
+    request<DeploymentUserCreated>('/api/deployment/users', { method: 'POST', body: JSON.stringify(body) }),
+  deactivateDeploymentUser: (username: string) =>
+    request<DeploymentUserDeactivated>('/api/deployment/users/deactivate', {
+      method: 'POST',
+      body: JSON.stringify({ username }),
+    }),
+  transferOwnership: (from: string, to: string) =>
+    request<OwnershipTransferResult>('/api/deployment/ownership-transfer', {
+      method: 'POST',
+      body: JSON.stringify({ from, to }),
+    }),
+  serviceIdentities: () => request<ServiceIdentityList>('/api/deployment/service-identities'),
+  createServiceIdentity: (name: string, workspaceIds: string[]) =>
+    request<ServiceIdentityView>('/api/deployment/service-identities', {
+      method: 'POST',
+      body: JSON.stringify({ name, workspace_ids: workspaceIds }),
+    }),
+  revokeServiceIdentity: (serviceIdentityId: string) =>
+    request<ServiceIdentityView>(
+      `/api/deployment/service-identities/${encodeURIComponent(serviceIdentityId)}/revoke`,
+      { method: 'POST' },
+    ),
   dataProducts: (workspaceId: string) =>
     request<DataProductList>(`/api/workspace/data-products${workspaceQuery(workspaceId)}`),
   context: (workspaceId: string) =>

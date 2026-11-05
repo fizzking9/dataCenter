@@ -78,6 +78,61 @@ export const EXTENDED_LEDGER_CONTRACT = {
   filters: ['sn', ...CONTRACT.filters],
 };
 
+/**
+ * A second governed ledger in the same Workspace, deliberately covering a later
+ * period than the device ledger, so a compound answer has to disclose two
+ * different as-of times and two different Releases.
+ */
+export const REFUND_LEDGER = [
+  '退款单号,城市,退款金额,退款日期',
+  'rf-001,杭州,88.00,2026-02-03',
+  'rf-002,上海,120.00,2026-02-10',
+].join('\n');
+
+const REFUND_INTEGRATION = {
+  identity: ['refund_id'],
+  schema: [
+    { name: 'refund_id', type: 'string' },
+    { name: 'city', type: 'string' },
+    { name: 'refund_amount', type: 'number' },
+    { name: 'refunded_on', type: 'date' },
+  ],
+  cleaning: [{ rule: 'trim', field: 'refund_id' }],
+  mapping: {
+    退款单号: 'refund_id',
+    城市: 'city',
+    退款金额: 'refund_amount',
+    退款日期: 'refunded_on',
+  },
+};
+
+export const REFUND_CONTRACT = {
+  title: '退款台账',
+  description: '按退款单号组织的退款金额',
+  fields: [
+    { name: 'refund_id', description: '退款单号' },
+    { name: 'city', description: '所属城市' },
+    { name: 'refund_amount', description: '退款金额' },
+    { name: 'refunded_on', description: '退款日期' },
+  ],
+  dimensions: ['city'],
+  metrics: [
+    { name: 'refund_count', description: '退款笔数', aggregation: 'count', value_type: 'integer' },
+    {
+      name: 'refund_total',
+      description: '退款金额合计',
+      aggregation: 'sum',
+      field: 'refund_amount',
+      value_type: 'money',
+      currency: 'CNY',
+    },
+  ],
+  grain: ['refund_id'],
+  time: { field: 'refunded_on', precision: 'date', time_zone: 'Asia/Shanghai' },
+  filters: ['city', 'refunded_on'],
+  limit: { default: 100, max: 500 },
+};
+
 export interface PublishedProduct extends WorkspaceFixture {
   sourceId: string;
   dataProductId: string;
@@ -101,17 +156,22 @@ export function publishLedgerProduct(contract: unknown = CONTRACT): PublishedPro
   return { ...base, sourceId, dataProductId: String(published.output.data_product_id) };
 }
 
-export function publishSource(fixture: PlatformFixture, token: string, workspaceId: string): string {
+export function publishSource(
+  fixture: PlatformFixture,
+  token: string,
+  workspaceId: string,
+  options: { name?: string; integration?: unknown } = {},
+): string {
   const source = command(
     fixture,
-    ['source', 'create', '--workspace', workspaceId, '--name', '设备台账', '--type', 'file'],
+    ['source', 'create', '--workspace', workspaceId, '--name', options.name ?? '设备台账', '--type', 'file'],
     { token },
   );
   assert.equal(source.status, 0, source.stderr);
   const sourceId = String(source.output.source_id);
   const published = command(
     fixture,
-    ['integration', 'publish', '--source', sourceId, '--config', jsonFile(fixture, 'integration', INTEGRATION)],
+    ['integration', 'publish', '--source', sourceId, '--config', jsonFile(fixture, 'integration', options.integration ?? INTEGRATION)],
     { token },
   );
   assert.equal(published.status, 0, published.stderr);
@@ -124,13 +184,39 @@ export function publishSource(fixture: PlatformFixture, token: string, workspace
   return sourceId;
 }
 
-export function acquireAndRelease(fixture: PlatformFixture, token: string, sourceId: string): void {
+export function acquireAndRelease(
+  fixture: PlatformFixture,
+  token: string,
+  sourceId: string,
+  ledger: string = LEDGER,
+  fileName = 'ledger.csv',
+): void {
   const upload = command(
     fixture,
-    ['acquisition', 'upload', '--source', sourceId, '--file', textFile(fixture, 'ledger.csv', LEDGER)],
+    ['acquisition', 'upload', '--source', sourceId, '--file', textFile(fixture, fileName, ledger)],
     { token },
   );
   assert.equal(upload.status, 0, upload.stderr);
   const released = command(fixture, ['dataset', 'release', '--source', sourceId], { token });
   assert.equal(released.status, 0, released.stderr);
+}
+
+/**
+ * Publishes a second Data Product into an existing Workspace, so one compound
+ * question can compose two independently governed products.
+ */
+export function publishRefundProduct(base: WorkspaceFixture): PublishedProduct {
+  const { fixture, workspaceId, workspaceAdministratorToken } = base;
+  const sourceId = publishSource(fixture, workspaceAdministratorToken, workspaceId, {
+    name: '退款台账',
+    integration: REFUND_INTEGRATION,
+  });
+  acquireAndRelease(fixture, workspaceAdministratorToken, sourceId, REFUND_LEDGER, 'refunds.csv');
+  const published = command(
+    fixture,
+    ['product', 'publish', '--source', sourceId, '--name', '退款台账', '--contract', jsonFile(fixture, 'refund-contract', REFUND_CONTRACT)],
+    { token: workspaceAdministratorToken },
+  );
+  assert.equal(published.status, 0, published.stderr);
+  return { ...base, sourceId, dataProductId: String(published.output.data_product_id) };
 }

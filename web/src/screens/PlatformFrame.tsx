@@ -40,6 +40,7 @@ function labelOf(key: string): string | undefined {
 
 function hrefOf(key: string, workspaceId: string | null): string | undefined {
   if (key === 'deployment.workspaces') return '/app/deployment';
+  if (key === 'deployment.users') return '/app/deployment/users';
   if (key === 'deployment.modelProfiles') return '/app/deployment/model-profiles';
   if (workspaceId === null || !key.startsWith('workspace.')) return undefined;
   const view = key.slice('workspace.'.length);
