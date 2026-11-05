@@ -279,7 +279,7 @@ test('Deployment and Workspace navigation are separate trees', async () => {
     assert.equal(await page.getByRole('navigation', { name: '部署导航' }).count(), 0);
     assert.equal(await page.getByRole('navigation', { name: '工作区导航' }).count(), 1);
     assert.equal(await page.getByRole('link', { name: '概览' }).count(), 1);
-    assert.equal(await page.getByRole('link', { name: '数据产品' }).count(), 1);
+    assert.equal(await page.getByRole('link', { name: '数据产品', exact: true }).count(), 1);
     assert.equal(await page.getByRole('link', { name: '业务上下文' }).count(), 1);
   } finally {
     await browser?.close();
@@ -475,8 +475,8 @@ test('the active Workspace, session state, background activity and required atte
     };
     await assertShell();
 
-    await page.getByRole('link', { name: '数据产品' }).click();
-    await page.getByRole('heading', { name: '数据产品' }).waitFor();
+    await page.getByRole('link', { name: '数据产品', exact: true }).click();
+    await page.getByRole('heading', { name: '数据产品', exact: true }).waitFor();
     await assertShell();
 
     await page.getByRole('link', { name: '业务上下文' }).click();

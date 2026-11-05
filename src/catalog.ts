@@ -1532,6 +1532,8 @@ export interface DataProductProposalPublicationRecord {
   data_product_id: string;
   data_product_version: number;
   data_product_release: number;
+  /** The exact Dataset Release the published Data Product points at. */
+  dataset_release: number;
   contract_hash: string;
   model: ProposalModelPin;
   evidence_hash: string;
