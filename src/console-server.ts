@@ -18,6 +18,23 @@ import { publishModelBinding, revokeModelBinding, showModelBindingWorkspace } fr
 import { activateModelProfile, evaluateModelProfile, listModelProfiles, publishModelProfile } from './model-profile.js';
 import { createSource, listWorkspaceSources, showWorkspaceSource } from './sources.js';
 import {
+  adoptScraperProposal,
+  approveScraperProposal,
+  compileScraperService,
+  listScraperProposals,
+  listScraperWorkspace,
+  previewScraperProposal,
+  publishScraperProposal,
+  rejectScraperProposal,
+  repairScraperService,
+  showScraperProposal,
+  validateScraperProposal,
+  verifyScraperProposal,
+} from './scraper-service.js';
+import { publishScraperTaskDeclaration } from './scraper-task.js';
+import { listScraperRuns, runScraperService } from './scraper-run.js';
+import { showScraperDiagnostics } from './scraper-diagnostics.js';
+import {
   appointEmergencyAdministrator,
   createWorkspace,
   grantMembership,
@@ -46,7 +63,7 @@ export const SESSION_COOKIE = 'dc_operator_console';
 /** Platform User sessions are a separate channel from the Operator Console. */
 export const USER_SESSION_COOKIE = 'dc_user_session';
 
-const MAX_BODY_BYTES = 16 * 1024;
+const MAX_BODY_BYTES = 1024 * 1024;
 /** One governed upload is bounded before it reaches any governed module. */
 const MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
 const CONTENT_TYPES: Record<string, string> = {
@@ -670,6 +687,170 @@ async function handleApi(
     return;
   }
 
+  // The Scraper Service lifecycle: a guided Task form pins the target, output
+  // contract, parameters, fixtures, constraints, and credential references;
+  // compilation, versioned-fixture validation and preview, Approval, Publication,
+  // isolated live verification, and Source Adoption stay separate exact-version
+  // actions over the same governed modules the CLI uses.
+  if (pathname === '/api/workspace/scrapers' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listScraperWorkspace({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/scraper-tasks' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, publishScraperTaskDeclaration({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: workspaceFromBody(body),
+      name: text(body, 'name'),
+      declaration: jsonDocument(body, 'declaration'),
+    }));
+    return;
+  }
+
+  const scraperCompileRoute = /^\/api\/workspace\/scraper-tasks\/([^/]+)\/compile$/u.exec(pathname);
+  if (scraperCompileRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const taskVersion = number(body, 'task_version');
+    sendJson(response, 201, compileScraperService({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      taskId: decodeURIComponent(scraperCompileRoute[1]!),
+      ...(Number.isInteger(taskVersion) ? { taskVersion } : {}),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/scraper-proposals' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listScraperProposals({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  const scraperProposalRoute = /^\/api\/workspace\/scraper-proposals\/([^/]+)\/(show|validate|preview|approve|reject|publish|verify|adopt)$/u.exec(pathname);
+  if (scraperProposalRoute !== null && (method === 'POST' || (method === 'GET' && scraperProposalRoute[2] === 'show'))) {
+    const token = userSession(request);
+    const proposalId = decodeURIComponent(scraperProposalRoute[1]!);
+    const action = scraperProposalRoute[2];
+    if (action === 'show') {
+      sendJson(response, 200, showScraperProposal({ root: options.root, masterKey: options.masterKey, token, proposalId }));
+      return;
+    }
+    const body = method === 'POST' ? await readJson(request) : {};
+    if (action === 'validate') {
+      sendJson(response, 200, validateScraperProposal({ root: options.root, masterKey: options.masterKey, token, proposalId }));
+      return;
+    }
+    if (action === 'preview') {
+      sendJson(response, 200, previewScraperProposal({ root: options.root, masterKey: options.masterKey, token, proposalId }));
+      return;
+    }
+    if (action === 'approve') {
+      sendJson(response, 200, approveScraperProposal({ root: options.root, masterKey: options.masterKey, token, proposalId }));
+      return;
+    }
+    if (action === 'publish') {
+      sendJson(response, 200, publishScraperProposal({ root: options.root, masterKey: options.masterKey, token, proposalId }));
+      return;
+    }
+    if (action === 'verify') {
+      const parameters = jsonDocument(body, 'parameters');
+      sendJson(response, 200, await verifyScraperProposal({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        proposalId,
+        ...(parameters === undefined ? {} : { parameters }),
+      }));
+      return;
+    }
+    if (action === 'adopt') {
+      sendJson(response, 200, adoptScraperProposal({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        proposalId,
+        sourceId: text(body, 'source_id'),
+      }));
+      return;
+    }
+    sendJson(response, 200, rejectScraperProposal({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      proposalId,
+      reason: text(body, 'reason'),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/scraper-runs' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listScraperRuns({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+      sourceId: searchParam(request, 'source_id') ?? '',
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/scraper-runs' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const parameters = jsonDocument(body, 'parameters');
+    sendJson(response, 201, await runScraperService({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      sourceId: text(body, 'source_id'),
+      ...(parameters === undefined ? {} : { parameters }),
+    }));
+    return;
+  }
+
+  const scraperDiagnosticsRoute = /^\/api\/workspace\/scraper-diagnostics\/([^/]+)(\/repair)?$/u.exec(pathname);
+  if (scraperDiagnosticsRoute !== null && method === 'GET' && scraperDiagnosticsRoute[2] === undefined) {
+    const token = userSession(request);
+    sendJson(response, 200, showScraperDiagnostics({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      diagnosticsId: decodeURIComponent(scraperDiagnosticsRoute[1]!),
+    }));
+    return;
+  }
+  if (scraperDiagnosticsRoute !== null && method === 'POST' && scraperDiagnosticsRoute[2] === '/repair') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, await repairScraperService({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      diagnosticsId: decodeURIComponent(scraperDiagnosticsRoute[1]!),
+      bindingId: text(body, 'binding_id'),
+      taskVersion: number(body, 'task_version'),
+    }));
+    return;
+  }
+
   if (pathname === '/api/workspace/memberships' && method === 'GET') {
     const token = userSession(request);
     sendJson(response, 200, listMemberships({
@@ -897,6 +1078,22 @@ function flag(body: Record<string, unknown>, field: string): boolean {
   return body[field] === true;
 }
 
+/**
+ * A JSON document the browser stated, either already parsed or as the text a
+ * form field carries. The governed module validates its shape; the browser never
+ * decides what it means.
+ */
+function jsonDocument(body: Record<string, unknown>, field: string): unknown {
+  const value = body[field];
+  if (typeof value !== 'string') return value;
+  if (value.trim() === '') return undefined;
+  try {
+    return JSON.parse(value);
+  } catch {
+    throw new HttpError(400, 'INVALID_REQUEST', `The ${field} document must be valid JSON.`);
+  }
+}
+
 /** A non-empty list of governed identifiers, in the order the browser sent them. */
 function identifiers(body: Record<string, unknown>, field: string): string[] {
   const value = body[field];
@@ -1039,6 +1236,50 @@ const STATUS_BY_CODE: Record<string, number> = {
   INTEGRATION_MAPPING_INCOMPLETE: 422,
   INTEGRATION_MAPPING_UNKNOWN_COLUMN: 422,
   INTEGRATION_VERSION_NOT_FOUND: 404,
+  // A Scraper Service lifecycle refusal is a governed answer, never a fault.
+  SCRAPER_TASK_NOT_FOUND: 404,
+  SCRAPER_TASK_NAME_INVALID: 400,
+  SCRAPER_TASK_INVALID: 400,
+  SCRAPER_TASK_UNREADABLE: 400,
+  SCRAPER_NETWORK_SCOPE_NOT_APPROVED: 422,
+  SCRAPER_CREDENTIAL_INVALID: 400,
+  SCRAPER_CREDENTIAL_REQUIRED: 400,
+  SCRAPER_CREDENTIAL_NOT_FOUND: 409,
+  SCRAPER_COMPILATION_FAILED: 422,
+  SCRAPER_PROPOSAL_NOT_FOUND: 404,
+  SCRAPER_PROPOSAL_STALE: 409,
+  SCRAPER_PROPOSAL_TAMPERED: 409,
+  SCRAPER_PROPOSAL_DECIDED: 409,
+  SCRAPER_VALIDATION_REQUIRED: 409,
+  SCRAPER_VALIDATION_FAILED: 422,
+  SCRAPER_NOT_APPROVED: 409,
+  SCRAPER_ALREADY_PUBLISHED: 409,
+  SCRAPER_NOT_PUBLISHED: 409,
+  SCRAPER_VERIFICATION_REQUIRED: 409,
+  SCRAPER_VERIFICATION_FAILED: 422,
+  SCRAPER_ALREADY_ADOPTED: 409,
+  SCRAPER_SOURCE_NOT_AVAILABLE: 404,
+  SCRAPER_SOURCE_TYPE_UNSUPPORTED: 400,
+  SCRAPER_SERVICE_VERSION_NOT_FOUND: 404,
+  SCRAPER_REASON_INVALID: 400,
+  SCRAPER_PARAMETERS_UNREADABLE: 400,
+  SCRAPER_PARAMETER_INVALID: 400,
+  SCRAPER_PARAMETER_UNKNOWN: 400,
+  SCRAPER_PARAMETER_REQUIRED: 400,
+  SCRAPER_SERVICE_NOT_ADOPTED: 409,
+  SCRAPER_SERVICE_WITHDRAWN: 409,
+  SCRAPER_SERVICE_TAMPERED: 409,
+  SCRAPER_DIAGNOSTICS_NOT_FOUND: 404,
+  SCRAPER_DIAGNOSTICS_TAMPERED: 409,
+  SCRAPER_REPAIR_BINDING_NOT_FOUND: 404,
+  SCRAPER_REPAIR_BINDING_REVOKED: 409,
+  SCRAPER_REPAIR_PURPOSE_NOT_BOUND: 422,
+  SCRAPER_REPAIR_MODEL_STALE: 409,
+  SCRAPER_REPAIR_MODEL_NOT_ACTIVATED: 409,
+  SCRAPER_REPAIR_STALE: 409,
+  SCRAPER_REPAIR_FIXTURES_REQUIRED: 409,
+  SCRAPER_REPAIR_OUTPUT_INVALID: 422,
+  SCRAPER_REPAIR_FAILED: 422,
 };
 
 function sendFailure(response: ServerResponse, error: unknown): void {

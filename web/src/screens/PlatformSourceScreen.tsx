@@ -55,9 +55,13 @@ function rowKey(): string {
 
 const FIELD_TYPES: SourceSchemaField['type'][] = ['string', 'integer', 'number', 'date', 'timestamp'];
 const CLEANING_RULES: CleaningRow['rule'][] = ['trim', 'uppercase', 'lowercase', 'default', 'require_non_empty'];
-const SOURCE_TYPES: Array<{ value: SourceSummary['type']; labelKey: 'value.sourceType.file' | 'value.sourceType.document' }> = [
+const SOURCE_TYPES: Array<{
+  value: SourceSummary['type'];
+  labelKey: 'value.sourceType.file' | 'value.sourceType.document' | 'value.sourceType.scraper';
+}> = [
   { value: 'file', labelKey: 'value.sourceType.file' },
   { value: 'document', labelKey: 'value.sourceType.document' },
+  { value: 'scraper', labelKey: 'value.sourceType.scraper' },
 ];
 
 /**
@@ -143,7 +147,10 @@ export function WorkspaceSources({ workspaceId, onSessionLost }: WorkspaceSource
             className="field__input"
             id="source-create-type"
             value={type}
-            onChange={(event) => setType(event.target.value === 'document' ? 'document' : 'file')}
+            onChange={(event) => {
+              const chosen = event.target.value;
+              if (chosen === 'document' || chosen === 'scraper' || chosen === 'file') setType(chosen);
+            }}
           >
             {SOURCE_TYPES.map((option) => (
               <option key={option.value} value={option.value}>

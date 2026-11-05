@@ -307,7 +307,7 @@ export interface ContextView {
 export interface SourceSummary {
   source_id: string;
   name: string;
-  type: 'file' | 'document' | 'http_json';
+  type: 'file' | 'document' | 'http_json' | 'scraper';
   created_at: string;
 }
 
@@ -543,6 +543,523 @@ export interface BindableModelProfile {
   content_hash: string;
   purposes: string[];
   data_categories: string[];
+}
+
+/** Where one scraped page lives and how its sequence is asked for. */
+export interface ScraperTargetView {
+  base_url: string;
+  path: string;
+  page_parameter: string | null;
+  first_page: number;
+  page_size: number | null;
+  page_size_parameter: string | null;
+  max_pages: number;
+}
+
+export interface ScraperOutputFieldView {
+  name: string;
+  selector: string;
+}
+
+export interface ScraperOutputView {
+  record_selector: string;
+  fields: ScraperOutputFieldView[];
+}
+
+export interface ScraperParameterView {
+  name: string;
+  type: 'string' | 'integer';
+  required: boolean;
+  default: string | null;
+}
+
+export interface ScraperConstraintsView {
+  timeout_ms: number;
+  max_bytes: number;
+  max_records: number;
+}
+
+export interface ScraperVersionSummaryView {
+  scraper_task_version: number;
+  content_hash: string;
+  published_at: string;
+  fixtures_version: number;
+  fixtures_hash: string;
+}
+
+/** One pinned Scraper Task Version as the guided form and Task list read it. */
+export interface ScraperTaskView {
+  scraper_task_id: string;
+  name: string;
+  created_at: string;
+  version_count: number;
+  versions: ScraperVersionSummaryView[];
+  scraper_task_version: number;
+  content_hash: string;
+  fixtures_version: number;
+  fixtures_hash: string;
+  target: ScraperTargetView;
+  network_scope: { origins: string[]; paths: string[] };
+  output: ScraperOutputView;
+  parameters: ScraperParameterView[];
+  constraints: ScraperConstraintsView;
+  credential_refs: string[];
+  fixture_count: number;
+}
+
+export interface ScraperServiceVersionView {
+  version: number;
+  published_at: string;
+  content_hash: string;
+  withdrawn_at: string | null;
+  scraper_task_version: number;
+  output_fields: string[];
+}
+
+export interface ScraperServiceView {
+  scraper_service_id: string;
+  scraper_task_id: string;
+  name: string;
+  versions: ScraperServiceVersionView[];
+}
+
+export interface ScraperPinView {
+  source_id: string;
+  source_name: string | null;
+  scraper_service_id: string;
+  adopted_version: number;
+  content_hash: string;
+  proposal_id: string;
+  adopted_at: string;
+}
+
+export interface ScraperCredentialView {
+  ref: string;
+  location: 'bearer' | 'cookie';
+  cookie_name: string | null;
+  created_at: string;
+}
+
+export interface ScraperWorkspaceView {
+  workspace_id: string;
+  tasks: ScraperTaskView[];
+  services: ScraperServiceView[];
+  pins: ScraperPinView[];
+  credentials: ScraperCredentialView[];
+  sources: Array<{ source_id: string; name: string }>;
+}
+
+export interface ScraperValidationCheckView {
+  name: string;
+  passed: boolean;
+  detail: string | null;
+}
+
+export interface ScraperValidationFixtureView {
+  name: string;
+  path: string;
+  record_count: number;
+  expected_record_count: number;
+  records_hash: string;
+  body_hash: string;
+}
+
+export interface ScraperValidationView {
+  validated_at: string;
+  validated_by: string;
+  checks: ScraperValidationCheckView[];
+  fixtures: ScraperValidationFixtureView[];
+  passed: boolean;
+  evidence_hash: string;
+}
+
+export interface ScraperPreviewFixtureView {
+  name: string;
+  path: string;
+  record_count: number;
+  expected_record_count: number;
+  matches: boolean;
+  records: Array<Record<string, string>>;
+  records_hash: string;
+}
+
+export interface ScraperPreviewView {
+  previewed_at: string;
+  previewed_by: string;
+  fixtures: ScraperPreviewFixtureView[];
+  passed: boolean;
+  evidence_hash: string;
+}
+
+export interface ScraperDiagnosticView {
+  code: string;
+  page: number | null;
+  message: string;
+}
+
+export interface ScraperManifestPageView {
+  page: number;
+  url: string;
+  status: number;
+  response_hash: string;
+  response_bytes: number;
+  raw_id: string | null;
+  record_count: number;
+}
+
+export interface ScraperVerificationView {
+  verified_at: string;
+  verified_by: string;
+  scraper_service_version: number;
+  scraper_service_content_hash: string;
+  passed: boolean;
+  pages: ScraperManifestPageView[];
+  record_count: number;
+  diagnostics: ScraperDiagnosticView[];
+  evidence_hash: string;
+}
+
+export interface ScraperRepairView {
+  base_service_version: number | null;
+  base_service_content_hash: string | null;
+  base_task_version: number;
+  base_task_content_hash: string;
+  diagnostics_id: string;
+  failure_evidence_hash: string;
+  failure_code: string;
+  failure_stage: string;
+  failure_category: string;
+  model: {
+    model_profile_id: string;
+    model_profile_version: number;
+    model_profile_content_hash: string;
+    adapter: string;
+    model_id: string;
+    binding_id: string;
+    prompt_id: string;
+    prompt_hash: string;
+  };
+  input_hash: string;
+}
+
+export interface ScraperProvenanceView {
+  engine: { name: string; version: number };
+  scraper_task_id: string;
+  scraper_task_version: number;
+  scraper_task_content_hash: string;
+  fixtures_hash: string;
+  validation_hash: string;
+  preview_hash: string;
+  verification_hash: string;
+  candidate_content_hash: string;
+  proposal_hash: string;
+  repair: {
+    base_service_version: number | null;
+    base_service_content_hash: string | null;
+    base_task_version: number;
+    base_task_content_hash: string;
+    diagnostics_id: string;
+    failure_evidence_hash: string;
+    failure_code: string;
+    input_hash: string;
+    model: ScraperRepairView['model'];
+  } | null;
+}
+
+export interface ScraperCandidateServiceView {
+  engine: { name: string; version: number };
+  target: ScraperTargetView;
+  network_scope: { origins: string[]; paths: string[] };
+  output: ScraperOutputView;
+  parameters: ScraperParameterView[];
+  constraints: ScraperConstraintsView;
+  credential_refs: string[];
+  source_task: { version: number; content_hash: string };
+  fixtures: { version: number; hash: string };
+}
+
+export interface ScraperDecisionView {
+  decided_at: string;
+  decided_by: string;
+  outcome: 'approved' | 'rejected';
+  reason: string | null;
+  evidence_hash: string;
+  provenance: ScraperProvenanceView;
+}
+
+export interface ScraperPublicationView {
+  published_at: string;
+  published_by: string;
+  scraper_service_version: number;
+  content_hash: string;
+  evidence_hash: string;
+  provenance: ScraperProvenanceView;
+}
+
+export interface ScraperAdoptionView {
+  adopted_at: string;
+  adopted_by: string;
+  source_id: string;
+  scraper_service_version: number;
+  previous_adopted_version: number | null;
+  evidence_hash: string;
+  provenance: ScraperProvenanceView;
+}
+
+export type ScraperProposalStatus = 'pending' | 'approved' | 'rejected' | 'published' | 'adopted';
+
+/** One immutable Scraper Proposal with every candidate and evidence fact. */
+export interface ScraperProposalView {
+  proposal_id: string;
+  kind: 'scraper';
+  status: ScraperProposalStatus;
+  workspace_id: string;
+  scraper_task_id: string;
+  scraper_task_version: number;
+  created_at: string;
+  created_by: string;
+  base: {
+    scraper_service_id: string | null;
+    scraper_service_version: number | null;
+    scraper_service_content_hash: string | null;
+  };
+  evidence: {
+    task_hash: string;
+    fixtures_version: number;
+    fixtures_hash: string;
+    output_fields: string[];
+    network_scope: { origins: string[]; paths: string[] };
+    regression_fixtures: string[];
+  };
+  candidates: {
+    service: ScraperCandidateServiceView;
+    content_hash: string;
+  };
+  repair: ScraperRepairView | null;
+  proposal_hash: string;
+  validations: ScraperValidationView[];
+  previews: ScraperPreviewView[];
+  verifications: ScraperVerificationView[];
+  decisions: ScraperDecisionView[];
+  publications: ScraperPublicationView[];
+  adoptions: ScraperAdoptionView[];
+  /** Whether the published base this Proposal was compiled against still stands. */
+  fresh?: boolean;
+}
+
+export interface ScraperDiagnosticsSummaryView {
+  diagnostics_id: string;
+  mode: 'run' | 'verification';
+  source_id: string | null;
+  proposal_id: string | null;
+  acquisition_run_id: string | null;
+  recorded_at: string;
+  failure_code: string;
+  stage: string;
+  category: string;
+  scraper_task_id: string;
+  scraper_task_version: number;
+  scraper_service_version: number;
+  evidence_hash: string;
+}
+
+export interface ScraperProposalList {
+  workspace_id: string;
+  proposals: ScraperProposalView[];
+  diagnostics: ScraperDiagnosticsSummaryView[];
+}
+
+export interface ScraperEvidenceRequestView {
+  method: string;
+  url: string;
+  header_names: string[];
+  credential_refs: string[];
+}
+
+export interface ScraperEvidencePageView {
+  status: number | null;
+  content_type: string | null;
+  response_hash: string | null;
+  response_bytes: number | null;
+  body_excerpt: string | null;
+  excerpt_truncated: boolean;
+}
+
+export interface ScraperFailureDiagnosticView {
+  code: string;
+  stage: string;
+  category: string;
+  page: number | null;
+  message: string;
+  request: ScraperEvidenceRequestView;
+  page_evidence: ScraperEvidencePageView;
+  raw_refs: Array<{ raw_id: string; content_hash: string; byte_length: number }>;
+}
+
+/** One sanitized failure diagnosis, with request and page evidence but no secret. */
+export interface ScraperDiagnosticsView {
+  diagnostics_id: string;
+  workspace_id: string;
+  source_id: string | null;
+  mode: 'run' | 'verification';
+  acquisition_run_id: string | null;
+  manifest_id: string | null;
+  proposal_id: string | null;
+  recorded_at: string;
+  recorded_by: string;
+  failure_code: string;
+  stage: string;
+  category: string;
+  engine: { name: string; version: number };
+  scraper_task_id: string;
+  scraper_task_version: number;
+  scraper_task_content_hash: string;
+  scraper_service_id: string;
+  scraper_service_version: number;
+  scraper_service_content_hash: string;
+  fixtures_version: number;
+  fixtures_hash: string;
+  parameters: Record<string, string>;
+  diagnostics: ScraperFailureDiagnosticView[];
+  raw_refs: Array<{ raw_id: string; content_hash: string; byte_length: number }>;
+  evidence_hash: string;
+  history_count: number;
+}
+
+export interface ScraperRunView {
+  acquisition_run_id: string;
+  status: string;
+  error_code: string | null;
+  queued_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  integration_configuration_version: number | null;
+  diagnostics_id: string | null;
+  failure_code: string | null;
+  manifest: {
+    manifest_id: string;
+    scraper_task_version: number;
+    scraper_service_version: number;
+    parameters: Record<string, string>;
+    pages: ScraperManifestPageView[];
+    record_count: number;
+    status: string;
+    started_at: string;
+    completed_at: string | null;
+    diagnostics: ScraperDiagnosticView[];
+  } | null;
+  raw_acquisitions: Array<{ raw_id: string; content_hash: string; byte_length: number; received_at: string }>;
+  integration_batch_id: string | null;
+  dataset_release: number | null;
+}
+
+export interface ScraperRunList {
+  workspace_id: string;
+  source_id: string;
+  adopted: {
+    scraper_service_id: string;
+    adopted_version: number;
+    content_hash: string;
+    proposal_id: string;
+    adopted_at: string;
+  } | null;
+  latest_release: { release: number; record_count: number; created_at: string } | null;
+  runs: ScraperRunView[];
+}
+
+export interface ScraperValidationResult {
+  proposal_id: string;
+  status: ScraperProposalStatus;
+  passed: boolean;
+  checks: ScraperValidationCheckView[];
+  fixtures: ScraperValidationFixtureView[];
+  evidence_hash: string;
+}
+
+export interface ScraperPreviewResult {
+  proposal_id: string;
+  status: ScraperProposalStatus;
+  passed: boolean;
+  fixtures: ScraperPreviewFixtureView[];
+  evidence_hash: string;
+}
+
+export interface ScraperVerifyResult {
+  proposal_id: string;
+  status: ScraperProposalStatus;
+  verification: {
+    passed: boolean;
+    scraper_service_version: number;
+    pages: ScraperManifestPageView[];
+    record_count: number;
+    diagnostics: ScraperDiagnosticView[];
+    verified_at: string;
+    evidence_hash: string;
+  };
+  provenance: ScraperProvenanceView;
+}
+
+export interface ScraperAdoptResult {
+  proposal_id: string;
+  status: ScraperProposalStatus;
+  source_id: string;
+  adopted_version: number;
+  previous_adopted_version: number | null;
+  content_hash: string;
+}
+
+/** What one trigger of the adopted Scraper Service Version produced. */
+export interface ScraperRunResult {
+  source_id: string;
+  acquisition_run_id: string;
+  status: string;
+  error_code: string | null;
+  diagnostics_id: string | null;
+  scraper_service_id: string;
+  scraper_service_version: number;
+  scraper_service_content_hash: string;
+  acquisition_run: {
+    acquisition_run_id: string;
+    mode: string;
+    trigger: string;
+    status: string;
+    started_at: string | null;
+    completed_at: string | null;
+    integration_configuration_version: number | null;
+  };
+  raw_acquisitions: Array<{ raw_id: string; content_hash: string; byte_length: number; received_at: string }>;
+  manifest: {
+    manifest_id: string;
+    scraper_service_version: number;
+    scraper_task_version: number;
+    engine: { name: string; version: number };
+    parameters: Record<string, string>;
+    pages: ScraperManifestPageView[];
+    record_count: number;
+    status: string;
+    started_at: string;
+    completed_at: string | null;
+  };
+  diagnostics: ScraperDiagnosticView[];
+  provenance: {
+    engine: { name: string; version: number };
+    scraper_task_id: string;
+    scraper_task_version: number;
+    scraper_task_content_hash: string;
+    scraper_service_version: number;
+    scraper_service_content_hash: string;
+    fixtures_hash: string;
+    proposal_id: string;
+    adopted_at: string;
+    acquisition_run_id: string;
+    acquired_at: string;
+    integrated_at: string | null;
+    released: boolean;
+  };
+  integration_batch_id: string | null;
+  quarantined: boolean;
+  dataset_release: number | null;
+  record_count: number;
 }
 
 export interface ModelBindingPreflightView {
@@ -783,6 +1300,73 @@ export const platformApi = {
     request<ModelBindingView>(`/api/workspace/model-bindings/${encodeURIComponent(bindingId)}/revoke`, {
       method: 'POST',
     }),
+  scrapers: (workspaceId: string) =>
+    request<ScraperWorkspaceView>(`/api/workspace/scrapers${workspaceQuery(workspaceId)}`),
+  publishScraperTask: (workspaceId: string, name: string, declaration: Record<string, unknown>) =>
+    request<ScraperTaskView>('/api/workspace/scraper-tasks', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, name, declaration }),
+    }),
+  compileScraperTask: (taskId: string, taskVersion?: number) =>
+    request<ScraperProposalView>(`/api/workspace/scraper-tasks/${encodeURIComponent(taskId)}/compile`, {
+      method: 'POST',
+      body: JSON.stringify(taskVersion === undefined ? {} : { task_version: taskVersion }),
+    }),
+  scraperProposals: (workspaceId: string) =>
+    request<ScraperProposalList>(`/api/workspace/scraper-proposals${workspaceQuery(workspaceId)}`),
+  validateScraperProposal: (proposalId: string) =>
+    request<ScraperValidationResult>(
+      `/api/workspace/scraper-proposals/${encodeURIComponent(proposalId)}/validate`,
+      { method: 'POST' },
+    ),
+  previewScraperProposal: (proposalId: string) =>
+    request<ScraperPreviewResult>(
+      `/api/workspace/scraper-proposals/${encodeURIComponent(proposalId)}/preview`,
+      { method: 'POST' },
+    ),
+  approveScraperProposal: (proposalId: string) =>
+    request<ScraperProposalView>(
+      `/api/workspace/scraper-proposals/${encodeURIComponent(proposalId)}/approve`,
+      { method: 'POST' },
+    ),
+  rejectScraperProposal: (proposalId: string, reason: string) =>
+    request<ScraperProposalView>(
+      `/api/workspace/scraper-proposals/${encodeURIComponent(proposalId)}/reject`,
+      { method: 'POST', body: JSON.stringify({ reason }) },
+    ),
+  publishScraperProposal: (proposalId: string) =>
+    request<ScraperProposalView>(
+      `/api/workspace/scraper-proposals/${encodeURIComponent(proposalId)}/publish`,
+      { method: 'POST' },
+    ),
+  verifyScraperProposal: (proposalId: string, parameters: Record<string, string>) =>
+    request<ScraperVerifyResult>(
+      `/api/workspace/scraper-proposals/${encodeURIComponent(proposalId)}/verify`,
+      { method: 'POST', body: JSON.stringify({ parameters }) },
+    ),
+  adoptScraperProposal: (proposalId: string, sourceId: string) =>
+    request<ScraperAdoptResult>(
+      `/api/workspace/scraper-proposals/${encodeURIComponent(proposalId)}/adopt`,
+      { method: 'POST', body: JSON.stringify({ source_id: sourceId }) },
+    ),
+  scraperRuns: (workspaceId: string, sourceId: string) =>
+    request<ScraperRunList>(
+      `/api/workspace/scraper-runs${workspaceQuery(workspaceId)}&source_id=${encodeURIComponent(sourceId)}`,
+    ),
+  runScraperSource: (workspaceId: string, sourceId: string, parameters: Record<string, string>) =>
+    request<ScraperRunResult>('/api/workspace/scraper-runs', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, source_id: sourceId, parameters }),
+    }),
+  scraperDiagnostics: (diagnosticsId: string) =>
+    request<ScraperDiagnosticsView>(
+      `/api/workspace/scraper-diagnostics/${encodeURIComponent(diagnosticsId)}`,
+    ),
+  repairScraper: (diagnosticsId: string, bindingId: string, taskVersion: number) =>
+    request<ScraperProposalView>(
+      `/api/workspace/scraper-diagnostics/${encodeURIComponent(diagnosticsId)}/repair`,
+      { method: 'POST', body: JSON.stringify({ binding_id: bindingId, task_version: taskVersion }) },
+    ),
 };
 
 /**

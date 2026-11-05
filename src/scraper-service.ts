@@ -8,9 +8,11 @@ import {
   findModelBinding,
   findModelProfile,
   findModelProfileVersion,
+  findScraperCredential,
   findScraperDiagnostics,
   findScraperServiceVersion,
   findScraperTask,
+  findSource,
   latestScraperServiceVersion,
   latestScraperTaskVersion,
   scraperServiceForTask,
@@ -19,6 +21,8 @@ import {
   type ScraperDiagnosticsRecord,
   type ScraperFixturePage,
   type ScraperManifestPage,
+  type ScraperPreviewFixture,
+  type ScraperPreviewRecord,
   type ScraperProposalBase,
   type ScraperProposalCandidates,
   type ScraperProposalEvidence,
@@ -51,7 +55,7 @@ import {
   staticPathPrefix,
 } from './scraper-engine.js';
 import { credentialMaterial, resolveParameters, scrapeAttempt } from './scraper-run.js';
-import { placeholdersOf } from './scraper-task.js';
+import { placeholdersOf, viewTask } from './scraper-task.js';
 import { requireAdministeredSource } from './sources.js';
 
 const REASON_MAXIMUM = 1000;
@@ -59,6 +63,8 @@ const TIMEOUT_CEILING_MS = 15_000;
 const BYTE_CEILING = 8_388_608;
 const RECORD_CEILING = 100_000;
 const RESERVED_KEYS = ['credential', 'credentials', 'secret', 'sealed', 'password', 'token', 'authorization', 'cookie'];
+/** How many extracted records one preview shows; the record count stays exact. */
+const PREVIEW_RECORD_LIMIT = 20;
 
 function digest(value: unknown): string {
   return canonicalDigest(value);
@@ -458,6 +464,8 @@ function repairChecks(
 /** Provenance restated by every Approval, Publication, verification, and Adoption. */
 function provenanceOf(proposal: ScraperProposalRecord): ScraperProposalProvenance {
   const validation = proposal.validations[proposal.validations.length - 1];
+  const previews = proposal.previews ?? [];
+  const preview = previews[previews.length - 1];
   const verification = proposal.verifications[proposal.verifications.length - 1];
   return {
     engine: { ...proposal.candidates.service.engine },
@@ -466,6 +474,7 @@ function provenanceOf(proposal: ScraperProposalRecord): ScraperProposalProvenanc
     scraper_task_content_hash: proposal.evidence.task_hash,
     fixtures_hash: proposal.evidence.fixtures_hash,
     validation_hash: validation?.evidence_hash ?? '',
+    preview_hash: preview?.evidence_hash ?? '',
     verification_hash: verification?.evidence_hash ?? '',
     candidate_content_hash: proposal.candidates.content_hash,
     proposal_hash: proposal.proposal_hash,
@@ -498,8 +507,9 @@ function requireScraperProposal(
     reject(session, actorName, context, 'SCRAPER_PROPOSAL_NOT_FOUND', 'The requested Scraper Proposal does not exist.');
   }
   requireWorkspaceAdministrator(session, actor, context, proposal.workspace_id);
-  // A Proposal compiled before repairs existed reads as a plain compilation.
+  // A Proposal compiled before repairs and previews existed reads as a plain one.
   proposal.repair ??= null;
+  proposal.previews ??= [];
   assertIntact(session, actorName, { ...context, workspace_id: proposal.workspace_id }, proposal);
   return proposal;
 }
@@ -612,6 +622,7 @@ export function compileScraperService(options: {
       candidates: content,
     }),
     validations: [],
+    previews: [],
     verifications: [],
     decisions: [],
     publications: [],
@@ -634,6 +645,250 @@ export function compileScraperService(options: {
   session.save();
   return viewProposal(proposal);
 }
+
+/**
+ * The Workspace Administrator's read of the whole scraper surface: Tasks and
+ * the facts they pin, the stored credential references, published Service
+ * Versions, and the exact Version each scraper Source pins. No credential value,
+ * sealed secret, or object locator is among it.
+ */
+export function listScraperWorkspace(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  workspaceId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'scraper_workspace_read',
+    scope: 'workspace',
+    workspace_id: options.workspaceId,
+    target: options.workspaceId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  requireWorkspaceAdministrator(session, actor, context, options.workspaceId);
+  session.audit({ ...context, actor: actorLabel(actor.user), outcome: 'succeeded' });
+
+  const tasks = session.state.scraper_tasks
+    .filter((task) => task.workspace_id === options.workspaceId)
+    .sort((left, right) => left.created_at.localeCompare(right.created_at) || left.name.localeCompare(right.name))
+    .map((task) => {
+      const latest = latestScraperTaskVersion(task);
+      const versions = task.versions.map((version) => ({
+        scraper_task_version: version.version,
+        content_hash: version.content_hash,
+        published_at: version.published_at,
+        fixtures_version: version.fixtures.version,
+        fixtures_hash: version.fixtures_hash,
+      }));
+      return {
+        scraper_task_id: task.scraper_task_id,
+        name: task.name,
+        created_at: task.created_at,
+        version_count: task.versions.length,
+        versions,
+        ...(latest === undefined ? {} : viewTask(task, latest)),
+      };
+    });
+
+  const services = session.state.scraper_services
+    .filter((service) => service.workspace_id === options.workspaceId)
+    .map((service) => ({
+      scraper_service_id: service.scraper_service_id,
+      scraper_task_id: service.scraper_task_id,
+      name: service.name,
+      versions: service.versions.map((version) => ({
+        version: version.version,
+        published_at: version.published_at,
+        content_hash: version.content_hash,
+        withdrawn_at: version.withdrawn_at,
+        scraper_task_version: version.content.source_task.version,
+        output_fields: version.content.output.fields.map((field) => field.name),
+      })),
+    }));
+
+  const pins = session.state.source_scraper_services
+    .filter((pin) => pin.workspace_id === options.workspaceId)
+    .map((pin) => ({
+      source_id: pin.source_id,
+      source_name: findSource(session.state.sources, pin.source_id)?.name ?? null,
+      scraper_service_id: pin.scraper_service_id,
+      adopted_version: pin.adopted_version,
+      content_hash: pin.content_hash,
+      proposal_id: pin.proposal_id,
+      adopted_at: pin.adopted_at,
+    }));
+
+  const credentials = session.state.scraper_credentials
+    .filter((credential) => credential.workspace_id === options.workspaceId)
+    .map((credential) => ({
+      ref: credential.ref,
+      location: credential.location,
+      cookie_name: credential.cookie_name,
+      created_at: credential.created_at,
+    }));
+
+  const sources = session.state.sources
+    .filter((source) => source.workspace_id === options.workspaceId && source.type === 'scraper')
+    .map((source) => ({ source_id: source.source_id, name: source.name }));
+
+  return {
+    workspace_id: options.workspaceId,
+    tasks,
+    services,
+    pins,
+    credentials,
+    sources,
+  };
+}
+
+/** One failure diagnosis as a list row: identity, stage, category, and versions. */
+function diagnosticsSummary(record: ScraperDiagnosticsRecord): Record<string, unknown> {
+  return {
+    diagnostics_id: record.diagnostics_id,
+    mode: record.mode,
+    source_id: record.source_id,
+    proposal_id: record.proposal_id,
+    acquisition_run_id: record.acquisition_run_id,
+    recorded_at: record.recorded_at,
+    failure_code: record.failure_code,
+    stage: record.stage,
+    category: record.category,
+    scraper_task_id: record.scraper_task_id,
+    scraper_task_version: record.scraper_task_version,
+    scraper_service_version: record.scraper_service_version,
+    evidence_hash: record.evidence_hash,
+  };
+}
+
+/**
+ * Every Scraper Proposal of one Workspace with its evidence, plus the failure
+ * diagnoses a repair can be generated from. A Proposal whose published base has
+ * moved reads as stale rather than silently current.
+ */
+export function listScraperProposals(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  workspaceId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'scraper_proposal_listing',
+    scope: 'workspace',
+    workspace_id: options.workspaceId,
+    target: options.workspaceId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  requireWorkspaceAdministrator(session, actor, context, options.workspaceId);
+  session.audit({ ...context, actor: actorLabel(actor.user), outcome: 'succeeded' });
+
+  const proposals = session.state.artifact_proposals
+    .filter((proposal): proposal is ScraperProposalRecord => proposal.kind === 'scraper' && proposal.workspace_id === options.workspaceId)
+    .sort((left, right) => left.created_at.localeCompare(right.created_at))
+    .map((proposal) => {
+      const current = baseOf(session, proposal.scraper_task_id);
+      const fresh = current.scraper_service_id === proposal.base.scraper_service_id
+        && current.scraper_service_version === proposal.base.scraper_service_version
+        && current.scraper_service_content_hash === proposal.base.scraper_service_content_hash;
+      return { ...viewProposal(proposal), fresh };
+    });
+
+  const diagnostics = session.state.scraper_diagnostics
+    .filter((record) => record.workspace_id === options.workspaceId)
+    .sort((left, right) => left.recorded_at.localeCompare(right.recorded_at))
+    .map(diagnosticsSummary);
+
+  return { workspace_id: options.workspaceId, proposals, diagnostics };
+}
+
+/**
+ * The isolated preview every candidate may run before Approval. It reads the
+ * exact fixtures its Scraper Task Version pins and extracts the candidate's
+ * output from them: no target is contacted, no credential is opened, and no
+ * governed data is written.
+ */
+export function previewScraperProposal(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  proposalId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'scraper_preview', scope: 'workspace', target: options.proposalId };
+  const actor = resolveActor(session, options.token, context);
+  const proposal = requireScraperProposal(session, actor, context, options.proposalId);
+  const scoped: ActionContext = { ...context, workspace_id: proposal.workspace_id };
+  if (statusOf(proposal) !== 'pending') {
+    reject(session, actorLabel(actor.user), scoped, 'SCRAPER_PROPOSAL_DECIDED', 'This Proposal already carries an Approval decision.');
+  }
+  const resolved = taskVersionOf(
+    session,
+    actorLabel(actor.user),
+    scoped,
+    proposal.scraper_task_id,
+    proposal.scraper_task_version,
+  );
+  const taskVersion = resolved.version;
+  if (
+    taskVersion.content_hash !== proposal.evidence.task_hash
+    || taskVersion.content_hash !== proposal.candidates.service.source_task.content_hash
+    || taskVersion.fixtures_hash !== proposal.candidates.service.fixtures.hash
+  ) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      scoped,
+      'SCRAPER_PROPOSAL_STALE',
+      'The Scraper Task Version moved after this Proposal was compiled.',
+      'Compile a new Proposal against the current Scraper Task Version.',
+    );
+  }
+
+  const fixtures: ScraperPreviewFixture[] = taskVersion.fixtures.pages.map((page) => {
+    const outcome = extractRecords(page.body, proposal.candidates.service.output, 1);
+    const matches = outcome.records.length === page.expected_record_count
+      && (page.expected_records === undefined || digest(outcome.records) === digest(page.expected_records));
+    return {
+      name: page.name,
+      path: page.path,
+      record_count: outcome.records.length,
+      expected_record_count: page.expected_record_count,
+      matches,
+      records: outcome.records.slice(0, PREVIEW_RECORD_LIMIT).map((record) => ({ ...record })),
+      records_hash: digest(outcome.records),
+    };
+  });
+  const passed = fixtures.every((fixture) => fixture.matches);
+  const record: ScraperPreviewRecord = {
+    previewed_at: new Date().toISOString(),
+    previewed_by: actorLabel(actor.user),
+    fixtures,
+    passed,
+    evidence_hash: digest({ proposal_hash: proposal.proposal_hash, fixtures }),
+  };
+  proposal.previews.push(record);
+  session.audit({
+    ...scoped,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: {
+      passed,
+      fixtures: fixtures.length,
+      evidence_hash: record.evidence_hash,
+      contacted_target: false,
+    },
+  });
+  session.save();
+  return {
+    proposal_id: proposal.proposal_id,
+    status: statusOf(proposal),
+    passed,
+    fixtures,
+    evidence_hash: record.evidence_hash,
+  };
+}
+
 
 /** The Binding and activated Profile Version one repair generation runs under. */
 function requireRepairBinding(
@@ -939,6 +1194,7 @@ export async function repairScraperService(options: {
       repair,
     }),
     validations: [],
+    previews: [],
     verifications: [],
     decisions: [],
     publications: [],
@@ -1259,6 +1515,8 @@ export async function verifyScraperProposal(options: {
   token: string;
   proposalId: string;
   parametersPath?: string;
+  /** Run parameters a browser stated directly; the same resolver validates them. */
+  parameters?: unknown;
 }): Promise<Record<string, unknown>> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'scraper_verification', scope: 'workspace', target: options.proposalId };
@@ -1288,7 +1546,7 @@ export async function verifyScraperProposal(options: {
     proposal.scraper_task_id,
     proposal.scraper_task_version,
   );
-  let supplied: unknown;
+  let supplied: unknown = options.parameters;
   if (options.parametersPath !== undefined) {
     try {
       supplied = JSON.parse(readFileSync(options.parametersPath, 'utf8')) as unknown;
@@ -1627,6 +1885,16 @@ function viewProposal(proposal: ScraperProposalRecord): Record<string, unknown> 
       checks: validation.checks.map((check) => ({ ...check })),
       fixtures: validation.fixtures.map((fixture) => ({ ...fixture })),
       evidence_hash: validation.evidence_hash,
+    })),
+    previews: (proposal.previews ?? []).map((preview) => ({
+      previewed_at: preview.previewed_at,
+      previewed_by: preview.previewed_by,
+      passed: preview.passed,
+      fixtures: preview.fixtures.map((fixture) => ({
+        ...fixture,
+        records: fixture.records.map((record) => ({ ...record })),
+      })),
+      evidence_hash: preview.evidence_hash,
     })),
     verifications: proposal.verifications.map(viewVerification),
     decisions: proposal.decisions.map((decision) => ({
