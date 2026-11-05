@@ -121,7 +121,7 @@ import {
   tickRetention,
 } from './retention.js';
 import { OperatorError } from './errors.js';
-import { readLicenseSummary } from './license.js';
+import { readLicenseView } from './license.js';
 import { handleMcpSurface, type McpServerIdentity } from './mcp.js';
 import { openPlatform } from './session.js';
 import { deploymentStatus } from './status.js';
@@ -333,7 +333,7 @@ async function handleApi(
   if (pathname === '/api/operator/license' && method === 'GET') {
     const resolved = authorize(options, request, 'operator_console_license');
     const deployment = readDeployment(options.root);
-    const summary = readLicenseSummary(options.root, join(options.root, 'license.json'));
+    const summary = readLicenseView(options.root, join(options.root, 'license.json'));
     sendJson(response, 200, {
       ...summary,
       release: deployment.release,
@@ -1875,7 +1875,7 @@ function authorize(options: ConsoleServerOptions, request: IncomingMessage, targ
 
 function recordDeniedAccess(options: ConsoleServerOptions, target: string): void {
   try {
-    const session = openPlatform(options.root, options.masterKey);
+    const session = openPlatform(options.root, options.masterKey, 'allow');
     session.audit({
       actor: 'unauthenticated',
       action: 'operator_console_access',

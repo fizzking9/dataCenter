@@ -25,7 +25,7 @@ export interface DataProductApiRequest {
  * published API never becomes a second implementation with its own answers.
  */
 export function queryDataProductApi(options: DataProductApiRequest): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'data_product_query',
     scope: 'workspace',

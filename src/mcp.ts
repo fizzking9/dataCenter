@@ -277,7 +277,7 @@ async function resolveAuthenticated(
       'Obtain a token from this Deployment and send it as a Bearer credential.',
     );
   }
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const grant = resolveAccessToken(session.state, token, options.identity.origin, mcpResource(options.identity));
   if (grant.kind === 'rejected') {
     throw new McpFailure(401, grant.code, grant.message, -1, { resource_metadata: resourceMetadata });

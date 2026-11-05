@@ -658,7 +658,7 @@ export function listScraperWorkspace(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'scraper_workspace_read',
     scope: 'workspace',
@@ -772,7 +772,7 @@ export function listScraperProposals(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'scraper_proposal_listing',
     scope: 'workspace',
@@ -1808,7 +1808,7 @@ export function showScraperProposal(options: {
   token: string;
   proposalId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'scraper_proposal_read', scope: 'workspace', target: options.proposalId };
   const actor = resolveActor(session, options.token, context);
   const proposal = requireScraperProposal(session, actor, context, options.proposalId);

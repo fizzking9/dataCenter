@@ -9,6 +9,11 @@ import {
   publishLedgerProduct,
 } from '../support/data-product.js';
 import {
+  installedLicenseRequest,
+  installLicenseFile,
+  signedLicenseFor,
+} from '../support/license.js';
+import {
   MOCK_MODEL_ID,
   startMockModelEndpoint,
   type MockModelEndpoint,
@@ -692,4 +697,95 @@ test('stock reuse needs no model Binding, and a stale refresh stores a structure
   assert.equal(unmatched.executed, false);
   assert.equal(unmatched.outcome, 'unavailable');
   assert.equal(unmatched.reason_code, 'NLQ_BINDING_UNAVAILABLE');
+});
+
+/** The review items one Workspace currently lists. */
+function candidates(s: Surface): Array<Record<string, unknown>> {
+  const listed = command(s.fixture, ['report', 'candidate-list', '--workspace', s.workspaceId], {
+    token: s.workspaceAdministratorToken,
+  });
+  assert.equal(listed.status, 0, listed.stderr);
+  return listed.output['candidates'] as Array<Record<string, unknown>>;
+}
+
+test('an expired license keeps stored Reports readable and answers ephemerally without persisting candidates or Reports', async (t) => {
+  const s = await readySurface();
+  t.after(() => s.endpoint.close());
+
+  // An unmatched question ordinarily enters review as one open candidate.
+  const nearMatch = '2026-01-10 至 2026-01-20 的处理量合计是多少？';
+  const ordinarily = asOutput(await ask(s, ['--question', nearMatch]));
+  assert.equal(ordinarily.executed, true, JSON.stringify(ordinarily));
+  const candidateCount = candidates(s).length;
+  assert.equal(candidateCount, 1, 'an unmatched answer is ordinarily stock review material');
+  const reportsBefore = stockedReports(s, s.workspaceAdministratorToken).length;
+  const templatesBefore = (command(s.fixture, ['report', 'template-list', '--workspace', s.workspaceId], {
+    token: s.workspaceAdministratorToken,
+  }).output['report_templates'] as unknown[]).length;
+  assert.equal(templatesBefore, 2, 'the published Template plus the candidate draft');
+  const auditsBefore = audits(s.fixture, 'natural_language_query');
+
+  const expired = signedLicenseFor(
+    s.fixture.scratch,
+    'report-stock-expired',
+    s.fixture.bundle,
+    installedLicenseRequest(s.fixture.root),
+    { notBefore: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), expiresAt: new Date(Date.now() - 60_000).toISOString() },
+  );
+  installLicenseFile(s.fixture.root, expired);
+
+  // Stored Reports stay retrievable without regenerating their content.
+  const stored = command(s.fixture, ['report', 'show', '--report', s.reportId], {
+    token: s.workspaceAdministratorToken,
+  });
+  assert.equal(stored.status, 0, stored.stderr);
+  assert.equal(asRecord(stored.output['report'])['report_id'], s.reportId);
+  assert.equal(stockedReports(s, s.workspaceAdministratorToken).length, reportsBefore);
+
+  // A stale stock match would ordinarily refresh; ephemerally it neither
+  // refreshes nor persists, and the answer states its read-only nature in Chinese.
+  const staleAt = new Date(Date.parse(String(s.report['generated_at'])) + 16 * 60_000).toISOString();
+  const ephemeral = asOutput(await ask(s, ['--question', QUESTION, '--at', staleAt]));
+  assert.equal(ephemeral['ephemeral'], true, JSON.stringify(ephemeral));
+  assert.equal(ephemeral.origin, 'generated');
+  assert.equal(ephemeral.report, null, 'no refreshed Report is persisted');
+  assert.equal(stockedReports(s, s.workspaceAdministratorToken).length, reportsBefore);
+  assert.equal(
+    ephemeral.limitations.some((line) => /许可已过期/u.test(line) && /不会保存/u.test(line)),
+    true,
+  );
+
+  // The unmatched question that ordinarily created a candidate persists none.
+  const unmatched = asOutput(await ask(s, ['--question', nearMatch]));
+  assert.equal(unmatched['ephemeral'], true);
+  assert.equal(candidates(s).length, candidateCount, 'no candidate is created while expired');
+  assert.equal(unmatched.report, null);
+  assert.equal(unmatched.template, null);
+
+  // Required Audit Events continue even though no business state is written.
+  assert.ok(
+    audits(s.fixture, 'natural_language_query') >= auditsBefore + 2,
+    'each ephemeral turn is audited',
+  );
+
+  // Explicit generation and schedule ticks stop under the expired entitlement.
+  const generated = command(s.fixture, ['report', 'generate', '--template', s.templateId], {
+    token: s.workspaceAdministratorToken,
+  });
+  assert.equal(generated.status, 2);
+  assert.equal(generated.error['code'], 'LICENSE_EXPIRED');
+  const ticked = command(
+    s.fixture,
+    ['report', 'schedule-tick', '--workspace', s.workspaceId],
+    { token: s.workspaceAdministratorToken },
+  );
+  assert.equal(ticked.status, 2);
+  assert.equal(ticked.error['code'], 'LICENSE_EXPIRED');
+  assert.equal(
+    (command(s.fixture, ['report', 'template-list', '--workspace', s.workspaceId], {
+      token: s.workspaceAdministratorToken,
+    }).output['report_templates'] as unknown[]).length,
+    templatesBefore,
+    'Template reads stay available and no Template was added',
+  );
 });

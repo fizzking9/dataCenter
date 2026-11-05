@@ -653,7 +653,7 @@ export function showModelProfile(options: {
   token: string;
   profileId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'model_profile_read',
     scope: 'deployment',
@@ -708,7 +708,7 @@ export function listModelProfiles(options: {
   masterKey: string;
   token: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'model_profile_list', scope: 'deployment' };
   const actor = resolveActor(session, options.token, context);
   requireDeploymentAdministrator(session, actor, context);

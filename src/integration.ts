@@ -406,7 +406,7 @@ export function previewIntegrationConfiguration(options: {
   sourceId: string;
   declaration: unknown;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'integration_configuration_preview', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
   const source = requireAdministeredSource(session, actor, context, options.sourceId);

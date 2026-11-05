@@ -80,7 +80,7 @@ export interface LoginOptions {
 }
 
 export async function login(options: LoginOptions): Promise<Record<string, unknown>> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'authentication',
     scope: 'deployment',
@@ -155,7 +155,7 @@ export function logout(options: {
   masterKey: string;
   token: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'session_revocation', scope: 'deployment' };
   const actor = resolveActor(session, options.token, context);
   actor.session.revoked_at = new Date().toISOString();
@@ -188,7 +188,7 @@ export async function verifyStepUpAuthentication(options: StepUpOptions): Promis
   method: 'totp' | 'recovery_code';
   username: string;
 }> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'step_up_authentication',
     scope: options.workspaceId === undefined ? 'deployment' : 'workspace',

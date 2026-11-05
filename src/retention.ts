@@ -483,7 +483,7 @@ export function showRetentionPolicy(options: {
   workspaceId?: string;
   version?: number;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'retention_policy_read',
     scope: options.workspaceId === undefined ? 'deployment' : 'workspace',
@@ -756,7 +756,7 @@ function canAdministerHold(session: PlatformSession, actor: Actor, hold: Retenti
 
 /** Lists the Holds the actor may administer, optionally scoped to one Workspace. */
 export function listRetentionHolds(options: RetentionOptions): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'retention_hold_list',
     scope: options.workspaceId === undefined ? 'deployment' : 'workspace',
@@ -1274,7 +1274,7 @@ function planSummary(plan: PurgePlanEntry[]): { eligible: number; held: number; 
  * before an administrator confirms anything.
  */
 export function previewPurge(options: RetentionOptions & { scopeKind: string }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'retention_purge_preview', scope: 'deployment' };
   const actor = resolveActor(session, options.token, context);
   const kind = optionScopeKind(options.scopeKind);
@@ -1676,7 +1676,7 @@ export function tickRetention(options: { root: string; masterKey: string; token:
 
 /** Shows one durable Purge job and its plan. */
 export function showPurgeJob(options: RetentionOptions & { purgeId: string }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'retention_purge_read', scope: 'deployment', target: options.purgeId };
   const actor = resolveActor(session, options.token, context);
   const job = session.state.purge_jobs.find((candidate) => candidate.purge_id === options.purgeId);
@@ -1703,7 +1703,7 @@ export function showPurgeJob(options: RetentionOptions & { purgeId: string }): R
 
 /** Lists the Purge jobs the actor may administer. */
 export function listPurgeJobs(options: RetentionOptions): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'retention_purge_list',
     scope: options.workspaceId === undefined ? 'deployment' : 'workspace',

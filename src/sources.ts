@@ -93,7 +93,7 @@ export function listWorkspaceSources(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'source_listing',
     scope: 'workspace',
@@ -152,7 +152,7 @@ export function showWorkspaceSource(options: {
   token: string;
   sourceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'source_read', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
   const source = requireAdministeredSource(session, actor, context, options.sourceId);

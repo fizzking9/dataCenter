@@ -515,7 +515,7 @@ export function previewConnectionDeclaration(options: {
   declaration: unknown;
   credential?: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'acquisition_connection_preview',
     scope: 'workspace',
@@ -638,7 +638,7 @@ export function listConnections(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'acquisition_connection_listing',
     scope: 'workspace',
@@ -710,7 +710,7 @@ export function connectionSession(options: {
   token: string;
   connectionId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const { connection, context, actorName } = administratedConnection(
     session,
     options.token,
