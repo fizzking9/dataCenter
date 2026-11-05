@@ -1021,6 +1021,8 @@ export interface ProposalProvenance {
   binding_id: string;
   prompt_id: ModelPurpose;
   prompt_hash: string;
+  /** Present only when the Proposal was generated from an administrator requirement. */
+  requirement_hash?: string;
   data_dictionary_hash: string;
   validation_hash: string;
   preview_hash: string;
@@ -1064,6 +1066,16 @@ export interface ProposalAdoptionRecord {
 }
 
 /**
+ * The Chinese requirement that asked for one integration change, the
+ * clarifications that completed it, and their common content address.
+ */
+export interface IntegrationProposalRequirement {
+  text: string;
+  clarifications: RequirementClarification[];
+  hash: string;
+}
+
+/**
  * One immutable review unit for one logical generated change, grouping the exact
  * candidate Artifact Versions and their evidence for all-or-nothing Approval.
  */
@@ -1077,6 +1089,8 @@ export interface IntegrationProposalRecord {
   created_by: string;
   created_by_user_id: string;
   binding_id: string;
+  /** The requirement the change was asked for, when one was stated in the browser. */
+  requirement?: IntegrationProposalRequirement;
   base: ProposalBase;
   model: ProposalModelPin;
   evidence: ProposalEvidence;

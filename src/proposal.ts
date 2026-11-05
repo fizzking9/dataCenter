@@ -10,6 +10,7 @@ import {
   findModelProfileVersion,
   latestIntegrationVersion,
   type IntegrationProposalRecord,
+  type IntegrationProposalRequirement,
   type ArtifactProposalRecord,
   type CleaningRule,
   type CleaningRuleName,
@@ -17,12 +18,14 @@ import {
   type DatasetSchemaField,
   type IntegrationConfigurationVersion,
   type ModelProfileVersion,
+  type ProposalBase,
   type ProposalCandidates,
   type ProposalDrift,
   type ProposalEvidence,
   type ProposalModelPin,
   type ProposalProvenance,
   type ProposalValidationRecord,
+  type RequirementClarification,
   type SourceRecord,
   type WorkspaceModelBindingRecord,
 } from './catalog.js';
@@ -40,7 +43,7 @@ import {
   type FragmentTable,
   type IntegrationRules,
 } from './datasets.js';
-import { generateIntegrationCandidate } from './model-generation.js';
+import { generateClarification, generateIntegrationCandidate } from './model-generation.js';
 import { pinnedForBinding } from './model-profile.js';
 import { openPlatform, type PlatformSession } from './session.js';
 import { requireAdministeredSource } from './sources.js';
@@ -49,6 +52,9 @@ const FIELD_TYPES: DatasetFieldType[] = ['string', 'integer', 'number', 'date', 
 const CLEANING_RULES: CleaningRuleName[] = ['trim', 'uppercase', 'lowercase', 'default', 'require_non_empty'];
 const FIELD_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 const REASON_MAXIMUM = 1000;
+const REQUIREMENT_MAXIMUM = 4000;
+/** The question asked when a Model Profile Version declares no clarification prompt. */
+const FALLBACK_CLARIFICATION = '请补充要映射的源列与数据集覆盖的业务范围。';
 
 function digest(value: unknown): string {
   return canonicalDigest(value);
@@ -73,6 +79,7 @@ function hashOf(proposal: {
   workspace_id: string;
   source_id: string;
   binding_id: string;
+  requirement?: IntegrationProposalRequirement;
   base: IntegrationProposalRecord['base'];
   model: ProposalModelPin;
   evidence: ProposalEvidence;
@@ -82,6 +89,7 @@ function hashOf(proposal: {
     workspace_id: proposal.workspace_id,
     source_id: proposal.source_id,
     binding_id: proposal.binding_id,
+    requirement: proposal.requirement ?? null,
     base: proposal.base,
     model: proposal.model,
     evidence: proposal.evidence,
@@ -104,14 +112,14 @@ interface DataDictionary {
   fields: DictionaryField[];
 }
 
-function readDictionary(session: PlatformSession, actorName: string, context: ActionContext, path: string): DataDictionary {
+/** Validates one already-read data dictionary document against the pinned shape. */
+function readDictionaryDocument(
+  session: PlatformSession,
+  actorName: string,
+  context: ActionContext,
+  parsed: unknown,
+): DataDictionary {
   const fail: Fail = (code, message) => reject(session, actorName, context, code, message);
-  const parsed: unknown = readJsonDocument(
-    path,
-    fail,
-    'PROPOSAL_EVIDENCE_UNREADABLE',
-    'The data dictionary must be a readable JSON document.',
-  );
   if (!isRecord(parsed) || !Array.isArray(parsed['fields']) || parsed['fields'].length === 0) {
     fail('PROPOSAL_EVIDENCE_INVALID', 'A data dictionary must declare at least one field.');
   }
@@ -156,6 +164,115 @@ function readDictionary(session: PlatformSession, actorName: string, context: Ac
     dataset_name: typeof parsed['dataset_name'] === 'string' ? parsed['dataset_name'] : '',
     fields,
   };
+}
+
+/** Reads one administrator-supplied data dictionary document from disk. */
+function readDictionary(session: PlatformSession, actorName: string, context: ActionContext, path: string): DataDictionary {
+  const fail: Fail = (code, message) => reject(session, actorName, context, code, message);
+  return readDictionaryDocument(
+    session,
+    actorName,
+    context,
+    readJsonDocument(
+      path,
+      fail,
+      'PROPOSAL_EVIDENCE_UNREADABLE',
+      'The data dictionary must be a readable JSON document.',
+    ),
+  );
+}
+
+/** The administrator-stated requirement, its clarifications, and their content address. */
+interface RequirementDocument {
+  text: string;
+  clarifications: RequirementClarification[];
+}
+
+/** Validates one already-read Chinese requirement document against the pinned shape. */
+function readRequirementDocument(
+  session: PlatformSession,
+  actorName: string,
+  context: ActionContext,
+  parsed: unknown,
+): RequirementDocument {
+  const fail: Fail = (code, message) => reject(session, actorName, context, code, message);
+  if (!isRecord(parsed)) {
+    fail('PROPOSAL_REQUIREMENT_INVALID', 'A requirement must be a JSON object stating the requirement text.');
+  }
+  const text = typeof parsed['requirement'] === 'string' ? parsed['requirement'].trim() : '';
+  if (text.length === 0 || text.length > REQUIREMENT_MAXIMUM) {
+    fail(
+      'PROPOSAL_REQUIREMENT_INVALID',
+      `A requirement must contain 1 to ${REQUIREMENT_MAXIMUM} characters of natural language.`,
+    );
+  }
+  const rawClarifications = parsed['clarifications'] ?? [];
+  if (!Array.isArray(rawClarifications)) {
+    fail('PROPOSAL_REQUIREMENT_INVALID', 'Requirement clarifications must be an array of question and answer pairs.');
+  }
+  const clarifications = rawClarifications.map((candidate: unknown) => {
+    if (
+      !isRecord(candidate)
+      || typeof candidate['question'] !== 'string'
+      || candidate['question'].trim().length === 0
+      || typeof candidate['answer'] !== 'string'
+      || candidate['answer'].trim().length === 0
+    ) {
+      fail('PROPOSAL_REQUIREMENT_INVALID', 'Each clarification must state a non-empty question and answer.');
+    }
+    return { question: candidate['question'].trim(), answer: candidate['answer'].trim() };
+  });
+  return { text, clarifications };
+}
+
+/** Reads one administrator-supplied requirement document from disk. */
+function readRequirement(session: PlatformSession, actorName: string, context: ActionContext, path: string): RequirementDocument {
+  const fail: Fail = (code, message) => reject(session, actorName, context, code, message);
+  return readRequirementDocument(
+    session,
+    actorName,
+    context,
+    readJsonDocument(
+      path,
+      fail,
+      'PROPOSAL_REQUIREMENT_UNREADABLE',
+      'The requirement must be a readable JSON document.',
+    ),
+  );
+}
+
+/** Every two-character Chinese term a label carries, so a requirement can share one. */
+function chineseBigrams(text: string): Set<string> {
+  const terms = new Set<string>();
+  for (const run of text.match(/[\u4e00-\u9fff]{2,}/gu) ?? []) {
+    for (let index = 0; index + 2 <= run.length; index += 1) terms.add(run.slice(index, index + 2));
+  }
+  return terms;
+}
+
+function sharesTerm(terms: Set<string>, text: string): boolean {
+  for (const term of chineseBigrams(text)) {
+    if (terms.has(term)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether a requirement already names something the data dictionary governs. A
+ * requirement that names nothing would let a model invent the scope, so the
+ * platform asks for one clarification instead.
+ */
+function mentionsDictionary(text: string, dictionary: DataDictionary): boolean {
+  const haystack = text.toLowerCase();
+  const identifiers = dictionary.fields.flatMap((field) => [field.name, field.source_column]);
+  if (identifiers.some((identifier) => identifier.length >= 2 && haystack.includes(identifier.toLowerCase()))) {
+    return true;
+  }
+  const labels = [
+    dictionary.dataset_name,
+    ...dictionary.fields.flatMap((field) => (field.description === null ? [] : [field.description])),
+  ];
+  return labels.some((label) => sharesTerm(chineseBigrams(label), text));
 }
 
 /** The binding, its exact Model Profile Version, and that Version's activation. */
@@ -209,9 +326,31 @@ function requireBinding(
   };
 }
 
+/** Asks the Bound Model Profile Version for one Chinese clarification, or states a default one. */
+async function clarificationQuestion(
+  session: PlatformSession,
+  bound: BoundModel,
+  requirement: IntegrationProposalRequirement,
+  fail: Fail,
+): Promise<string> {
+  if (!bound.binding.purposes.includes('clarification') || !bound.version.purposes.includes('clarification')) {
+    return FALLBACK_CLARIFICATION;
+  }
+  const profile = findModelProfile(session.state.model_profiles, bound.pin.model_profile_id)!;
+  const answer = await generateClarification(
+    pinnedForBinding(session, profile, bound.version, bound.binding),
+    {
+      question: requirement.text,
+      clarifications: requirement.clarifications,
+      missing: ['integration_scope'],
+    },
+    fail,
+  );
+  return String(answer['question']);
+}
+
 /** The Artifact Version a Proposal was generated against, and whether it moved. */
-function baseOf(session: PlatformSession, sourceId: string): {
-  base: IntegrationProposalRecord['base'];
+function baseOf(session: PlatformSession, sourceId: string): {  base: IntegrationProposalRecord['base'];
   version: IntegrationConfigurationVersion | undefined;
 } {
   const version = latestIntegrationVersion(
@@ -343,6 +482,8 @@ function candidateOf(proposal: IntegrationProposalRecord): IntegrationConfigurat
  * Generates one Artifact Proposal from a real data dictionary under one Bound
  * Model Profile Version. The candidate is validated by the same Integration
  * Configuration parser publication uses, and nothing is published or adopted.
+ * A Chinese requirement, when stated, becomes Proposal content: a requirement
+ * too broad to name governed data is refused with one Chinese clarification.
  */
 export async function generateProposal(options: {
   root: string;
@@ -350,7 +491,14 @@ export async function generateProposal(options: {
   token: string;
   sourceId: string;
   bindingId: string;
-  evidencePath: string;
+  /** A data dictionary document on disk, which the CLI reads. */
+  evidencePath?: string;
+  /** A data dictionary document the browser already read; validated identically. */
+  dictionary?: unknown;
+  /** A requirement document on disk, which the CLI reads. */
+  requirementPath?: string;
+  /** A requirement the browser states; validated identically. */
+  requirement?: unknown;
 }): Promise<Record<string, unknown>> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'proposal_generation', scope: 'workspace', target: options.sourceId };
@@ -358,9 +506,38 @@ export async function generateProposal(options: {
   const source = requireAdministeredSource(session, actor, context, options.sourceId);
   const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
   const actorName = actorLabel(actor.user);
+  const fail: Fail = (code, message) => reject(session, actorName, scoped, code, message);
 
   const bound = requireBinding(session, actorName, scoped, options.bindingId, source.workspace_id);
-  const dictionary = readDictionary(session, actorName, scoped, options.evidencePath);
+  if (options.dictionary === undefined && options.evidencePath === undefined) {
+    fail('PROPOSAL_EVIDENCE_UNREADABLE', 'The data dictionary must be a readable JSON document.');
+  }
+  const dictionary = options.dictionary === undefined
+    ? readDictionary(session, actorName, scoped, options.evidencePath ?? '')
+    : readDictionaryDocument(session, actorName, scoped, options.dictionary);
+  const requirementDocument = options.requirement !== undefined
+    ? readRequirementDocument(session, actorName, scoped, options.requirement)
+    : options.requirementPath === undefined
+      ? null
+      : readRequirement(session, actorName, scoped, options.requirementPath);
+  const requirement: IntegrationProposalRequirement | null = requirementDocument === null
+    ? null
+    : {
+      text: requirementDocument.text,
+      clarifications: requirementDocument.clarifications,
+      hash: digest({ text: requirementDocument.text, clarifications: requirementDocument.clarifications }),
+    };
+  if (requirement !== null && requirement.clarifications.length === 0 && !mentionsDictionary(requirement.text, dictionary)) {
+    const question = await clarificationQuestion(session, bound, requirement, fail);
+    reject(
+      session,
+      actorName,
+      scoped,
+      'PROPOSAL_CLARIFICATION_REQUIRED',
+      question,
+      '在需求中补齐澄清问答后重新生成提案；未经澄清的宽泛需求不能生成受治理的集成提案。',
+    );
+  }
   const pinned = pinnedForBinding(
     session,
     findModelProfile(session.state.model_profiles, bound.pin.model_profile_id)!,
@@ -369,8 +546,11 @@ export async function generateProposal(options: {
   );
   const candidate = await generateIntegrationCandidate(
     pinned,
-    dictionary,
-    (code, message) => reject(session, actorName, scoped, code, message),
+    {
+      ...dictionary,
+      ...(requirement === null ? {} : { requirement: requirement.text, clarifications: requirement.clarifications }),
+    },
+    fail,
   );
 
   const { base } = baseOf(session, source.source_id);
@@ -406,6 +586,7 @@ export async function generateProposal(options: {
     workspace_id: source.workspace_id,
     source_id: source.source_id,
     binding_id: bound.binding.binding_id,
+    ...(requirement === null ? {} : { requirement }),
     base,
     model: bound.pin,
     evidence,
@@ -419,6 +600,7 @@ export async function generateProposal(options: {
     created_by: actorName,
     created_by_user_id: actor.user.user_id,
     binding_id: bound.binding.binding_id,
+    ...(requirement === null ? {} : { requirement }),
     base,
     model: bound.pin,
     evidence,
@@ -443,12 +625,13 @@ export async function generateProposal(options: {
       model_profile_version: bound.pin.model_profile_version,
       prompt_hash: bound.pin.prompt_hash,
       data_dictionary_hash: evidence.data_dictionary_hash,
+      ...(requirement === null ? {} : { requirement_hash: requirement.hash }),
       candidate_content_hash: candidates.integration_configuration.content_hash,
       base_version: base.integration_configuration_version ?? 0,
     },
   });
   session.save();
-  return viewProposal(proposal);
+  return viewProposal(proposal, freshnessOf(session, proposal));
 }
 
 /**
@@ -461,7 +644,10 @@ export function validateProposal(options: {
   masterKey: string;
   token: string;
   proposalId: string;
-  fixturesPath: string;
+  /** Validation fixtures on disk, which the CLI reads. */
+  fixturesPath?: string;
+  /** Validation fixtures the browser already read; validated identically. */
+  fixtures?: unknown;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'proposal_validation', scope: 'workspace', target: options.proposalId };
@@ -471,12 +657,16 @@ export function validateProposal(options: {
   const scoped: ActionContext = { ...context, workspace_id: proposal.workspace_id };
   const fail: Fail = (code, message) => reject(session, actorName, scoped, code, message);
 
-  const parsed: unknown = readJsonDocument(
-    options.fixturesPath,
-    fail,
-    'PROPOSAL_FIXTURES_UNREADABLE',
-    'The validation fixtures must be a readable JSON document.',
-  );
+  const parsed: unknown = options.fixtures !== undefined
+    ? options.fixtures
+    : options.fixturesPath === undefined
+      ? fail('PROPOSAL_FIXTURES_UNREADABLE', 'The validation fixtures must be a readable JSON document.')
+      : readJsonDocument(
+        options.fixturesPath,
+        fail,
+        'PROPOSAL_FIXTURES_UNREADABLE',
+        'The validation fixtures must be a readable JSON document.',
+      );
   if (!isRecord(parsed) || !Array.isArray(parsed['fixtures']) || parsed['fixtures'].length === 0) {
     fail('PROPOSAL_FIXTURES_INVALID', 'Validation fixtures must declare at least one fixture.');
   }
@@ -898,7 +1088,7 @@ export function showProposal(options: {
   requireWorkspaceAdministrator(session, actor, context, proposal.workspace_id);
   assertIntact(session, actorLabel(actor.user), { ...context, workspace_id: proposal.workspace_id }, proposal);
   session.audit({ ...context, workspace_id: proposal.workspace_id, actor: actorLabel(actor.user), outcome: 'succeeded' });
-  return viewProposal(proposal);
+  return viewProposal(proposal, freshnessOf(session, proposal));
 }
 
 /** Resolves a pending Proposal the actor may change, refusing a tampered record. */
@@ -931,6 +1121,7 @@ function provenanceOf(proposal: IntegrationProposalRecord): ProposalProvenance {
     binding_id: proposal.binding_id,
     prompt_id: proposal.model.prompt_id,
     prompt_hash: proposal.model.prompt_hash,
+    ...(proposal.requirement === undefined ? {} : { requirement_hash: proposal.requirement.hash }),
     data_dictionary_hash: proposal.evidence.data_dictionary_hash,
     validation_hash: validation?.evidence_hash ?? '',
     preview_hash: preview?.evidence_hash ?? '',
@@ -939,7 +1130,67 @@ function provenanceOf(proposal: IntegrationProposalRecord): ProposalProvenance {
   };
 }
 
-function viewProposal(proposal: IntegrationProposalRecord): Record<string, unknown> {
+/** Whether the Proposal still rests on the current Artifact Versions. */
+function freshnessOf(
+  session: PlatformSession,
+  proposal: IntegrationProposalRecord,
+): { fresh: boolean; current: ProposalBase } {
+  const current = baseOf(session, proposal.source_id).base;
+  return {
+    fresh: current.integration_configuration_version === proposal.base.integration_configuration_version
+      && current.integration_configuration_content_hash === proposal.base.integration_configuration_content_hash,
+    current,
+  };
+}
+
+/**
+ * Lists the integration Proposals of one Source together with the current-base
+ * freshness the browser shows and the Raw Acquisitions a preview may read. No
+ * raw bytes, object locator, or provider setting is disclosed.
+ */
+export function listSourceProposals(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  sourceId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'proposal_listing', scope: 'workspace', target: options.sourceId };
+  const actor = resolveActor(session, options.token, context);
+  const source = requireAdministeredSource(session, actor, context, options.sourceId);
+  const scoped: ActionContext = { ...context, workspace_id: source.workspace_id };
+  const proposals = session.state.artifact_proposals
+    .filter(
+      (proposal): proposal is IntegrationProposalRecord =>
+        (proposal.kind === undefined || proposal.kind === 'integration')
+        && proposal.source_id === source.source_id
+        && proposal.workspace_id === source.workspace_id,
+    )
+    .map((proposal) => {
+      assertIntact(session, actorLabel(actor.user), scoped, proposal);
+      return viewProposal(proposal, freshnessOf(session, proposal));
+    })
+    .sort((left, right) => String(right['created_at']).localeCompare(String(left['created_at'])));
+  session.audit({ ...scoped, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { proposals: proposals.length } });
+  return {
+    source_id: source.source_id,
+    proposals,
+    raw_acquisitions: session.state.raw_acquisitions
+      .filter((raw) => raw.source_id === source.source_id)
+      .map((raw) => ({
+        raw_id: raw.raw_id,
+        acquisition_run_id: raw.acquisition_run_id,
+        byte_length: raw.byte_length,
+        received_at: raw.received_at,
+      }))
+      .sort((left, right) => right.received_at.localeCompare(left.received_at)),
+  };
+}
+
+function viewProposal(
+  proposal: IntegrationProposalRecord,
+  freshness?: { fresh: boolean; current: ProposalBase },
+): Record<string, unknown> {
   return {
     proposal_id: proposal.proposal_id,
     status: statusOf(proposal),
@@ -948,6 +1199,14 @@ function viewProposal(proposal: IntegrationProposalRecord): Record<string, unkno
     binding_id: proposal.binding_id,
     created_at: proposal.created_at,
     created_by: proposal.created_by,
+    ...(proposal.requirement === undefined ? {} : {
+      requirement: {
+        text: proposal.requirement.text,
+        clarifications: proposal.requirement.clarifications.map((clarification) => ({ ...clarification })),
+        hash: proposal.requirement.hash,
+      },
+    }),
+    ...(freshness === undefined ? {} : { freshness }),
     base: { ...proposal.base },
     model: { ...proposal.model },
     evidence: { ...proposal.evidence },
@@ -967,6 +1226,8 @@ function viewProposal(proposal: IntegrationProposalRecord): Record<string, unkno
         record_count: fixture.record_count,
         transformed: fixture.transformed,
         rejected: fixture.rejected,
+        transformations: fixture.transformations.map((transformation) => ({ ...transformation })),
+        rejections: fixture.rejections.map((rejection) => ({ ...rejection })),
         drift: fixture.drift,
       })),
     })),
@@ -975,6 +1236,8 @@ function viewProposal(proposal: IntegrationProposalRecord): Record<string, unkno
       record_count: preview.record_count,
       transformed: preview.transformed,
       rejected: preview.rejected,
+      transformations: preview.transformations.map((transformation) => ({ ...transformation })),
+      rejections: preview.rejections.map((rejection) => ({ ...rejection })),
       evidence_hash: preview.evidence_hash,
       drift: preview.drift,
     })),

@@ -16,6 +16,16 @@ import { browserIdentity, browserNavigation } from './navigation.js';
 import { listDataProducts } from './products.js';
 import { publishModelBinding, revokeModelBinding, showModelBindingWorkspace } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, listModelProfiles, publishModelProfile } from './model-profile.js';
+import {
+  adoptProposal,
+  approveProposal,
+  generateProposal,
+  listSourceProposals,
+  previewProposal,
+  publishProposal,
+  rejectProposal,
+  validateProposal,
+} from './proposal.js';
 import { createSource, listWorkspaceSources, showWorkspaceSource } from './sources.js';
 import {
   appointEmergencyAdministrator,
@@ -46,7 +56,7 @@ export const SESSION_COOKIE = 'dc_operator_console';
 /** Platform User sessions are a separate channel from the Operator Console. */
 export const USER_SESSION_COOKIE = 'dc_user_session';
 
-const MAX_BODY_BYTES = 16 * 1024;
+const MAX_BODY_BYTES = 64 * 1024;
 /** One governed upload is bounded before it reaches any governed module. */
 const MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
 const CONTENT_TYPES: Record<string, string> = {
@@ -670,6 +680,87 @@ async function handleApi(
     return;
   }
 
+  // Artifact Proposal governance: the browser states a Chinese requirement and
+  // reads the data dictionary, runs the same deterministic validation and
+  // isolated preview the CLI runs, then approves, publishes, and adopts exact
+  // candidate Versions. Every route re-resolves the session and the governed
+  // module authorizes the Workspace Administrator server-side.
+  const proposalListRoute = /^\/api\/workspace\/sources\/([^/]+)\/proposals$/u.exec(pathname);
+  if (proposalListRoute !== null && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listSourceProposals({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      sourceId: decodeURIComponent(proposalListRoute[1]!),
+    }));
+    return;
+  }
+
+  const proposalGenerateRoute = /^\/api\/workspace\/sources\/([^/]+)\/proposals\/generate$/u.exec(pathname);
+  if (proposalGenerateRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, await generateProposal({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      sourceId: decodeURIComponent(proposalGenerateRoute[1]!),
+      bindingId: text(body, 'binding_id'),
+      requirement: { requirement: text(body, 'requirement'), clarifications: body['clarifications'] ?? [] },
+      dictionary: jsonDocument(body, 'dictionary'),
+    }));
+    return;
+  }
+
+  const proposalActionRoute = /^\/api\/workspace\/proposals\/([^/]+)\/(validate|preview|approve|reject|publish|adopt)$/u.exec(pathname);
+  if (proposalActionRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const proposalId = decodeURIComponent(proposalActionRoute[1]!);
+    const action = proposalActionRoute[2];
+    if (action === 'validate') {
+      sendJson(response, 200, validateProposal({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        proposalId,
+        fixtures: jsonDocument(body, 'fixtures'),
+      }));
+      return;
+    }
+    if (action === 'preview') {
+      sendJson(response, 200, previewProposal({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        proposalId,
+        rawId: text(body, 'raw_id'),
+      }));
+      return;
+    }
+    if (action === 'approve') {
+      sendJson(response, 200, approveProposal({ root: options.root, masterKey: options.masterKey, token, proposalId }));
+      return;
+    }
+    if (action === 'publish') {
+      sendJson(response, 200, publishProposal({ root: options.root, masterKey: options.masterKey, token, proposalId }));
+      return;
+    }
+    if (action === 'adopt') {
+      sendJson(response, 200, adoptProposal({ root: options.root, masterKey: options.masterKey, token, proposalId }));
+      return;
+    }
+    sendJson(response, 200, rejectProposal({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      proposalId,
+      reason: text(body, 'reason'),
+    }));
+    return;
+  }
+
   if (pathname === '/api/workspace/memberships' && method === 'GET') {
     const token = userSession(request);
     sendJson(response, 200, listMemberships({
@@ -897,6 +988,21 @@ function flag(body: Record<string, unknown>, field: string): boolean {
   return body[field] === true;
 }
 
+/**
+ * A JSON document the browser read from a file. It is parsed here, and the
+ * governed module validates its shape; the browser never decides what it means.
+ */
+function jsonDocument(body: Record<string, unknown>, field: string): unknown {
+  const value = body[field];
+  if (typeof value !== 'string') return value;
+  if (value.trim() === '') return undefined;
+  try {
+    return JSON.parse(value);
+  } catch {
+    throw new HttpError(400, 'INVALID_REQUEST', `The ${field} document must be valid JSON.`);
+  }
+}
+
 /** A non-empty list of governed identifiers, in the order the browser sent them. */
 function identifiers(body: Record<string, unknown>, field: string): string[] {
   const value = body[field];
@@ -1039,6 +1145,31 @@ const STATUS_BY_CODE: Record<string, number> = {
   INTEGRATION_MAPPING_INCOMPLETE: 422,
   INTEGRATION_MAPPING_UNKNOWN_COLUMN: 422,
   INTEGRATION_VERSION_NOT_FOUND: 404,
+  // An Artifact Proposal failure is a governed refusal, never a server fault.
+  PROPOSAL_NOT_FOUND: 404,
+  PROPOSAL_EVIDENCE_UNREADABLE: 400,
+  PROPOSAL_EVIDENCE_INVALID: 400,
+  PROPOSAL_REQUIREMENT_UNREADABLE: 400,
+  PROPOSAL_REQUIREMENT_INVALID: 400,
+  PROPOSAL_CLARIFICATION_REQUIRED: 409,
+  PROPOSAL_BINDING_NOT_FOUND: 404,
+  PROPOSAL_BINDING_REVOKED: 409,
+  PROPOSAL_PURPOSE_NOT_BOUND: 422,
+  PROPOSAL_MODEL_STALE: 409,
+  PROPOSAL_MODEL_NOT_ACTIVATED: 409,
+  PROPOSAL_FIXTURES_UNREADABLE: 400,
+  PROPOSAL_FIXTURES_INVALID: 400,
+  PROPOSAL_PREVIEW_RAW_NOT_FOUND: 404,
+  PROPOSAL_REASON_INVALID: 400,
+  PROPOSAL_ALREADY_DECIDED: 409,
+  PROPOSAL_VALIDATION_REQUIRED: 409,
+  PROPOSAL_PREVIEW_REQUIRED: 409,
+  PROPOSAL_BASE_STALE: 409,
+  PROPOSAL_ALREADY_PUBLISHED: 409,
+  PROPOSAL_NOT_APPROVED: 409,
+  PROPOSAL_ALREADY_ADOPTED: 409,
+  PROPOSAL_NOT_PUBLISHED: 409,
+  PROPOSAL_TAMPERED: 409,
 };
 
 function sendFailure(response: ServerResponse, error: unknown): void {

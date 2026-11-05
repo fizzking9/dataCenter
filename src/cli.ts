@@ -659,11 +659,13 @@ async function main(): Promise<void> {
     return;
   }
   if (command === 'proposal' && subcommand === 'generate') {
+    const requirementPath = options.get('requirement');
     emit(await generateProposal({
       ...governed(options),
       sourceId: required(options, 'source'),
       bindingId: required(options, 'binding'),
       evidencePath: required(options, 'evidence'),
+      ...(requirementPath === undefined ? {} : { requirementPath }),
     }));
     return;
   }
