@@ -147,6 +147,27 @@ export interface AgentDelegationRecord {
 }
 
 /**
+ * One short-lived authorization code a User's explicit consent produced. It
+ * binds the User, Agent Identity, Workspace, scopes, client, redirect URI, and
+ * PKCE challenge; only its hash is stored, and it is single-use.
+ */
+export interface OAuthAuthorizationCodeRecord {
+  code_hash: string;
+  client_id: string;
+  agent_identity_id: string;
+  user_id: string;
+  workspace_id: string;
+  delegation_id: string;
+  scopes: string[];
+  redirect_uri: string;
+  code_challenge: string;
+  code_challenge_method: 'S256';
+  issued_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+}
+
+/**
  * One access token the Deployment minted for itself. The claims are stored, not
  * only the hash, because every request re-proves the exact issuer, resource,
  * audience, client, redirect, and delegated consent the token was issued under.
@@ -206,6 +227,7 @@ export interface PlatformState {
   agent_delegations: AgentDelegationRecord[];
   service_identities: ServiceIdentityRecord[];
   oauth_clients: OAuthClientRecord[];
+  oauth_authorization_codes: OAuthAuthorizationCodeRecord[];
   access_tokens: AccessTokenRecord[];
   workspaces: WorkspaceRecord[];
   memberships: MembershipRecord[];
@@ -273,6 +295,7 @@ export function readPlatform(root: string): PlatformState {
         agent_delegations: [],
         service_identities: [],
         oauth_clients: [],
+        oauth_authorization_codes: [],
         access_tokens: [],
         workspaces: [],
         memberships: [],
@@ -320,6 +343,7 @@ export function readPlatform(root: string): PlatformState {
   // one it does have keeps exactly the bindings it was created with.
   state.service_identities ??= [];
   state.oauth_clients ??= [];
+  state.oauth_authorization_codes ??= [];
   state.access_tokens ??= [];
   state.sources ??= [];
   state.acquisition_connections ??= [];
