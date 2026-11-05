@@ -324,7 +324,7 @@ export function showModelBinding(options: {
   token: string;
   bindingId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'model_binding_read',
     scope: 'workspace',
@@ -378,7 +378,7 @@ export function showModelBindingWorkspace(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'model_binding_read',
     scope: 'workspace',

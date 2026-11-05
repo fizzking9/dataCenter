@@ -24,7 +24,7 @@ import {
   revokeOAuthClient,
 } from './agents.js';
 import { publishGrant, revokeGrant } from './grants.js';
-import { createExport, downloadExport, listExports, revokeExport } from './export.js';
+import { createExport, downloadExport, listExports, listOwnExports, revokeExport } from './export.js';
 import { showDataProductGovernance } from './product-governance.js';
 import { showWorkspaceAudit } from './audit-view.js';
 import { login, logout, verifyStepUpAuthentication } from './auth.js';
@@ -49,7 +49,7 @@ import {
   publishIntegrationDeclaration,
 } from './integration.js';
 import { browserIdentity, browserNavigation } from './navigation.js';
-import { listDataProducts, previewDataProductEvolution, publishDataProductEvolution, rollbackDataProductVersion, withdrawDataProductVersion } from './products.js';
+import { listDataProductReleases, listDataProducts, previewDataProductEvolution, publishDataProductEvolution, rollbackDataProductVersion, withdrawDataProductVersion } from './products.js';
 import { publishModelBinding, revokeModelBinding, showModelBindingWorkspace } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, listModelProfiles, publishModelProfile } from './model-profile.js';
 import {
@@ -101,6 +101,7 @@ import { createUser, deactivateUser, listUsers, transferOwnership } from './user
 import { createServiceIdentity, listServiceIdentities, revokeServiceIdentity } from './service-identities.js';
 import {
   exchangeOperatorEnrollment,
+  consumeOperatorStepUp,
   resolveOperatorSession,
   signInOperator,
   signOutOperator,
@@ -123,8 +124,20 @@ import {
   tickRetention,
 } from './retention.js';
 import { OperatorError } from './errors.js';
-import { readLicenseSummary } from './license.js';
+import { readLicenseView } from './license.js';
 import { handleMcpSurface, type McpServerIdentity } from './mcp.js';
+import {
+  RECOVERY_PURPOSES,
+  assertRecoveryTargets,
+  enableRestoredConnectivity,
+  enableRestoredWorkers,
+  inspectRecoverySet,
+  listRestorations,
+  showRecovery,
+  showRestoration,
+  startRestoration,
+  verifyRecoverySet,
+} from './recovery.js';
 import { openPlatform } from './session.js';
 import { deploymentStatus } from './status.js';
 import { readDeployment, recentEvidence } from './state.js';
@@ -184,6 +197,10 @@ export interface ConsoleServerOptions {
   masterKey: string;
   port: number;
   assets?: string;
+  /** The off-host recovery target the Operator Console may inspect and restore. */
+  backupRoot?: string;
+  /** Where an isolated restoration is materialized, always in a new directory. */
+  restoreRoot?: string;
 }
 
 export interface ConsoleServer {
@@ -370,7 +387,7 @@ async function handleApi(
   if (pathname === '/api/operator/license' && method === 'GET') {
     const resolved = authorize(options, request, 'operator_console_license');
     const deployment = readDeployment(options.root);
-    const summary = readLicenseSummary(options.root, join(options.root, 'license.json'));
+    const summary = readLicenseView(options.root, join(options.root, 'license.json'));
     sendJson(response, 200, {
       ...summary,
       release: deployment.release,
@@ -378,6 +395,25 @@ async function handleApi(
       state: deployment.state,
       checked_at: new Date().toISOString(),
     });
+    return;
+  }
+
+  // A step-up challenge is a fresh password and MFA proof beside the standing
+  // session. It mints one single-use grant bound to the exact purpose and
+  // target; restoring or resuming a restored Deployment consumes it server-side.
+  if (pathname === '/api/operator/step-up' && method === 'POST') {
+    authorize(options, request, 'operator_step_up');
+    const body = await readJson(request);
+    sendJson(response, 201, await verifyOperatorStepUp({
+      root: options.root,
+      masterKey: options.masterKey,
+      token: cookieValue(request) ?? '',
+      password: text(body, 'password'),
+      ...(text(body, 'totp') === '' ? {} : { totp: text(body, 'totp') }),
+      ...(text(body, 'recovery_code') === '' ? {} : { recoveryCode: text(body, 'recovery_code') }),
+      purpose: text(body, 'purpose'),
+      target: text(body, 'target'),
+    }));
     return;
   }
 
@@ -415,6 +451,42 @@ async function handleApi(
       releaseKey: releaseKeyPath(options.root, body),
       confirmedFingerprint: requiredText(body, 'confirm_release_key_fingerprint'),
       ...(text(body, 'license') === '' ? {} : { license: text(body, 'license') }),
+    }));
+    return;
+  }
+
+  // Recovery: the coordinated checkpoints, recovery sets, and isolated
+  // restorations, read and driven through the same governed module the CLI
+  // calls. The console serves exactly one configured off-host target.
+  if (pathname === '/api/operator/recovery' && method === 'GET') {
+    const resolved = authorize(options, request, 'operator_recovery');
+    void resolved;
+    sendJson(response, 200, showRecovery({
+      ...recoveryTargets(options),
+      masterKey: options.masterKey,
+    }));
+    return;
+  }
+
+  const recoverySetRoute = /^\/api\/operator\/recovery\/backups\/([^/]+)$/u.exec(pathname);
+  if (recoverySetRoute !== null && method === 'GET') {
+    authorize(options, request, 'operator_recovery_set');
+    sendJson(response, 200, inspectRecoverySet({
+      backupRoot: recoveryTargets(options).backupRoot,
+      backupId: decodeURIComponent(recoverySetRoute[1]!),
+    }));
+    return;
+  }
+
+  const recoverySetVerifyRoute = /^\/api\/operator\/recovery\/backups\/([^/]+)\/verify$/u.exec(pathname);
+  if (recoverySetVerifyRoute !== null && method === 'POST') {
+    const resolved = authorize(options, request, 'operator_recovery_verification');
+    sendJson(response, 200, verifyRecoverySet({
+      root: options.root,
+      masterKey: options.masterKey,
+      backupRoot: recoveryTargets(options).backupRoot,
+      backupId: decodeURIComponent(recoverySetVerifyRoute[1]!),
+      operator: resolved.operator.username,
     }));
     return;
   }
@@ -474,11 +546,78 @@ async function handleApi(
     return;
   }
 
+  if (pathname === '/api/operator/recovery/restorations' && method === 'GET') {
+    authorize(options, request, 'operator_restorations');
+    sendJson(response, 200, listRestorations({
+      root: options.root,
+      restoreRoot: recoveryTargets(options).restoreRoot,
+    }));
+    return;
+  }
+
+  // Starting a restoration answers before the work runs: the browser polls the
+  // durable record instead of holding a request open for the whole restore.
+  if (pathname === '/api/operator/recovery/restorations' && method === 'POST') {
+    const resolved = authorize(options, request, 'operator_restoration');
+    const targets = recoveryTargets(options);
+    const body = await readJson(request);
+    const backupId = text(body, 'backup_id');
+    const spent = consumeOperatorStepUp({
+      root: options.root,
+      masterKey: options.masterKey,
+      token: cookieValue(request) ?? '',
+      grant: text(body, 'step_up_grant'),
+      purpose: RECOVERY_PURPOSES.restoration,
+      target: backupId,
+    });
+    sendJson(response, 202, startRestoration({
+      ...targets,
+      masterKey: options.masterKey,
+      backupId,
+      operator: resolved.operator.username,
+      stepUpVerifiedAt: spent.verified_at,
+    }));
+    return;
+  }
+
+  const restorationEnableRoute = /^\/api\/operator\/recovery\/restorations\/([^/]+)\/(enable-workers|enable-connectivity)$/u.exec(pathname);
+  if (restorationEnableRoute !== null && method === 'POST') {
+    const resolved = authorize(options, request, 'operator_restoration_enable');
+    const targets = recoveryTargets(options);
+    const body = await readJson(request);
+    const restorationId = decodeURIComponent(restorationEnableRoute[1]!);
+    const workers = restorationEnableRoute[2] === 'enable-workers';
+    const spent = consumeOperatorStepUp({
+      root: options.root,
+      masterKey: options.masterKey,
+      token: cookieValue(request) ?? '',
+      grant: text(body, 'step_up_grant'),
+      purpose: workers ? RECOVERY_PURPOSES.workers : RECOVERY_PURPOSES.connectivity,
+      target: restorationId,
+    });
+    const enabled = workers
+      ? enableRestoredWorkers({ ...targets, masterKey: options.masterKey, operator: resolved.operator.username, restorationId, stepUpVerifiedAt: spent.verified_at })
+      : enableRestoredConnectivity({ ...targets, masterKey: options.masterKey, operator: resolved.operator.username, restorationId, stepUpVerifiedAt: spent.verified_at });
+    sendJson(response, 200, enabled);
+    return;
+  }
+
+  const restorationRoute = /^\/api\/operator\/recovery\/restorations\/([^/]+)$/u.exec(pathname);
+  if (restorationRoute !== null && method === 'GET') {
+    authorize(options, request, 'operator_restoration');
+    sendJson(response, 200, showRestoration({
+      root: options.root,
+      restoreRoot: recoveryTargets(options).restoreRoot,
+      restorationId: decodeURIComponent(restorationRoute[1]!),
+    }));
+    return;
+  }
+
   if (pathname === '/api/operator/lifecycle/finalize' && method === 'POST') {
     const resolved = authorize(options, request, 'operator_console_finalize');
     assertLifecycleIdle(lifecycleJobs.get(options.root));
     const body = await readJson(request);
-    const stepUp = await operatorStepUp(options, request, body, 'upgrade_finalize');
+    const stepUp = await operatorStepUp(options, request, body, 'upgrade_finalize', 'deployment');
     sendJson(response, 200, {
       ...finalizeUpgrade({ root: options.root, operator: resolved.operator.username }),
       step_up_verified_at: stepUp.verified_at,
@@ -490,7 +629,7 @@ async function handleApi(
     const resolved = authorize(options, request, 'operator_console_rollback');
     assertLifecycleIdle(lifecycleJobs.get(options.root));
     const body = await readJson(request);
-    const stepUp = await operatorStepUp(options, request, body, 'application_rollback');
+    const stepUp = await operatorStepUp(options, request, body, 'application_rollback', 'deployment');
     sendJson(response, 200, {
       ...rollbackDeployment({
         root: options.root,
@@ -748,6 +887,68 @@ async function handleApi(
       masterKey: options.masterKey,
       token,
       workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  // Consumer exploration reads through the very same governed engine the
+  // published Data Product API and MCP answer with. The active Workspace is
+  // named on every request, so a Product reached from another Workspace answers
+  // exactly like one that does not exist.
+  const productQueryRoute = /^\/api\/workspace\/products\/([^/]+)\/query$/u.exec(pathname);
+  if (productQueryRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 200, queryDataProductApi({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+      dataProductId: decodeURIComponent(productQueryRoute[1]!),
+      request: jsonDocument(body, 'request'),
+    }));
+    return;
+  }
+
+  const productReleasesRoute = /^\/api\/workspace\/products\/([^/]+)\/releases$/u.exec(pathname);
+  if (productReleasesRoute !== null && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listDataProductReleases({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      dataProductId: decodeURIComponent(productReleasesRoute[1]!),
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  // A Consumer's curated export runs the same governed query, under the same
+  // Grants, Release pin, and short-lived reauthorized download.
+  const productExportRoute = /^\/api\/workspace\/products\/([^/]+)\/exports$/u.exec(pathname);
+  if (productExportRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, createExport({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+      dataProductId: decodeURIComponent(productExportRoute[1]!),
+      request: jsonDocument(body, 'request'),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/my-exports' && method === 'GET') {
+    const token = userSession(request);
+    const dataProductId = searchParam(request, 'data_product_id');
+    sendJson(response, 200, listOwnExports({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+      ...(dataProductId === null ? {} : { dataProductId }),
     }));
     return;
   }
@@ -2095,6 +2296,7 @@ async function operatorStepUp(
   request: IncomingMessage,
   body: Record<string, unknown>,
   purpose: string,
+  target: string,
 ): Promise<{ verified_at: string }> {
   const token = cookieValue(request);
   if (token === undefined) {
@@ -2108,6 +2310,7 @@ async function operatorStepUp(
     ...(text(body, 'totp') === '' ? {} : { totp: text(body, 'totp') }),
     ...(text(body, 'recovery_code') === '' ? {} : { recoveryCode: text(body, 'recovery_code') }),
     purpose,
+    target,
   });
 }
 
@@ -2122,9 +2325,21 @@ function authorize(options: ConsoleServerOptions, request: IncomingMessage, targ
   return resolved;
 }
 
+/**
+ * The one off-host target and restoration directory this console was started
+ * with. A console begun without them states that instead of guessing paths.
+ */
+function recoveryTargets(options: ConsoleServerOptions) {
+  return assertRecoveryTargets({
+    root: options.root,
+    ...(options.backupRoot === undefined ? {} : { backupRoot: options.backupRoot }),
+    ...(options.restoreRoot === undefined ? {} : { restoreRoot: options.restoreRoot }),
+  });
+}
+
 function recordDeniedAccess(options: ConsoleServerOptions, target: string): void {
   try {
-    const session = openPlatform(options.root, options.masterKey);
+    const session = openPlatform(options.root, options.masterKey, 'allow');
     session.audit({
       actor: 'unauthenticated',
       action: 'operator_console_access',
@@ -2374,7 +2589,6 @@ const STATUS_BY_CODE: Record<string, number> = {
   OPERATOR_ENROLLMENT_CONSUMED: 401,
   OPERATOR_AUTHENTICATION_FAILED: 401,
   OPERATOR_SESSION_INVALID: 401,
-  OPERATOR_STEP_UP_FAILED: 401,
   OPERATOR_PASSWORD_INVALID: 400,
   // Lifecycle actions are serialized: one signed maintenance window at a time.
   LIFECYCLE_BUSY: 409,
@@ -2428,6 +2642,33 @@ const STATUS_BY_CODE: Record<string, number> = {
   CHECKPOINT_AT_INVALID: 400,
   OPERATOR_NAME_INVALID: 400,
   OPERATOR_ALREADY_ENROLLED: 409,
+  OPERATOR_STEP_UP_FAILED: 403,
+  OPERATOR_STEP_UP_REQUIRED: 403,
+  OPERATOR_STEP_UP_PURPOSE_INVALID: 400,
+  RECOVERY_TARGET_NOT_CONFIGURED: 409,
+  RECOVERY_RESTORE_TARGET_NOT_CONFIGURED: 409,
+  RESTORATION_NOT_FOUND: 404,
+  RESTORATION_NOT_VERIFIED: 409,
+  RESTORATION_IN_PROGRESS: 409,
+  RESTORATION_TARGET_MISSING: 409,
+  RESTORATION_FAILED: 409,
+  BACKUP_NOT_FOUND: 404,
+  BACKUP_INTEGRITY_FAILED: 409,
+  BACKUP_DEPLOYMENT_CLOSED: 409,
+  BACKUP_AT_INVALID: 400,
+  BACKUP_EXISTS: 409,
+  BACKUP_TARGET_INSIDE_DEPLOYMENT: 400,
+  RESTORE_VERIFICATION_FAILED: 409,
+  RESTORE_INTEGRITY_FAILED: 409,
+  RESTORE_KEY_MISMATCH: 409,
+  RESTORE_LEDGER_MISSING: 409,
+  RESTORE_LEDGER_TAMPERED: 409,
+  RESTORE_RTO_EXCEEDED: 409,
+  MASTER_KEY_NOT_FOUND: 409,
+  MASTER_KEY_INVALID: 409,
+  MASTER_KEY_MISMATCH: 409,
+  MASTER_KEY_INSIDE_DEPLOYMENT: 400,
+  DEPLOYMENT_EXISTS: 409,
   AUTHENTICATION_FAILED: 401,
   SESSION_INVALID: 401,
   STEP_UP_AUTHENTICATION_FAILED: 401,
@@ -2498,6 +2739,10 @@ const STATUS_BY_CODE: Record<string, number> = {
   DATA_PRODUCT_QUERY_TOO_COMPLEX: 422,
   DATA_PRODUCT_QUERY_RESULT_TOO_LARGE: 422,
   DATA_PRODUCT_QUERY_TIMEOUT: 504,
+  DATA_PRODUCT_QUERY_CURSOR_NOT_SUPPORTED: 400,
+  DATA_PRODUCT_QUERY_LIMIT_EXCEEDED: 400,
+  DATA_PRODUCT_RELEASE_INVALID: 409,
+  RETENTION_EXPIRED: 410,
   // Data Product governance lifecycle refusals.
   DATA_PRODUCT_VERSION_NOT_FOUND: 404,
   DATA_PRODUCT_VERSION_WITHDRAWN: 409,

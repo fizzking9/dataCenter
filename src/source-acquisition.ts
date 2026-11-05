@@ -319,7 +319,7 @@ export function previewSourceAcquisition(options: {
   sourceId: string;
   declaration: unknown;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'source_acquisition_preview', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
   const source = requireAdministeredSource(session, actor, context, options.sourceId);

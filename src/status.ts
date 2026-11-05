@@ -1,8 +1,7 @@
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { backupHealth } from './backup.js';
 import { readMountedMasterKey, unwrapDataKey, type WrappedDataKey } from './keys.js';
-import { validateLicense } from './license.js';
+import { readLicenseView } from './license.js';
 import { readPlatform } from './platform.js';
 import { retentionHealth } from './retention.js';
 import { healthyServices } from './runtime.js';
@@ -13,6 +12,8 @@ export function deploymentStatus(options: {
   root: string;
   masterKey?: string;
   operator: string;
+  /** The instant the license is evaluated at, so lifecycle time is testable. */
+  at?: Date;
 }): Record<string, unknown> {
   const deployment = readDeployment(options.root);
   // Recovery health is stated even while service is closed: a Deployment that
@@ -24,23 +25,54 @@ export function deploymentStatus(options: {
     restored: deployment.restored ?? null,
     backup,
   };
-  const licensePath = join(options.root, 'license.json');
-  if (!existsSync(licensePath) || !deployment.service_open) {
+  const license = readLicenseView(
+    options.root,
+    join(options.root, 'license.json'),
+    options.at === undefined ? {} : { at: options.at },
+  );
+  const licenseDetail = {
+    license_status: license.status,
+    license_warning: license.warning?.level ?? null,
+    license_error: license.error_code ?? null,
+  };
+  if (!deployment.service_open || license.status === 'invalid') {
     const evidenceId = recordEvidence(options.root, 'status', 'closed', options.operator, {
       state: deployment.state,
       backup_health: backup.health,
+      ...licenseDetail,
     });
     return {
       state: deployment.state,
       health: 'closed',
       service_open: false,
+      access: 'closed',
       release: deployment.release,
+      deployment_id: deployment.deployment_id,
       rollback_window: rollbackWindow(options.root),
+      license,
       ...recovery,
       evidence_id: evidenceId,
     };
   }
-  validateLicense(options.root, licensePath);
+  if (license.status === 'expired') {
+    const evidenceId = recordEvidence(options.root, 'status', 'expired_read_only', options.operator, {
+      state: deployment.state,
+      backup_health: backup.health,
+      ...licenseDetail,
+    });
+    return {
+      state: deployment.state,
+      health: 'degraded',
+      service_open: true,
+      access: 'read_only',
+      release: deployment.release,
+      deployment_id: deployment.deployment_id,
+      rollback_window: rollbackWindow(options.root),
+      license,
+      ...recovery,
+      evidence_id: evidenceId,
+    };
+  }
   if (!options.masterKey) {
     throw new Error('--master-key is required for an initialized Deployment.');
   }
@@ -61,17 +93,21 @@ export function deploymentStatus(options: {
     pending_purges: retention.pending_purges,
     backup_health: backup.health,
     backup_reasons: backup.reasons,
+    ...licenseDetail,
   });
   return {
     state: deployment.state,
     health,
     service_open: true,
+    access: 'full',
     release: deployment.release,
+    deployment_id: deployment.deployment_id,
     rollback_window: rollbackWindow(options.root),
     runtime_services: services,
     mfa_enrolled: deployment.mfa_enrolled === true,
     default_credentials: deployment.default_credentials !== false,
     master_key_external: deployment.master_key_external === true,
+    license,
     retention,
     ...recovery,
     evidence_id: evidenceId,

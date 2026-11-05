@@ -450,7 +450,7 @@ export function issueAccessToken(options: {
   }
   const clientId = options.form['client_id'] ?? '';
   const presentedSecret = options.form['client_secret'] ?? '';
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const client = findOAuthClient(session.state, clientId);
   if (!client || client.revoked_at !== null || !constantTimeEquals(hashToken(presentedSecret), client.client_secret_hash)) {
     throw new OAuthError(401, 'invalid_client', 'The client is not registered with this Deployment, or its secret is not valid.');

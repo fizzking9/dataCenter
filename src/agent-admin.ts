@@ -101,7 +101,7 @@ export function listAgentIdentities(options: {
   masterKey: string;
   token: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'agent_identity_listing', scope: 'deployment' };
   const actor = resolveActor(session, options.token, context);
   requireDeploymentAdministrator(session, actor, context);
@@ -129,7 +129,7 @@ export function showWorkspaceAgentAccess(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'workspace_agent_access_read',
     scope: 'workspace',

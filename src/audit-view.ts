@@ -31,7 +31,7 @@ export function listAuditEvents(options: {
   /** Reads the log as of one instant, so the audit retention window is inspectable. */
   at?: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'audit_read',
     scope: 'deployment',
@@ -112,7 +112,7 @@ export function showWorkspaceAudit(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'audit_read',
     scope: 'workspace',

@@ -11,6 +11,7 @@ import {
   type OperatorEnrollment,
   type OperatorRecord,
   type OperatorSessionRecord,
+  type OperatorStepUpRecord,
 } from './console.js';
 import { decrypt } from './keys.js';
 import { hashPassword, verifyPassword, verifyUnusablePassword } from './password.js';
@@ -23,6 +24,12 @@ import { verifyTotp } from './totp.js';
 export const DEFAULT_ENROLLMENT_TTL_MINUTES = 15;
 export const MAX_ENROLLMENT_TTL_MINUTES = 720;
 export const OPERATOR_SESSION_LIFETIME_MS = 30 * 60 * 1000;
+/**
+ * How long one verified step-up challenge stays usable. It is short so the
+ * browser must re-prove the Operator's password and MFA factor immediately
+ * before the consequential action, not at sign-in time.
+ */
+export const OPERATOR_STEP_UP_LIFETIME_MS = 5 * 60 * 1000;
 
 const MAX_CONSECUTIVE_FAILURES = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
@@ -76,7 +83,7 @@ export function issueOperatorEnrollment(options: {
     'OPERATOR_ENROLLMENT_TTL_INVALID',
     `The enrollment lifetime must run from 0 to ${MAX_ENROLLMENT_TTL_MINUTES} minutes.`,
   );
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const console = readOperatorConsole(options.root);
   const existing = findOperator(console, username);
   assertCondition(
@@ -132,7 +139,7 @@ export function revokeOperatorEnrollment(options: {
   enrollmentId: string;
   actor?: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const console = readOperatorConsole(options.root);
   const enrollment = console.enrollments.find((record) => record.enrollment_id === options.enrollmentId);
   assertCondition(enrollment !== undefined, 'OPERATOR_ENROLLMENT_NOT_FOUND', 'The Operator enrollment does not exist.');
@@ -168,7 +175,7 @@ export function revokeOperator(options: {
   actor?: string;
 }): Record<string, unknown> {
   const username = assertOperatorUsername(options.operator);
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const console = readOperatorConsole(options.root);
   const account = findOperator(console, username);
   assertCondition(account !== undefined, 'OPERATOR_NOT_FOUND', 'The Operator Console account does not exist.');
@@ -181,6 +188,9 @@ export function revokeOperator(options: {
   for (const record of revokedSessions) record.revoked_at = revokedAt;
   const revokedEnrollments = pendingEnrollments(console, username);
   for (const enrollment of revokedEnrollments) enrollment.revoked_at = revokedAt;
+  // A revoked Operator holds no step-up proof either: the identities a grant
+  // was issued to must never outlive the identity itself.
+  console.step_ups = console.step_ups.filter((record) => record.operator_id !== account.operator_id);
   save(session, console);
   session.audit({
     actor: operatorActor(account.username),
@@ -251,7 +261,7 @@ export async function exchangeOperatorEnrollment(options: {
   secret: string;
   password: string;
 }): Promise<OperatorCredentials> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const secretHash = enrollmentSecretHash(session.dataKey, options.secret);
   assertEnrollmentUsable(readOperatorConsole(options.root), secretHash, options.password);
 
@@ -364,7 +374,7 @@ export async function signInOperator(options: {
   totp?: string;
   recoveryCode?: string;
 }): Promise<OperatorSignIn> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const console = readOperatorConsole(options.root);
   const account = findOperator(console, options.username);
   if (!account) {
@@ -418,101 +428,6 @@ export async function signInOperator(options: {
   };
 }
 
-/* ------------------------------------------------------------------------- *
- * Step-up authentication for consequential Operator lifecycle actions
- * ------------------------------------------------------------------------- */
-
-export interface OperatorStepUp {
-  verified_at: string;
-  method: 'totp' | 'recovery_code';
-  operator: string;
-}
-
-/**
- * A fresh password and dynamic code prove the Operator is present before an
- * irreversible lifecycle action. It never mints a session: the standing
- * Operator Console session stays the only authority, and the verification is
- * audited as its own security-relevant fact.
- */
-export async function verifyOperatorStepUp(options: {
-  root: string;
-  masterKey: string;
-  token: string;
-  password: string;
-  totp?: string;
-  recoveryCode?: string;
-  purpose: string;
-}): Promise<OperatorStepUp> {
-  const resolved = resolveOperatorSession(options.root, options.token);
-  assertCondition(
-    resolved !== undefined,
-    'OPERATOR_SESSION_INVALID',
-    'The Operator Console session is not valid.',
-  );
-  const session = openPlatform(options.root, options.masterKey);
-  const console = readOperatorConsole(options.root);
-  const account = findOperatorById(console, resolved.operator.operator_id);
-  assertCondition(
-    account !== undefined && account.status === 'active',
-    'OPERATOR_SESSION_INVALID',
-    'The Operator Console session is not valid.',
-  );
-  assertCondition(
-    !(account.locked_until && Date.parse(account.locked_until) > Date.now()),
-    'OPERATOR_STEP_UP_FAILED',
-    'Step-up authentication is temporarily locked after repeated failures.',
-    'Wait for the lockout to end, then re-enter the password and a current dynamic code.',
-  );
-  if (!(await verifyPassword(options.password, account.password_hash))) {
-    registerOperatorFailure(account);
-    writeOperatorConsole(options.root, console);
-    session.audit({
-      actor: operatorActor(account.username),
-      action: 'operator_step_up_authentication',
-      scope: 'deployment',
-      target: options.purpose,
-      outcome: 'failed',
-      detail: { reason: 'password', purpose: options.purpose },
-    });
-    throw new OperatorError(
-      'OPERATOR_STEP_UP_FAILED',
-      'Operator step-up authentication failed.',
-      'Re-enter the current password and a current dynamic code before the consequential action.',
-    );
-  }
-  if (!satisfiesOperatorMfa(session.dataKey, account, options.totp, options.recoveryCode)) {
-    registerOperatorFailure(account);
-    writeOperatorConsole(options.root, console);
-    session.audit({
-      actor: operatorActor(account.username),
-      action: 'operator_step_up_authentication',
-      scope: 'deployment',
-      target: options.purpose,
-      outcome: 'failed',
-      detail: { reason: 'mfa', purpose: options.purpose },
-    });
-    throw new OperatorError(
-      'OPERATOR_STEP_UP_FAILED',
-      'Operator step-up authentication failed.',
-      'Re-enter the current password and a current dynamic code before the consequential action.',
-    );
-  }
-  account.failure_count = 0;
-  account.locked_until = null;
-  writeOperatorConsole(options.root, console);
-  const method: 'totp' | 'recovery_code' = options.totp === undefined ? 'recovery_code' : 'totp';
-  const verifiedAt = new Date().toISOString();
-  session.audit({
-    actor: operatorActor(account.username),
-    action: 'operator_step_up_authentication',
-    scope: 'deployment',
-    target: options.purpose,
-    outcome: 'succeeded',
-    detail: { method, purpose: options.purpose, verified_at: verifiedAt },
-  });
-  return { verified_at: verifiedAt, method, operator: account.username };
-}
-
 /** Resolves the Operator behind a console cookie on every request. */
 export function resolveOperatorSession(
   root: string,
@@ -536,7 +451,7 @@ export function signOutOperator(options: {
 }): Record<string, unknown> {
   const resolved = resolveOperatorSession(options.root, options.token);
   if (!resolved) return { revoked: false };
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const console = readOperatorConsole(options.root);
   const record = console.sessions.find((candidate) => candidate.token_hash === resolved.session.token_hash);
   if (record) record.revoked_at = new Date().toISOString();
@@ -549,4 +464,174 @@ export function signOutOperator(options: {
     outcome: 'succeeded',
   });
   return { revoked: true, operator: resolved.operator.username };
+}
+
+export interface OperatorStepUp {
+  step_up_grant: string;
+  purpose: string;
+  target: string;
+  method: 'totp' | 'recovery_code';
+  verified_at: string;
+  expires_at: string;
+}
+
+const STEP_UP_FAILED = 'Step-up authentication failed.';
+const STEP_UP_NEXT = 'Re-enter the current password and a current dynamic code immediately before the consequential action.';
+
+function failOperatorStepUp(
+  session: PlatformSession,
+  console: OperatorConsoleState,
+  account: OperatorRecord,
+  reason: string,
+  purpose: string,
+  target: string,
+): never {
+  writeOperatorConsole(session.root, console);
+  session.audit({
+    actor: operatorActor(account.username),
+    action: 'operator_step_up_authentication',
+    scope: 'deployment',
+    target,
+    outcome: 'failed',
+    detail: { reason, purpose },
+  });
+  throw new OperatorError('OPERATOR_STEP_UP_FAILED', STEP_UP_FAILED, STEP_UP_NEXT, 403);
+}
+
+function pruneStepUps(console: OperatorConsoleState, now: number): void {
+  console.step_ups = console.step_ups.filter((record) => Date.parse(record.expires_at) > now);
+}
+
+/**
+ * A fresh challenge beside the standing Operator session. The password and a
+ * current MFA factor are re-proved, and a single-use grant bound to exactly one
+ * purpose and target is minted. A failure is audited and changes nothing.
+ */
+export async function verifyOperatorStepUp(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  password: string;
+  totp?: string;
+  recoveryCode?: string;
+  purpose: string;
+  target: string;
+}): Promise<OperatorStepUp> {
+  assertCondition(
+    options.purpose.trim().length > 0 && options.target.trim().length > 0,
+    'OPERATOR_STEP_UP_PURPOSE_INVALID',
+    'A step-up challenge must name the exact purpose and target it unlocks.',
+  );
+  const resolved = resolveOperatorSession(options.root, options.token);
+  if (resolved === undefined) {
+    throw new OperatorError('OPERATOR_SESSION_INVALID', 'The Operator Console session is not valid.', undefined, 401);
+  }
+  const session = openPlatform(options.root, options.masterKey);
+  const console = readOperatorConsole(options.root);
+  const account = findOperatorById(console, resolved.operator.operator_id);
+  assertCondition(account !== undefined, 'OPERATOR_NOT_FOUND', 'The Operator Console account does not exist.');
+  if (account.locked_until !== null && Date.parse(account.locked_until) > Date.now()) {
+    await verifyUnusablePassword(options.password);
+    failOperatorStepUp(session, console, account, 'throttled', options.purpose, options.target);
+  }
+  if (!(await verifyPassword(options.password, account.password_hash))) {
+    registerOperatorFailure(account);
+    failOperatorStepUp(session, console, account, 'password', options.purpose, options.target);
+  }
+  if (!satisfiesOperatorMfa(session.dataKey, account, options.totp, options.recoveryCode)) {
+    registerOperatorFailure(account);
+    failOperatorStepUp(session, console, account, 'mfa', options.purpose, options.target);
+  }
+
+  const now = Date.now();
+  account.failure_count = 0;
+  account.locked_until = null;
+  const grant = randomBytes(32).toString('base64url');
+  const method: OperatorStepUp['method'] = options.totp !== undefined ? 'totp' : 'recovery_code';
+  const record: OperatorStepUpRecord = {
+    grant_hash: hashToken(grant),
+    operator_id: account.operator_id,
+    purpose: options.purpose,
+    target: options.target,
+    verified_at: new Date(now).toISOString(),
+    expires_at: new Date(now + OPERATOR_STEP_UP_LIFETIME_MS).toISOString(),
+    method,
+  };
+  pruneStepUps(console, now);
+  console.step_ups.push(record);
+  writeOperatorConsole(options.root, console);
+  session.audit({
+    actor: operatorActor(account.username),
+    action: 'operator_step_up_authentication',
+    scope: 'deployment',
+    target: options.target,
+    outcome: 'succeeded',
+    detail: { method, purpose: options.purpose, expires_at: record.expires_at },
+  });
+  return {
+    step_up_grant: grant,
+    purpose: record.purpose,
+    target: record.target,
+    method,
+    verified_at: record.verified_at,
+    expires_at: record.expires_at,
+  };
+}
+
+/**
+ * Spends the grant a consequence requires. The grant must belong to the same
+ * Operator, the same purpose, and the same target, and it is consumed here, so
+ * the consequential route cannot proceed on a stale or borrowed proof.
+ */
+export function consumeOperatorStepUp(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  grant: string;
+  purpose: string;
+  target: string;
+}): { verified_at: string; username: string; method: 'totp' | 'recovery_code' } {
+  const resolved = resolveOperatorSession(options.root, options.token);
+  if (resolved === undefined) {
+    throw new OperatorError('OPERATOR_SESSION_INVALID', 'The Operator Console session is not valid.', undefined, 401);
+  }
+  const session = openPlatform(options.root, options.masterKey);
+  const console = readOperatorConsole(options.root);
+  const wanted = hashToken(options.grant.trim());
+  const now = Date.now();
+  const record = console.step_ups.find(
+    (candidate) => constantTimeEquals(candidate.grant_hash, wanted)
+      && candidate.operator_id === resolved.operator.operator_id
+      && candidate.purpose === options.purpose
+      && candidate.target === options.target
+      && Date.parse(candidate.expires_at) > now,
+  );
+  if (record === undefined) {
+    session.audit({
+      actor: operatorActor(resolved.operator.username),
+      action: 'operator_step_up_consumption',
+      scope: 'deployment',
+      target: options.target,
+      outcome: 'denied',
+      detail: { purpose: options.purpose, error_code: 'OPERATOR_STEP_UP_REQUIRED' },
+    });
+    throw new OperatorError(
+      'OPERATOR_STEP_UP_REQUIRED',
+      'A fresh step-up authentication is required before this action.',
+      'Verify the Operator password and a current dynamic code again, then retry the action.',
+      403,
+    );
+  }
+  console.step_ups = console.step_ups.filter((candidate) => candidate !== record);
+  pruneStepUps(console, now);
+  writeOperatorConsole(options.root, console);
+  session.audit({
+    actor: operatorActor(resolved.operator.username),
+    action: 'operator_step_up_consumption',
+    scope: 'deployment',
+    target: options.target,
+    outcome: 'succeeded',
+    detail: { method: record.method, purpose: options.purpose, verified_at: record.verified_at },
+  });
+  return { verified_at: record.verified_at, username: resolved.operator.username, method: record.method };
 }

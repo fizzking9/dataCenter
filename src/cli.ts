@@ -67,7 +67,7 @@ import { installDeployment } from './install.js';
 import { adoptIntegrationConfiguration, publishIntegrationConfiguration } from './integration.js';
 import { publishModelBinding, revokeModelBinding, showModelBinding } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, publishModelProfile, showModelProfile } from './model-profile.js';
-import { importLicense, readLicenseSummary } from './license.js';
+import { importLicense, readLicenseView } from './license.js';
 import { askDataProduct, askWorkspaceQuery } from './natural-language-query.js';
 import { queryDataProduct } from './product-query.js';
 import {
@@ -260,10 +260,12 @@ async function main(): Promise<void> {
     return;
   }
   if (command === 'status') {
+    const at = instant(options, 'at');
     emit(deploymentStatus({
       root: required(options, 'root'),
       ...(options.has('master-key') ? { masterKey: required(options, 'master-key') } : {}),
       operator: required(options, 'operator'),
+      ...(at === undefined ? {} : { at }),
     }));
     return;
   }
@@ -988,6 +990,11 @@ async function main(): Promise<void> {
       root: required(options, 'root'),
       masterKey: required(options, 'master-key'),
       port,
+      // The recovery surface needs the off-host target it may inspect and the
+      // directory an isolated restoration is materialized into; both are facts
+      // of this host, so the console is started with them rather than guessing.
+      ...(options.has('backup-root') ? { backupRoot: required(options, 'backup-root') } : {}),
+      ...(options.has('restore-root') ? { restoreRoot: required(options, 'restore-root') } : {}),
     });
     emit({ listening: true, url: started.url, port: started.port });
     return;
@@ -996,7 +1003,7 @@ async function main(): Promise<void> {
     const root = required(options, 'root');
     const deployment = readDeployment(root);
     emit({
-      ...readLicenseSummary(root, join(root, 'license.json')),
+      ...readLicenseView(root, join(root, 'license.json')),
       release: deployment.release,
       deployment_id: deployment.deployment_id,
       state: deployment.state,

@@ -49,7 +49,13 @@ export function totpSecretFor(fixture: PlatformFixture, username: string): strin
  * lifecycle commands, leaving one bootstrapped Deployment Administrator.
  */
 export function initializePlatform(
-  options: { administratorPassword?: string; highestEligibleRelease?: string } = {},
+  options: {
+    administratorPassword?: string;
+    highestEligibleRelease?: string;
+    /** Issues the initial Deployment License with an explicit validity window. */
+    licenseExpiresAt?: string;
+    licenseNotBefore?: string;
+  } = {},
 ): PlatformFixture {
   const scratch = mkdtempSync(join(tmpdir(), 'dc-platform-'));
   const bundle = createBundleFixture(scratch);
@@ -75,6 +81,8 @@ export function initializePlatform(
   const licensePath = join(scratch, 'deployment-license.json');
   issueLicense(licensePath, bundle, request, {
     ...(options.highestEligibleRelease === undefined ? {} : { highestEligibleRelease: options.highestEligibleRelease }),
+    ...(options.licenseExpiresAt === undefined ? {} : { expiresAt: options.licenseExpiresAt }),
+    ...(options.licenseNotBefore === undefined ? {} : { notBefore: options.licenseNotBefore }),
   });
   const imported = runOperator(['import-license', '--root', root, '--license', licensePath, '--operator', 'certification@example.invalid']);
   if (imported.status !== 0) {
@@ -237,7 +245,11 @@ export interface WorkspaceFixture {
  * shape every governed Workspace Artifact lifecycle needs.
  */
 export function workspaceFixture(
-  options: { highestEligibleRelease?: string } = {},
+  options: {
+    highestEligibleRelease?: string;
+    licenseExpiresAt?: string;
+    licenseNotBefore?: string;
+  } = {},
 ): WorkspaceFixture {
   const fixture = initializePlatform(options);
   const deploymentAdministratorToken = sessionFor(

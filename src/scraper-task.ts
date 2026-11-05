@@ -492,7 +492,7 @@ export function showScraperTask(options: {
   taskId: string;
   version?: number;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'scraper_task_read', scope: 'workspace', target: options.taskId };
   const actor = resolveActor(session, options.token, context);
   const task = session.state.scraper_tasks.find((candidate) => candidate.scraper_task_id === options.taskId);

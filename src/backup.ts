@@ -506,11 +506,15 @@ function configurationBundle(root: string, deployment: Record<string, unknown>):
       'deployment.json': deployment,
       'license-request.json': readOptional(join(root, 'license-request.json')),
       'license.json': readOptional(join(root, 'license.json')),
+      'license-history.json': readOptional(join(root, 'license-history.json')),
       'trust/release-key.pem': readOptional(join(root, 'trust', 'release-key.pem')),
       'trust/release-key.fingerprint': readOptional(join(root, 'trust', 'release-key.fingerprint')),
       'trust/license-key.json': readOptional(join(root, 'trust', 'license-key.json')),
       'config/wrapped-data-key.json': readOptional(join(root, 'config', 'wrapped-data-key.json')),
       'state/operator-console.json': readOptional(join(root, 'state', 'operator-console.json')),
+      // The highest observed wall-clock instant survives recovery, so a restored
+      // Deployment still refuses a significantly backwards host clock.
+      'state/clock.json': readOptional(join(root, 'state', 'clock.json')),
     },
     escrowed_separately: { master_key: true },
   };

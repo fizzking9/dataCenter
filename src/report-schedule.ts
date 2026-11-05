@@ -175,7 +175,7 @@ export function listReportSchedules(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'report_schedule_listing',
     scope: 'workspace',

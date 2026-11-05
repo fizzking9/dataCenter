@@ -377,7 +377,7 @@ export function listReportCandidates(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'report_candidate_listing',
     scope: 'workspace',
@@ -408,7 +408,7 @@ export function showReportCandidate(options: {
   token: string;
   candidateId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'report_candidate_read',
     scope: 'workspace',

@@ -589,6 +589,34 @@ export function describeDataProduct(
   };
 }
 
+/** The Schema field types behind the columns one reader may see, so a Consumer states typed filters. */
+function fieldTypesOf(fields: string[], schema: DatasetSchemaField[]): Record<string, string> {
+  return Object.fromEntries(fields.flatMap((name) => {
+    const field = schema.find((candidate) => candidate.name === name);
+    return field === undefined ? [] : [[name, field.type]];
+  }));
+}
+
+/**
+ * The search capability as one reader may discover it. A Grant that hides the
+ * text field or a suggest field hides that capability, because a search result
+ * would otherwise disclose the very values the Grant withholds.
+ */
+function searchView(contract: DataProductContract, scope: GrantScope): Record<string, unknown> | null {
+  const search = contract.search;
+  if (search === undefined || !scope.columns.includes(search.text_field)) return null;
+  return {
+    text_field: search.text_field,
+    ...(search.title_field === undefined || !scope.columns.includes(search.title_field)
+      ? {}
+      : { title_field: search.title_field }),
+    suggest_fields: search.suggest_fields.filter((name) => scope.columns.includes(name)),
+    ranking: { ...search.ranking },
+    max_terms: search.max_terms,
+    min_term_length: search.min_term_length,
+  };
+}
+
 /** Lists only published Data Products the actor is entitled to see in one Workspace. */
 export function listDataProducts(options: {
   root: string;
@@ -596,7 +624,7 @@ export function listDataProducts(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'data_product_listing',
     scope: 'workspace',
@@ -625,12 +653,25 @@ export function listDataProducts(options: {
         product.workspace_id,
         datasetPins(session, release.dataset_id, release.dataset_release),
       );
+      const dataset = session.state.datasets.find((candidate) => candidate.dataset_id === release.dataset_id);
+      const datasetRelease = dataset?.releases.find((candidate) => candidate.release === release.dataset_release);
+      const schema = dataset === undefined || datasetRelease === undefined
+        ? []
+        : session.state.integration_configurations
+          .find((artifact) => artifact.source_id === dataset.source_id)
+          ?.versions.find((candidate) => candidate.version === datasetRelease.integration_configuration_version)
+          ?.schema ?? [];
+      const fields = version.contract.fields.map((field) => field.name).filter((name) => scope.columns.includes(name));
+      const filters = version.contract.filters.filter((filter) => scope.columns.includes(filter));
+      // A typed filter names the type its field is read at, so a browser form
+      // states a number where the Schema holds a number and never guesses.
+      const fieldTypes = fieldTypesOf([...new Set([...fields, ...filters])], schema);
       return [{
         data_product_id: product.data_product_id,
         name: product.name,
         api_path: product.api_path,
         title: version.contract.title,
-        fields: version.contract.fields.map((field) => field.name).filter((name) => scope.columns.includes(name)),
+        fields,
         dimensions: version.contract.dimensions.filter((dimension) => scope.columns.includes(dimension)),
         metrics: version.contract.metrics
           .filter((metric) => metric.field === undefined || scope.columns.includes(metric.field))
@@ -652,7 +693,12 @@ export function listDataProducts(options: {
           })),
         grain: [...version.contract.grain],
         time: version.contract.time === undefined ? null : { ...version.contract.time },
-        filters: version.contract.filters.filter((filter) => scope.columns.includes(filter)),
+        filters,
+        field_types: fieldTypes,
+        search: searchView(version.contract, scope),
+        limits: { ...version.contract.limits },
+        default_limit: version.contract.default_limit,
+        max_limit: version.contract.max_limit,
         relationships: relationshipViews(version.contract, scope),
         data_product_version: version.version,
         data_product_release: release.release,
@@ -711,11 +757,22 @@ export function listDataProductReleases(options: {
   masterKey: string;
   token: string;
   dataProductId: string;
+  /** The active Workspace the browser names, so a foreign Product is never read. */
+  workspaceId?: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'data_product_release_listing', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
   const product = requireReadableProduct(session, actor, context, options.dataProductId);
+  if (options.workspaceId !== undefined && product.workspace_id !== options.workspaceId) {
+    deny(
+      session,
+      actorLabel(actor.user),
+      { ...context, workspace_id: options.workspaceId },
+      'DATA_PRODUCT_NOT_AVAILABLE',
+      'The Data Product is not available to this actor.',
+    );
+  }
   const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
   const now = new Date();
   const releases = product.releases.map((release) => {
