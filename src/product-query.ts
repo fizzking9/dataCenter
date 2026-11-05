@@ -1,3 +1,4 @@
+import { acquireOperation, releaseOperation } from './admission.js';
 import { resolveActor } from './auth.js';
 import { reject, type ActionContext } from './authz.js';
 import {
@@ -1086,6 +1087,8 @@ export function queryDataProduct(options: {
   token: string;
   dataProductId: string;
   requestPath: string;
+  /** The instant admission runs at, so a serving surface can inject its clock. */
+  admissionAt?: string;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'data_product_query', scope: 'workspace' };
@@ -1101,6 +1104,23 @@ export function queryDataProduct(options: {
     'DATA_PRODUCT_QUERY_INVALID',
     'The Data Product Query document must contain valid JSON.',
   );
-  return executeDataProductQuery({ session, reader, product, context: scoped, request, fail });
+  const admissionAt = options.admissionAt;
+  const leaseId = acquireOperation({
+    root: options.root,
+    operation: 'api_query',
+    class: 'direct',
+    workspace_id: product.workspace_id,
+    user_id: actor.user.user_id,
+    ...(admissionAt === undefined ? {} : { at: admissionAt }),
+  });
+  try {
+    return executeDataProductQuery({ session, reader, product, context: scoped, request, fail });
+  } finally {
+    releaseOperation({
+      root: options.root,
+      leaseId,
+      ...(admissionAt === undefined ? {} : { at: admissionAt }),
+    });
+  }
 }
 

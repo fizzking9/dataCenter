@@ -1,3 +1,4 @@
+import { acquireOperation, releaseOperation } from './admission.js';
 import { resolveActor } from './auth.js';
 import { actorLabel, reject, type ActionContext } from './authz.js';
 import type { Fail } from './errors.js';
@@ -17,6 +18,8 @@ export interface DataProductApiRequest {
   dataProductId: string;
   /** The Data Product Query document, already parsed out of its HTTP body. */
   request: unknown;
+  /** The instant admission runs at, so a serving surface can inject its clock. */
+  admissionAt?: string;
 }
 
 /**
@@ -48,5 +51,22 @@ export function queryDataProductApi(options: DataProductApiRequest): Record<stri
   const reader = memberReader(session, actor.user, role);
   const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
   const fail: Fail = (code, message, nextStep) => reject(session, reader.label, scoped, code, message, nextStep);
-  return executeDataProductQuery({ session, reader, product, context: scoped, request: options.request, fail });
+  const admissionAt = options.admissionAt;
+  const leaseId = acquireOperation({
+    root: options.root,
+    operation: 'api_query',
+    class: 'direct',
+    workspace_id: product.workspace_id,
+    user_id: actor.user.user_id,
+    ...(admissionAt === undefined ? {} : { at: admissionAt }),
+  });
+  try {
+    return executeDataProductQuery({ session, reader, product, context: scoped, request: options.request, fail });
+  } finally {
+    releaseOperation({
+      root: options.root,
+      leaseId,
+      ...(admissionAt === undefined ? {} : { at: admissionAt }),
+    });
+  }
 }

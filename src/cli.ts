@@ -1124,17 +1124,34 @@ async function main(): Promise<void> {
     if (!Number.isInteger(port) || port < 0 || port > 65_535) {
       throw new Error('--port must be a whole number from 0 to 65535.');
     }
+    // The Console binds loopback unless the operator states another host, and a
+    // non-loopback host is refused before any socket opens unless TLS is stated.
+    const tlsCert = options.has('tls-cert') ? required(options, 'tls-cert') : undefined;
+    const tlsKey = options.has('tls-key') ? required(options, 'tls-key') : undefined;
+    if ((tlsCert === undefined) !== (tlsKey === undefined)) {
+      throw new Error('--tls-cert and --tls-key must be configured together.');
+    }
     const started = await startConsoleServer({
       root: required(options, 'root'),
       masterKey: required(options, 'master-key'),
       port,
+      ...(options.has('host') ? { host: required(options, 'host') } : {}),
+      ...(tlsCert === undefined || tlsKey === undefined
+        ? {}
+        : { tls: { certificateFile: tlsCert, keyFile: tlsKey } }),
       // The recovery surface needs the off-host target it may inspect and the
       // directory an isolated restoration is materialized into; both are facts
       // of this host, so the console is started with them rather than guessing.
       ...(options.has('backup-root') ? { backupRoot: required(options, 'backup-root') } : {}),
       ...(options.has('restore-root') ? { restoreRoot: required(options, 'restore-root') } : {}),
     });
-    emit({ listening: true, url: started.url, port: started.port });
+    emit({
+      listening: true,
+      url: started.url,
+      port: started.port,
+      host: started.host,
+      tls: started.tls,
+    });
     return;
   }
   if (command === 'console' && subcommand === 'license') {

@@ -1,3 +1,4 @@
+import { acquireOperation, releaseOperation } from './admission.js';
 import type { AccessTokenGrant } from './agents.js';
 import type { ActionContext } from './authz.js';
 import {
@@ -169,6 +170,14 @@ export function listTools(scopes: Set<string>): Record<string, unknown>[] {
     }));
 }
 
+/** The tools that run a whole Natural-Language Query turn and admit it themselves. */
+const NLQ_TOOL_NAMES = new Set(['ask_natural_language_query', 'continue_natural_language_query']);
+
+/** The operation name a direct MCP tool stands for in the admission ledger. */
+function toolOperationName(tool: McpTool): string {
+  return tool.name === 'read_report' ? 'report_read' : 'mcp_query';
+}
+
 /** One structured tool failure: either an argument the tool could not act on, or a refused read. */
 class ToolError extends Error {
   constructor(
@@ -209,6 +218,8 @@ export async function callTool(
   grant: AccessTokenGrant,
   tool: McpTool,
   rawArguments: unknown,
+  /** The instant admission runs at, so the serving surface can inject its clock. */
+  options: { at?: string } = {},
 ): Promise<Record<string, unknown>> {
   const actor = `agent:${grant.agent.name}`;
   const context: ActionContext = { action: 'mcp_tool_call', scope: 'workspace' };
@@ -229,9 +240,42 @@ export async function callTool(
   try {
     const args = readArguments(tool, rawArguments);
     const principal = principalFor(session, grant);
-    const payload = await invoke(session, grant, principal, tool, args, context);
-    session.audit({ ...context, actor, outcome: 'succeeded', detail });
-    return toolResult(session, payload);
+    // A direct tool holds one Consumer slot for exactly the governed read it
+    // performs. Natural-Language Query admits its whole turn at the engine, so
+    // one MCP request is never counted twice.
+    const workspaceId = typeof args['workspace_id'] === 'string' && args['workspace_id'].trim() !== ''
+      ? args['workspace_id']
+      : null;
+    let leaseId: string | null = null;
+    if (workspaceId !== null && !NLQ_TOOL_NAMES.has(tool.name)) {
+      try {
+        leaseId = acquireOperation({
+          root: session.root,
+          operation: toolOperationName(tool),
+          class: 'direct',
+          workspace_id: workspaceId,
+          agent_identity_id: grant.agent.agent_identity_id,
+          user_id: grant.delegation?.user.user_id ?? null,
+          ...(options.at === undefined ? {} : { at: options.at }),
+        });
+      } catch (error) {
+        if (error instanceof OperatorError) {
+          throw new ToolError(error.code, error.message, { nextStep: error.nextStep });
+        }
+        throw error;
+      }
+    }
+    try {
+      const payload = await invoke(session, grant, principal, tool, args, context, options);
+      session.audit({ ...context, actor, outcome: 'succeeded', detail });
+      return toolResult(session, payload);
+    } finally {
+      releaseOperation({
+        root: session.root,
+        leaseId,
+        ...(options.at === undefined ? {} : { at: options.at }),
+      });
+    }
   } catch (error) {
     if (!(error instanceof ToolError)) throw error;
     session.audit({
@@ -293,13 +337,14 @@ async function invoke(
   tool: McpTool,
   args: Record<string, unknown>,
   context: ActionContext,
+  options: { at?: string },
 ): Promise<Record<string, unknown>> {
   if (tool.name === 'discover_data_products') return discover(session, grant, principal.reader, args, context);
   if (tool.name === 'read_data_product_contract') return readContract(session, grant, principal.reader, args, context);
   if (tool.name === 'query_data_product') return query(session, grant, principal.reader, args, context);
   if (tool.name === 'discover_reports') return discoverReports(session, grant, principal, args, context);
   if (tool.name === 'read_report') return readReport(session, grant, principal, args, context);
-  return ask(session, grant, principal, tool, args, context);
+  return ask(session, grant, principal, tool, args, context, options);
 }
 
 /** Discovery is the Workspace listing, narrowed exactly the way a read is. */
@@ -447,6 +492,7 @@ async function ask(
   tool: McpTool,
   args: Record<string, unknown>,
   context: ActionContext,
+  options: { at?: string },
 ): Promise<Record<string, unknown>> {
   const workspaceId = requireText(args, 'workspace_id');
   context.workspace_id = workspaceId;
@@ -467,11 +513,13 @@ async function ask(
       attributedUserId: principal.attributedUserId,
       generatedBy: principal.generatedBy,
       workspaceId,
+      agentIdentityId: grant.agent.agent_identity_id,
       ...(dataProductId === undefined ? {} : { dataProductId }),
       question: requireText(args, 'question'),
       ...(clarification === undefined ? {} : { clarification }),
       ...(conversation === undefined ? {} : { conversation }),
       ...(bindingId === undefined ? {} : { bindingId }),
+      ...(options.at === undefined ? {} : { admissionAt: options.at }),
     });
   } catch (error) {
     // The engine publishes its own refusal codes through OperatorError; the MCP
