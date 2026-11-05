@@ -408,7 +408,7 @@ function narrationFacts(
       const name = metric['name'];
       const value = typeof name === 'string' ? values[name] : undefined;
       if (typeof value === 'number') {
-        records.push({ label: `${label} ${String(name)}`, value, metric: name, group: label });
+        records.push({ label, value, metric: name, group: label });
       }
     }
   }
