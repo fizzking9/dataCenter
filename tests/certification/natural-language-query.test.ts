@@ -179,62 +179,6 @@ function numbersIn(text: string): string[] {
   return (text.match(/\d+(?:\.\d+)?/gu) ?? []).map((token) => String(Number(token)));
 }
 
-test('NLQ computes every number and comparison deterministically and drops unsupported narrative claims', async (t) => {
-  const s = await readySurface();
-  t.after(() => s.endpoint.close());
-
-  // A comparison question: the engine computes both windows, the model only phrased it.
-  const answered = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-01-31 相比 2025-12-01 至 2025-12-31 各城市的处理量合计是多少？']));
-  assert.equal(answered.outcome, 'answered', JSON.stringify(answered));
-  const result = asRecord(answered.result);
-  const query = asRecord(answered.query);
-  assert.equal(query['kind'], 'aggregate');
-  assert.ok(isRecord(query['comparison']), 'the comparison window is part of the compiled request');
-  assert.equal(asRecord(answered.resolved)['comparison_window'] !== null, true, 'the resolved comparison window is disclosed');
-
-  // The strongest check: the same request through the deterministic engine
-  // returns exactly the numbers the answer carries.
-  const direct = command(s.fixture, ['product', 'query', '--product', s.dataProductId, '--request', jsonFile(s.fixture, 'nlq-compiled', query)], { token: s.consumerToken });
-  assert.equal(direct.status, 0, direct.stderr);
-  const directResult = direct.output as Record<string, unknown>;
-  assert.deepEqual(
-    governedNumbers(result),
-    governedNumbers(directResult),
-    'every number and comparison equals what the deterministic engine computes for the compiled request',
-  );
-  const groups = (result['groups'] as Array<Record<string, unknown>>);
-  assert.ok(groups.length > 0, 'the comparison produced governed groups');
-  assert.ok(groups.every((group) => isRecord(group['comparison'])), 'each group carries a computed comparison');
-
-  // The narrative may only restate governed numbers, never add one.
-  const answer = asRecord(answered.answer);
-  const narrative = String(answer['narrative'] ?? '');
-  assert.match(narrative, /根据证据/u);
-  const stated = numbersIn(narrative);
-  assert.ok(stated.length > 0, 'the narrative states a number');
-  const governed = new Set(numbersIn(JSON.stringify(governedNumbers(result))));
-  for (const token of stated) {
-    assert.ok(governed.has(token), `the narrative number ${token} is governed by the engine result`);
-  }
-
-  // A causal claim is unsupported by evidence and is never published.
-  s.endpoint.behaviour = 'causal_narration';
-  const causal = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-01-31 杭州的处理量合计是多少？']));
-  assert.equal(causal.outcome, 'answered', JSON.stringify(causal));
-  assert.equal(causal.answer, null, 'a causal claim is dropped rather than published');
-  assert.equal(causal.reason_code, 'NARRATIVE_CAUSAL_CLAIM');
-  assert.ok((causal.limitations as string[]).some((line) => line.includes('因果')), 'the dropped narrative is disclosed');
-  assert.notEqual(asRecord(causal.result)['groups'], undefined, 'the deterministic answer still stands without the narrative');
-
-  // A number the evidence does not contain is dropped the same way.
-  s.endpoint.behaviour = 'fabricated_narration';
-  const fabricated = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-01-31 杭州的处理量合计是多少？']));
-  assert.equal(fabricated.outcome, 'answered', JSON.stringify(fabricated));
-  assert.equal(fabricated.answer, null, 'an ungoverned number is dropped rather than published');
-  assert.equal(fabricated.reason_code, 'NARRATIVE_NUMBER_NOT_GOVERNED');
-  assert.ok((fabricated.limitations as string[]).some((line) => line.includes('证据之外的数值')), 'the dropped number is disclosed');
-});
-
 test('NLQ gives the model only the authorized Contract and refuses a plan that carries executable code', async (t) => {
   const s = await readySurface();
   t.after(() => s.endpoint.close());
@@ -355,6 +299,62 @@ test('NLQ asks a targeted clarification before executing and discloses governed 
   const totalsDefault = applied.find((entry) => entry['name'] === 'include_totals');
   assert.ok(totalsDefault, 'the applied totals default is disclosed');
   assert.equal(totalsDefault['value'], true);
+});
+
+test('NLQ computes every number and comparison deterministically and drops unsupported narrative claims', async (t) => {
+  const s = await readySurface();
+  t.after(() => s.endpoint.close());
+
+  // A comparison question: the engine computes both windows, the model only phrased it.
+  const answered = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-01-31 相比 2025-12-01 至 2025-12-31 各城市的处理量合计是多少？']));
+  assert.equal(answered.outcome, 'answered', JSON.stringify(answered));
+  const result = asRecord(answered.result);
+  const query = asRecord(answered.query);
+  assert.equal(query['kind'], 'aggregate');
+  assert.ok(isRecord(query['comparison']), 'the comparison window is part of the compiled request');
+  assert.equal(asRecord(answered.resolved)['comparison_window'] !== null, true, 'the resolved comparison window is disclosed');
+
+  // The strongest check: the same request through the deterministic engine
+  // returns exactly the numbers the answer carries.
+  const direct = command(s.fixture, ['product', 'query', '--product', s.dataProductId, '--request', jsonFile(s.fixture, 'nlq-compiled', query)], { token: s.consumerToken });
+  assert.equal(direct.status, 0, direct.stderr);
+  const directResult = direct.output as Record<string, unknown>;
+  assert.deepEqual(
+    governedNumbers(result),
+    governedNumbers(directResult),
+    'every number and comparison equals what the deterministic engine computes for the compiled request',
+  );
+  const groups = (result['groups'] as Array<Record<string, unknown>>);
+  assert.ok(groups.length > 0, 'the comparison produced governed groups');
+  assert.ok(groups.every((group) => isRecord(group['comparison'])), 'each group carries a computed comparison');
+
+  // The narrative may only restate governed numbers, never add one.
+  const answer = asRecord(answered.answer);
+  const narrative = String(answer['narrative'] ?? '');
+  assert.match(narrative, /根据证据/u);
+  const stated = numbersIn(narrative);
+  assert.ok(stated.length > 0, 'the narrative states a number');
+  const governed = new Set(numbersIn(JSON.stringify(governedNumbers(result))));
+  for (const token of stated) {
+    assert.ok(governed.has(token), `the narrative number ${token} is governed by the engine result`);
+  }
+
+  // A causal claim is unsupported by evidence and is never published.
+  s.endpoint.behaviour = 'causal_narration';
+  const causal = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-01-31 杭州的处理量合计是多少？']));
+  assert.equal(causal.outcome, 'answered', JSON.stringify(causal));
+  assert.equal(causal.answer, null, 'a causal claim is dropped rather than published');
+  assert.equal(causal.reason_code, 'NARRATIVE_CAUSAL_CLAIM');
+  assert.ok((causal.limitations as string[]).some((line) => line.includes('因果')), 'the dropped narrative is disclosed');
+  assert.notEqual(asRecord(causal.result)['groups'], undefined, 'the deterministic answer still stands without the narrative');
+
+  // A number the evidence does not contain is dropped the same way.
+  s.endpoint.behaviour = 'fabricated_narration';
+  const fabricated = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-01-31 杭州的处理量合计是多少？']));
+  assert.equal(fabricated.outcome, 'answered', JSON.stringify(fabricated));
+  assert.equal(fabricated.answer, null, 'an ungoverned number is dropped rather than published');
+  assert.equal(fabricated.reason_code, 'NARRATIVE_NUMBER_NOT_GOVERNED');
+  assert.ok((fabricated.limitations as string[]).some((line) => line.includes('证据之外的数值')), 'the dropped number is disclosed');
 });
 
 test('NLQ returns a distinct structured outcome and limitation for empty, no-evidence, unavailable, and refused turns', async (t) => {
