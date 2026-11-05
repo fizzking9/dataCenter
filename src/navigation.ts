@@ -22,6 +22,7 @@ export type NavigationKey =
   | 'workspace.sources'
   | 'workspace.scrapers'
   | 'workspace.products'
+  | 'workspace.nlq'
   | 'workspace.productGovernance'
   | 'workspace.context'
   | 'workspace.members'
@@ -43,6 +44,7 @@ const WORKSPACE_NAVIGATION: Record<WorkspaceRole, NavigationKey[]> = {
     'workspace.sources',
     'workspace.scrapers',
     'workspace.products',
+    'workspace.nlq',
     'workspace.productGovernance',
     'workspace.context',
     'workspace.members',
@@ -53,7 +55,7 @@ const WORKSPACE_NAVIGATION: Record<WorkspaceRole, NavigationKey[]> = {
     'workspace.productProposals',
     'workspace.retention',
   ],
-  Consumer: ['workspace.overview', 'workspace.products'],
+  Consumer: ['workspace.overview', 'workspace.products', 'workspace.nlq'],
 };
 
 const DEPLOYMENT_NAVIGATION: NavigationKey[] = [
