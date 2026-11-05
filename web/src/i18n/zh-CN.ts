@@ -1079,7 +1079,7 @@ export const catalog = {
   'productProposal.check.dataset_release.current': '数据集版本为当前版本',
   'productProposal.preview.title': '代表性预览',
   'productProposal.preview.pins': '通用 {common} · 工作区 {workspace}',
-  'productProposal.preview.emptyMetric': '空',
+  'productProposal.preview.emptyMetric': '无值',
   'productProposal.preview.description': '预览通过真实查询引擎读取数据集版本，只返回代表性结果，不写入任何数据产品或发布。',
   'productProposal.preview.empty': '尚未运行代表性预览。',
   'productProposal.preview.run': '运行代表性预览',
