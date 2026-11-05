@@ -158,14 +158,20 @@ export function narrationFailure(output: Record<string, unknown>, input: unknown
 }
 
 /** The members a query-plan answer may state, and nothing wider. */
-const PLAN_KEYS = ['action', 'query', 'missing', 'candidates', 'interpretation'];
+const PLAN_KEYS = ['action', 'query', 'parts', 'missing', 'candidates', 'interpretation'];
 const PLAN_QUERY_KEYS = [
   'kind', 'filters', 'metric_filters', 'group_by', 'metrics', 'sort',
   'window', 'comparison', 'include_totals', 'limit', 'q',
   'release', 'major', 'cursor',
 ];
+const PART_KEYS = ['product', 'query'];
+/** How many independent Data Product Queries one compound question may plan. */
+export const MAX_PLAN_PARTS = 8;
 const MISSING_KINDS = ['period', 'dimension', 'metric', 'filter_value'];
 const QUERY_KINDS = ['records', 'aggregate', 'search', 'suggest'];
+
+/** Whether a turn expects one query, one or more parts, or either. */
+export type QueryPlanShape = 'query' | 'parts' | 'either';
 
 /** Finds any key the published query language never accepts, at any depth. */
 function refusedKeyIn(value: unknown): string | null {
@@ -185,12 +191,64 @@ function refusedKeyIn(value: unknown): string | null {
   return null;
 }
 
+/** The published request vocabulary one part's query may use, and nothing wider. */
+function queryBodyFailure(query: Record<string, unknown>): string | null {
+  if (typeof query['kind'] !== 'string' || !QUERY_KINDS.includes(query['kind'])) {
+    return 'QUERY_PLAN_KIND_INVALID';
+  }
+  for (const key of Object.keys(query)) {
+    if (PLAN_QUERY_KEYS.includes(key)) continue;
+    if (REFUSED_KEYS.includes(key)) return 'QUERY_PLAN_CODE_REFUSED';
+    return 'QUERY_PLAN_KEY_UNSUPPORTED';
+  }
+  if (refusedKeyIn(query) !== null) return 'QUERY_PLAN_CODE_REFUSED';
+  return null;
+}
+
+/**
+ * One independent part of a compound question: the Data Product handle the turn
+ * authorized and the request that part compiles to. A part carries no join, no
+ * formula, and no reference to any other part.
+ */
+function partsFailure(raw: unknown, shape: QueryPlanShape): string | null {
+  if (shape === 'query') return 'QUERY_PLAN_PARTS_UNSUPPORTED';
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_PLAN_PARTS) {
+    return 'QUERY_PLAN_PARTS_INVALID';
+  }
+  for (const part of raw) {
+    if (!isRecord(part)) return 'QUERY_PLAN_PARTS_INVALID';
+    for (const key of Object.keys(part)) {
+      if (PART_KEYS.includes(key)) continue;
+      if (REFUSED_KEYS.includes(key)) return 'QUERY_PLAN_CODE_REFUSED';
+      return 'QUERY_PLAN_KEY_UNSUPPORTED';
+    }
+    const product = part['product'];
+    if (typeof product !== 'string' || product.length === 0 || product.length > 2048) {
+      return 'QUERY_PLAN_PART_PRODUCT_INVALID';
+    }
+    const query = part['query'];
+    if (!isRecord(query)) return 'QUERY_PLAN_QUERY_MISSING';
+    const failure = queryBodyFailure(query);
+    if (failure !== null) return failure;
+  }
+  return null;
+}
+
 /**
  * The declared query-plan shape every model answer is judged against before it
  * can become a Data Product Query. It never widens the published vocabulary:
  * SQL, formulas, joins, and unpublished request keys are refused by name.
+ *
+ * A compound question plans independent parts instead of one query, so a part
+ * can name only a Data Product handle this turn already authorized; composing
+ * parts into one request is not expressible at all.
  */
-export function queryPlanFailure(output: Record<string, unknown>): string | null {
+export function queryPlanFailure(
+  output: Record<string, unknown>,
+  shape: QueryPlanShape = 'either',
+): string | null {
+  const refused = Object.keys(output).find((key) => key !== 'query' && REFUSED_KEYS.includes(key));
+  if (refused !== undefined) return 'QUERY_PLAN_CODE_REFUSED';
   if (Object.keys(output).some((key) => !PLAN_KEYS.includes(key))) return 'QUERY_PLAN_KEY_UNSUPPORTED';
   const action = output['action'];
   if (action !== 'query' && action !== 'clarify') return 'QUERY_PLAN_ACTION_INVALID';
@@ -210,21 +268,20 @@ export function queryPlanFailure(output: Record<string, unknown>): string | null
     if (missing.some((kind) => typeof kind !== 'string' || !MISSING_KINDS.includes(kind))) {
       return 'QUERY_PLAN_MISSING_UNSUPPORTED';
     }
-    if (output['query'] !== undefined) return 'QUERY_PLAN_QUERY_UNEXPECTED';
+    if (output['query'] !== undefined || output['parts'] !== undefined) {
+      return 'QUERY_PLAN_QUERY_UNEXPECTED';
+    }
     return null;
+  }
+  const hasParts = output['parts'] !== undefined;
+  if (hasParts) {
+    if (output['query'] !== undefined) return 'QUERY_PLAN_QUERY_UNEXPECTED';
+    return partsFailure(output['parts'], shape);
   }
   const query = output['query'];
   if (!isRecord(query)) return 'QUERY_PLAN_QUERY_MISSING';
-  if (typeof query['kind'] !== 'string' || !QUERY_KINDS.includes(query['kind'])) {
-    return 'QUERY_PLAN_KIND_INVALID';
-  }
-  for (const key of Object.keys(query)) {
-    if (PLAN_QUERY_KEYS.includes(key)) continue;
-    if (REFUSED_KEYS.includes(key)) return 'QUERY_PLAN_CODE_REFUSED';
-    return 'QUERY_PLAN_KEY_UNSUPPORTED';
-  }
-  if (refusedKeyIn(query) !== null) return 'QUERY_PLAN_CODE_REFUSED';
-  return null;
+  if (shape === 'parts') return 'QUERY_PLAN_PARTS_REQUIRED';
+  return queryBodyFailure(query);
 }
 
 /**
