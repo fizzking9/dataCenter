@@ -84,6 +84,7 @@ function queueRun(
   context: ActionContext,
   trigger: 'manual' | 'scheduled',
   queuedAt: string,
+  scheduledFor: string | null,
   backfill: { start: string; end: string } | null,
 ): AcquisitionRunRecord {
   const run: AcquisitionRunRecord = {
@@ -99,6 +100,7 @@ function queueRun(
     attempts: 0,
     status: 'queued',
     queued_at: queuedAt,
+    scheduled_for: scheduledFor,
     started_at: null,
     completed_at: null,
     raw_acquisition_ids: [],
@@ -158,7 +160,7 @@ export function enqueueAcquisition(options: {
   const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
   requireConnectorSource(session, actorLabel(actor.user), scoped, source);
   const backfill = readBackfill(session, actorLabel(actor.user), scoped, options.from, options.to);
-  const run = queueRun(session, source, actorLabel(actor.user), scoped, 'manual', new Date().toISOString(), backfill);
+  const run = queueRun(session, source, actorLabel(actor.user), scoped, 'manual', new Date().toISOString(), null, backfill);
   session.save();
   return {
     source_id: source.source_id,
@@ -460,7 +462,10 @@ export async function workAcquisition(options: {
     acquisition,
   });
   run.raw_acquisition_ids = outcome.rawIds;
-  run.completed_at = new Date().toISOString();
+  // The attempt completes on the clock that planned it, so a worker given an
+  // explicit instant reports one reproducible timeline: a scheduled Run's start
+  // and publication latencies are facts of the ledger, not of the test harness.
+  run.completed_at = at;
   plan.completed_at = run.completed_at;
 
   if (!outcome.complete) {
@@ -671,13 +676,11 @@ export function tickSchedules(options: {
     if (atMs < dueAt) continue;
 
     const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
-    const run = queueRun(session, source, actorLabel(actor.user), scoped, 'scheduled', at, null);
+    const run = queueRun(session, source, actorLabel(actor.user), scoped, 'scheduled', at, new Date(dueAt).toISOString(), null);
     enqueued.push({
       source_id: source.source_id,
       acquisition_run_id: run.acquisition_run_id,
       due_at: new Date(dueAt).toISOString(),
-      queued_at: run.queued_at,
-      tolerance_seconds: schedule.tolerance_seconds ?? 0,
     });
   }
   session.audit({

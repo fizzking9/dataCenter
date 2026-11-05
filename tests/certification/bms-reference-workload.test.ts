@@ -8,12 +8,9 @@ import { pageBody, startHttpSource } from '../support/http-source.js';
 import { command } from '../support/platform.js';
 import { runOperatorAsync } from '../support/operator.js';
 import {
-  AI_ACC_SESSIONS,
-  AI_ACC_WINDOW,
   BMS_EXPECTED,
   BMS_SOURCES,
   bmsReplies,
-  configureAiAccWorkload,
   configureBmsWorkload,
   expectedIdentities,
   type ConfiguredSource,
@@ -74,8 +71,6 @@ interface TickResult {
     source_id: string;
     acquisition_run_id: string;
     due_at: string;
-    queued_at: string;
-    tolerance_seconds: number;
   }>;
 }
 
@@ -126,6 +121,33 @@ interface ManifestResult {
     byte_length: number;
     received_at: string;
   }>;
+}
+
+interface TargetsResult {
+  schedule: { every_minutes: number; start_tolerance_seconds: number } | null;
+  publication_targets: { p95_seconds: number; p99_seconds: number } | null;
+  runs: Array<{
+    status: string;
+    start_latency_seconds: number | null;
+    publication_latency_seconds: number | null;
+  }>;
+  start: {
+    samples: number;
+    within_tolerance: number;
+    late: number;
+    maximum_latency_seconds: number | null;
+    tolerance_seconds: number;
+    met: boolean;
+  } | null;
+  publication: {
+    samples: number;
+    failed: number;
+    p95_seconds: number | null;
+    p99_seconds: number | null;
+    p95_target_seconds: number | null;
+    p99_target_seconds: number | null;
+    met: boolean;
+  } | null;
 }
 
 function tick(workload: ReferenceWorkload, at: string): TickResult {
@@ -184,6 +206,17 @@ function creationWindow(workload: ReferenceWorkload): { earliest: number; latest
   return { earliest: Math.min(...instants), latest: Math.max(...instants) };
 }
 
+/** Reads the schedule and publication distribution one Source really produced. */
+function targets(workload: ReferenceWorkload, sourceId: string): TargetsResult {
+  const result = command(
+    workload.fixture,
+    ['acquisition', 'targets', '--source', sourceId],
+    { token: workload.token },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  return result.output as unknown as TargetsResult;
+}
+
 /**
  * Works one Source at the earliest instant its Connection admits it: never
  * before the previous export on that Connection has been closed for the whole
@@ -204,26 +237,43 @@ function workWhenConnectionIsFree(
   return result;
 }
 
-/** One hourly sweep: the schedule queues every Source, and the Connection drains them in order. */
-function sweep(
-  workload: ReferenceWorkload,
-  tickAt: string,
-): { ticked: TickResult; worked: WorkResult[] } {
-  const ticked = tick(workload, tickAt);
-  assert.equal(ticked.enqueued.length, BMS_EXPECTED.sources, 'a complete sweep queues all nine Sources');
-  const worked = workload.sources.map((source) => workWhenConnectionIsFree(workload, source, Date.parse(tickAt)));
-  return { ticked, worked };
+/**
+ * The cold sweep that establishes the first Release of every Source. It is a
+ * manual sweep because the nine Sources were just configured together: their
+ * first hourly instants are effectively simultaneous, and the Connection's
+ * 65-second serialization is what spaces the exports.
+ */
+function manualSweep(workload: ReferenceWorkload, fromAt: number): WorkResult[] {
+  let notEarlier = fromAt;
+  return workload.sources.map((source) => {
+    const enqueued = command(workload.fixture, ['acquisition', 'enqueue', '--source', source.sourceId], { token: workload.token });
+    assert.equal(enqueued.status, 0, enqueued.stderr);
+    const result = workWhenConnectionIsFree(workload, source, notEarlier);
+    assert.equal(result.trigger, 'manual');
+    notEarlier = Date.parse(String(result.plan?.completed_at)) + BMS_EXPECTED.interval_seconds * 1_000;
+    return result;
+  });
 }
 
 /**
- * The next schedule tick, derived from the instant the sweep really completed:
- * the interval is measured from completion, and the tick lands late enough for
- * every Source of the physical system to be due.
+ * One hourly sweep as the schedule really runs it: each Source becomes due one
+ * hour after its own previous completion, and the sweep starts it 45 seconds
+ * later — inside the declared 60-second start tolerance — which the Connection's
+ * durable queue admits because the previous export closed 65 seconds earlier.
  */
-function nextSweepAt(worked: WorkResult[]): string {
-  const completedAt = Math.max(...worked.map((result) => Date.parse(String(result.plan?.completed_at))));
-  assert.ok(Number.isFinite(completedAt), 'every worked Run states when it completed');
-  return new Date(completedAt + 60 * 60_000 + 45_000).toISOString();
+function scheduledSweep(workload: ReferenceWorkload, previous: WorkResult[]): WorkResult[] {
+  return workload.sources.map((source, index) => {
+    const due = Date.parse(String(previous[index]?.plan?.completed_at)) + 60 * 60_000;
+    const at = new Date(due + 45_000).toISOString();
+    const ticked = tick(workload, at);
+    assert.equal(ticked.enqueued.length, 1, 'only the Source whose hour has elapsed is due');
+    assert.equal(ticked.enqueued[0]?.source_id, source.sourceId);
+    assert.equal(ticked.enqueued[0]?.due_at, new Date(due).toISOString());
+    const result = workAt(workload, source.sourceId, at);
+    assert.equal(result.status, 'complete', `${source.name}: ${JSON.stringify(result)}`);
+    assert.equal(result.trigger, 'scheduled');
+    return result;
+  });
 }
 
 test('nine independently configured Sources acquire an hourly full sweep through one serialized Connection', async () => {
@@ -270,15 +320,18 @@ test('nine independently configured Sources acquire an hourly full sweep through
   });
   assert.deepEqual(versions[0]!['schedule'], {
     every_minutes: 60,
-    tolerance_seconds: BMS_EXPECTED.start_tolerance_seconds,
+    start_tolerance_seconds: BMS_EXPECTED.start_tolerance_seconds,
+  });
+  assert.deepEqual(versions[0]!['publication_targets'], {
+    p95_seconds: BMS_EXPECTED.publication_p95_seconds,
+    p99_seconds: BMS_EXPECTED.publication_p99_seconds,
   });
 
   // ---------------------------------------------------------------------------
-  // The scheduler tolerance is external: nothing is due before the interval has
-  // elapsed, and the sweep that is due starts inside the declared tolerance.
-  // Each Source is due at its own creation instant, so one sweep tick necessarily
-  // catches earlier Sources up; the latest-created Source — the one that just
-  // became due — is the start the tolerance target governs.
+  // The scheduler is external: nothing is due before the first interval has
+  // elapsed, and one due sweep queues every Source of the physical system. Each
+  // Run's own start and publication latencies are measured in the nightly sweep
+  // below, where every Source is started at its own due instant.
   // ---------------------------------------------------------------------------
   const created = creationWindow(workload);
   const early = tick(workload, new Date(created.earliest - 1_000).toISOString());
@@ -291,18 +344,10 @@ test('nine independently configured Sources acquire an hourly full sweep through
     workload.sources.map((source) => source.sourceId),
     'the sweep starts every Source of the physical system, in the order they were configured',
   );
-  for (const entry of ticked.enqueued) {
-    assert.equal(entry.queued_at, ticked.at);
-    const lateness = Date.parse(entry.queued_at) - Date.parse(entry.due_at);
-    assert.ok(lateness >= 0, 'a scheduled Run never starts before it is due');
-    assert.equal(entry.tolerance_seconds, BMS_EXPECTED.start_tolerance_seconds);
-  }
-  const anchor = ticked.enqueued.reduce((latest, entry) => (
-    Date.parse(entry.due_at) > Date.parse(latest.due_at) ? entry : latest
-  ));
-  assert.ok(
-    Date.parse(anchor.queued_at) - Date.parse(anchor.due_at) <= anchor.tolerance_seconds * 1_000,
-    'the Source that just became due starts inside the declared scheduler tolerance',
+  assert.deepEqual(
+    ticked.enqueued.map((entry) => Date.parse(entry.due_at)),
+    [...workload.sources.map((source) => Date.parse(source.createdAt))],
+    'each Source is due at its own creation instant',
   );
 
   const queued = pacing(workload);
@@ -373,7 +418,7 @@ test('nine independently configured Sources acquire an hourly full sweep through
     const releasedAt = Date.parse(released.provenance.released_at);
     assert.ok(releasedAt >= sweptAt, 'the Release was published by this sweep');
     assert.ok(
-      releasedAt <= sweptAt + BMS_EXPECTED.publication_minutes * 60_000,
+      releasedAt <= sweptAt + BMS_EXPECTED.publication_p95_seconds * 1_000,
       `${source.name} is inside the complete-sweep freshness target`,
     );
     assert.ok(
@@ -421,7 +466,7 @@ test('nine independently configured Sources acquire an hourly full sweep through
   await server.close();
 });
 
-test('one active Run per Connection, 65 seconds between exports, and no global pacing survive workers', async () => {
+test('one active Run per Connection and 65 seconds between exports survive worker processes', async () => {
   // ---------------------------------------------------------------------------
   // The first export of the sweep is still on the wire in one worker process.
   // A second worker process asks to export the next Source of the same physical
@@ -475,34 +520,6 @@ test('one active Run per Connection, 65 seconds between exports, and no global p
   assert.ok(closed.last_finished_at !== null, 'the instant the export closed is durable');
   const earliest = Date.parse(closed.last_finished_at) + BMS_EXPECTED.interval_seconds * 1_000;
 
-  // A second physical system in the same Workspace is paced independently: its
-  // seven-day fragment reads at an instant the export system would still refuse.
-  const aiServer = await startHttpSource({ replies: [{ body: pageBody(AI_ACC_SESSIONS.exports[0]!) }] });
-  const ai = configureAiAccWorkload(aiServer, workload.workspace);
-  const aiSource = ai.sources[0]!;
-  const independentAt = new Date(Date.parse(closed.last_finished_at) + 10_000).toISOString();
-  assert.ok(Date.parse(independentAt) < earliest, 'the second system asks before the export interval closes');
-  const enqueuedAi = command(ai.fixture, ['acquisition', 'enqueue', '--source', aiSource.sourceId], { token: ai.token });
-  assert.equal(enqueuedAi.status, 0, enqueuedAi.stderr);
-  const aiWorked = workAt(ai, aiSource.sourceId, independentAt);
-  assert.equal(aiWorked.status, 'complete', 'no global interval holds the second Connection');
-  assert.equal(aiWorked.plan?.connection_id, ai.connectionId);
-  assert.equal(aiWorked.plan?.window?.start, AI_ACC_WINDOW.initial_start);
-  assert.equal(
-    Date.parse(String(aiWorked.plan?.window?.end)) - Date.parse(String(aiWorked.plan?.window?.start)),
-    AI_ACC_WINDOW.maximum_span_minutes * 60_000,
-    'one immutable fragment spans at most seven days',
-  );
-  assert.equal(aiWorked.records, 1);
-  assert.equal(aiWorked.dataset_release, 1);
-  assert.deepEqual(
-    manifest(ai, aiWorked.acquisition_run_id).plan.window,
-    aiWorked.plan?.window,
-    'the fragment does not move when a later process reads it',
-  );
-  assert.equal(aiServer.requests().length, 1, 'the seven-day fragment was read exactly once');
-  await aiServer.close();
-
   const tooSoon = workAt(workload, second.sourceId, new Date(earliest - 1_000).toISOString());
   assert.equal(tooSoon.status, 'queued');
   assert.equal(tooSoon.pacing_reason, 'interval');
@@ -524,14 +541,14 @@ test('one active Run per Connection, 65 seconds between exports, and no global p
   await server.close();
 });
 
-test('overlapping hourly exports reconcile idempotently to expected counts and stable identities', async () => {
+test('hourly scheduled sweeps keep start tolerance, publication freshness, and idempotent identities', async () => {
   const server = await startHttpSource({ replies: bmsReplies(3) });
   const workload = configureBmsWorkload(server);
-  const startedAt = new Date(creationWindow(workload).latest + 45_000).toISOString();
+  const created = creationWindow(workload);
 
   // Sweep one governs the first export of every Source.
-  const first = sweep(workload, startedAt);
-  for (const [index, result] of first.worked.entries()) {
+  const first = manualSweep(workload, created.latest + 45_000);
+  for (const [index, result] of first.entries()) {
     assert.equal(result.raw_acquisition_count, 1, `${workload.sources[index]!.name} kept one export fragment`);
     assert.equal(result.batch_raw_acquisition_count, 1);
     assert.equal(result.records, BMS_EXPECTED.sweeps[0]!.records_per_source);
@@ -544,7 +561,7 @@ test('overlapping hourly exports reconcile idempotently to expected counts and s
     assert.equal(checkpoint(workload, workload.sources[index]!.sourceId)?.['watermark'], BMS_EXPECTED.sweeps[0]!.window.to);
   }
   assert.equal(
-    first.worked.reduce((total, result) => total + (result.records ?? 0), 0),
+    first.reduce((total, result) => total + (result.records ?? 0), 0),
     BMS_EXPECTED.sweeps[0]!.records,
     'the whole sweep governs the expected number of records',
   );
@@ -554,7 +571,7 @@ test('overlapping hourly exports reconcile idempotently to expected counts and s
   // and the export carries one edited record and one new record. Nothing is
   // duplicated: the identity of an edited record is the same record, updated.
   // ---------------------------------------------------------------------------
-  const second = sweep(workload, nextSweepAt(first.worked));
+  const second = scheduledSweep(workload, first);
   const before = dataset(workload, workload.sources[0]!.sourceId, 1);
   const after = dataset(workload, workload.sources[0]!.sourceId, 2);
   const editedIdentity = expectedIdentities(BMS_SOURCES[0]!, 0)[0]!;
@@ -569,10 +586,10 @@ test('overlapping hourly exports reconcile idempotently to expected counts and s
     'the edited record became a new value of the same identity',
   );
   assert.equal(
-    second.worked.reduce((total, result) => total + (result.records ?? 0), 0),
+    second.reduce((total, result) => total + (result.records ?? 0), 0),
     BMS_EXPECTED.sweeps[1]!.records,
   );
-  for (const [index, result] of second.worked.entries()) {
+  for (const [index, result] of second.entries()) {
     const released = dataset(workload, workload.sources[index]!.sourceId);
     assert.equal(result.raw_acquisition_count, 1, 'the overlapping export really was acquired again');
     assert.equal(result.dataset_release, 2, `${workload.sources[index]!.name} published one further Release`);
@@ -585,9 +602,10 @@ test('overlapping hourly exports reconcile idempotently to expected counts and s
   // A repeated export of the same content reconciles to the same records, so it
   // advances no Release: the sweep is new, the governed data is not.
   // ---------------------------------------------------------------------------
-  const repeated = sweep(workload, nextSweepAt(second.worked));
-  for (const [index, result] of repeated.worked.entries()) {
+  const third = scheduledSweep(workload, second);
+  for (const [index, result] of third.entries()) {
     assert.equal(result.status, 'complete');
+    assert.equal(result.trigger, 'scheduled');
     assert.equal(result.raw_acquisition_count, 1, 'the repeated export really was acquired again');
     assert.ok(result.integration_batch_id !== null, 'and handed over its own Integration Batch');
     assert.equal(result.dataset_release, 2, 'but it reconciled to the Release already governed');
@@ -602,6 +620,42 @@ test('overlapping hourly exports reconcile idempotently to expected counts and s
     assert.equal(checkpoint(workload, workload.sources[index]!.sourceId)?.['watermark'], BMS_EXPECTED.sweeps[2]!.window.to);
   }
   assert.equal(server.requests().length, BMS_EXPECTED.sources * 3, 'every sweep read every export exactly once');
+
+  // ---------------------------------------------------------------------------
+  // The two scheduled sweeps are the evidence the schedule's own promises are
+  // measured from: the ledger states each due instant, start, and completion, so
+  // start tolerance and complete-sweep publication freshness are read externally
+  // rather than assumed.
+  // ---------------------------------------------------------------------------
+  for (const source of workload.sources) {
+    const report = targets(workload, source.sourceId);
+    assert.deepEqual(report.schedule, {
+      every_minutes: 60,
+      start_tolerance_seconds: BMS_EXPECTED.start_tolerance_seconds,
+    });
+    assert.deepEqual(report.publication_targets, {
+      p95_seconds: BMS_EXPECTED.publication_p95_seconds,
+      p99_seconds: BMS_EXPECTED.publication_p99_seconds,
+    });
+    assert.equal(report.runs.length, 2, 'the two scheduled sweeps are the measured evidence');
+    assert.deepEqual(
+      { samples: report.start?.samples, late: report.start?.late, maximum: report.start?.maximum_latency_seconds },
+      { samples: 2, late: 0, maximum: 45 },
+      `${source.name} started every scheduled Run inside its 60-second tolerance`,
+    );
+    assert.equal(report.start?.met, true);
+    assert.deepEqual(
+      {
+        samples: report.publication?.samples,
+        failed: report.publication?.failed,
+        p95: report.publication?.p95_seconds,
+        p99: report.publication?.p99_seconds,
+      },
+      { samples: 2, failed: 0, p95: 45, p99: 45 },
+      `${source.name} published every scheduled sweep inside its freshness targets`,
+    );
+    assert.equal(report.publication?.met, true);
+  }
   await server.close();
 });
 

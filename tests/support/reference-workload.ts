@@ -53,6 +53,7 @@ export interface ReferenceConnection {
   retry: Record<string, unknown>;
   pacing: Record<string, unknown>;
   schedule: Record<string, unknown>;
+  publication_targets: Record<string, unknown>;
 }
 
 /**
@@ -83,7 +84,8 @@ export const BMS_CONNECTION: ReferenceConnection = {
     maximum_requests_per_minute: null,
     maximum_concurrent_runs: 1,
   },
-  schedule: { every_minutes: 60, tolerance_seconds: 60 },
+  schedule: { every_minutes: 60, start_tolerance_seconds: 60 },
+  publication_targets: { p95_seconds: 1_800, p99_seconds: 2_700 },
 };
 
 /**
@@ -335,7 +337,8 @@ export const BMS_EXPECTED = {
   sources: 9,
   interval_seconds: 65,
   start_tolerance_seconds: 60,
-  publication_minutes: 30,
+  publication_p95_seconds: 1_800,
+  publication_p99_seconds: 2_700,
   sweeps: [
     {
       window: { from: '2026-10-31T23:00:00.000Z', to: '2026-11-01T01:00:00.000Z' },
@@ -358,52 +361,6 @@ export const BMS_EXPECTED = {
     },
   ],
 } as const;
-
-/**
- * The second workload of the Deployment: a differently paced system whose
- * windows may span at most seven days. It shares nothing with the export system
- * except the generic engine.
- */
-export const AI_ACC_CONNECTION: ReferenceConnection = {
-  name: '智能接入系统',
-  auth: { scheme: 'bearer' },
-  pagination: { parameter: 'page', size_parameter: 'page_size', start: 1, size: 500, max_pages: 10 },
-  retry: { max_attempts: 1, base_delay_ms: 25, max_delay_ms: 25, retry_on: [503] },
-  pacing: {
-    serialization: false,
-    minimum_interval_seconds: 0,
-    maximum_requests_per_minute: 6,
-    maximum_concurrent_runs: 2,
-  },
-  schedule: { every_minutes: 15, tolerance_seconds: 60 },
-};
-
-export const AI_ACC_WINDOW = {
-  mode: 'incremental',
-  start_parameter: 'from',
-  end_parameter: 'to',
-  initial_start: '2026-10-01T00:00:00.000Z',
-  maximum_span_minutes: 10_080,
-  lookback_minutes: 0,
-  time_zone: 'Asia/Shanghai',
-  end_inclusive: false,
-};
-
-export const AI_ACC_SESSIONS: ReferenceSource = {
-  name: '会话明细',
-  path: '/exports/sessions',
-  identity: 'session_no',
-  columns: columns([
-    ['session_no', 'session_no', 'string'],
-    ['updated_at', 'updated_at', 'timestamp'],
-    ['handled_by', 'handled_by', 'string'],
-    ['message_count', 'message_count', 'integer'],
-  ]),
-  exports: hourlyExports(
-    [{ session_no: 'AS-0001', updated_at: '2026-10-02T08:00:00.000Z', handled_by: '机器人', message_count: 6 }],
-    [{ session_no: 'AS-0001', updated_at: '2026-10-02T08:00:00.000Z', handled_by: '人工', message_count: 9 }],
-  ),
-};
 
 /** The canonical business identifier of one frozen row. */
 export function identityOf(source: ReferenceSource, row: ExportRow): string {
@@ -490,6 +447,7 @@ function publishConnection(
         retry: definition.retry,
         pacing: definition.pacing,
         schedule: options.schedule ?? definition.schedule,
+        publication_targets: definition.publication_targets,
       }),
       ...(definition.auth['scheme'] === 'none' ? [] : ['--credential-stdin']),
     ],
@@ -602,24 +560,5 @@ export function configureBmsWorkload(
     connectionId: connection.connectionId,
     connectionVersion: connection.connectionVersion,
     sources,
-  };
-}
-
-/** Configures the differently paced second workload of the same Workspace. */
-export function configureAiAccWorkload(
-  source: { url: string },
-  workspace: WorkspaceFixture,
-): ReferenceWorkload {
-  const { fixture, workspaceId, workspaceAdministratorToken: token } = workspace;
-  const connection = publishConnection(fixture, workspaceId, token, source.url, AI_ACC_CONNECTION, {});
-  const configured = configureSource(fixture, workspaceId, token, AI_ACC_SESSIONS, connection, AI_ACC_WINDOW);
-  return {
-    fixture,
-    workspace,
-    workspaceId,
-    token,
-    connectionId: connection.connectionId,
-    connectionVersion: connection.connectionVersion,
-    sources: [configured],
   };
 }

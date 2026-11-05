@@ -149,6 +149,8 @@ export interface AcquisitionRunRecord {
   attempts: number;
   status: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled';
   queued_at: string;
+  /** The schedule instant a scheduled Run was due; null for a manual Run. */
+  scheduled_for: string | null;
   started_at: string | null;
   completed_at: string | null;
   raw_acquisition_ids: string[];
@@ -232,6 +234,27 @@ export interface AcquisitionCheckpointState {
   generation: number;
 }
 
+/**
+ * How often a scheduled Source reads and how late its Run may start.
+ *
+ * The tolerance is the promise the schedule makes: a Run that begins within it
+ * started on time, and one that begins later is a measurably missed start.
+ */
+export interface ConnectionSchedule {
+  every_minutes: number;
+  start_tolerance_seconds: number;
+}
+
+/**
+ * How quickly a Source's acquisition result must become current after the
+ * instant its Run was due. The pair states two measurement points, so a
+ * schedule is certified by the distribution it really produced.
+ */
+export interface ConnectionPublicationTargets {
+  p95_seconds: number;
+  p99_seconds: number;
+}
+
 /** One immutable Acquisition Connection Version: endpoint, auth scheme, and policy. */
 export interface AcquisitionConnectionVersion {
   version: number;
@@ -246,7 +269,9 @@ export interface AcquisitionConnectionVersion {
   retry: ConnectionRetryPolicy;
   pacing: ConnectionPacingPolicy;
   pagination: ConnectionPagination;
-  schedule: { every_minutes: number; tolerance_seconds: number } | null;
+  schedule: ConnectionSchedule | null;
+  /** The publication latency the Connection promises; null when none is declared. */
+  publication_targets: ConnectionPublicationTargets | null;
   content_hash: string;
 }
 
