@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -61,7 +61,12 @@ process.on('exit', () => {
 export async function startHttpSource(scenario: HttpSourceScenario): Promise<HttpSource> {
   const directory = mkdtempSync(join(tmpdir(), 'dc-http-source-'));
   const log = join(directory, 'requests.jsonl');
-  const child = spawn(process.execPath, [serverScript, JSON.stringify({ ...scenario, log })], {
+  // The scenario is handed over as a file, not as one command-line argument: a
+  // frozen reference-workload snapshot is far larger than an operating-system
+  // command line admits.
+  const scenarioPath = join(directory, 'scenario.json');
+  writeFileSync(scenarioPath, JSON.stringify({ ...scenario, log }));
+  const child = spawn(process.execPath, [serverScript, scenarioPath], {
     stdio: ['ignore', 'pipe', 'ignore'],
   });
   running.add(child);

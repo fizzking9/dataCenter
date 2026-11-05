@@ -19,6 +19,7 @@ const MAX_LIMIT = 1000;
 const LIMIT_CEILING = 10000;
 
 const METRIC_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+const DEFINITION_KEY = /^[a-z][a-z0-9_]{1,63}$/;
 const AGGREGATIONS: MetricAggregation[] = ['count', 'sum', 'min', 'max', 'avg'];
 const VALUE_TYPES: MetricValueType[] = ['integer', 'decimal', 'money', 'date', 'timestamp'];
 const TIME_PRECISIONS: Array<DataProductTime['precision']> = ['date', 'timestamp'];
@@ -210,6 +211,7 @@ function readMetrics(
     const unit = readUnit(fail, name, candidate['unit']);
     const currency = readCurrency(fail, name, valueType, candidate['currency']);
     const metricDimensions = readMetricDimensions(fail, name, candidate['dimensions'], dimensions);
+    const definition = readDefinitionKey(fail, name, candidate['definition']);
     metrics.push({
       name,
       ...(typeof candidate['description'] === 'string' ? { description: candidate['description'] } : {}),
@@ -218,10 +220,23 @@ function readMetrics(
       value_type: valueType,
       ...(unit === undefined ? {} : { unit }),
       ...(currency === undefined ? {} : { currency }),
+      ...(definition === undefined ? {} : { definition }),
       ...(metricDimensions === undefined ? {} : { dimensions: metricDimensions }),
     });
   }
   return metrics;
+}
+
+/** Reads the Business Context key a metric or its time zone binds, when it states one. */
+function readDefinitionKey(fail: Fail, metric: string, raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || !DEFINITION_KEY.test(raw)) {
+    fail(
+      'DATA_PRODUCT_CONTRACT_INVALID',
+      `The ${metric} binding must name a Business Context key of lowercase letters, digits, and underscores.`,
+    );
+  }
+  return raw;
 }
 
 function readMetricField(
@@ -331,7 +346,13 @@ function readTime(fail: Fail, raw: unknown, schema: DatasetSchemaField[]): DataP
   if (typeof timeZone !== 'string' || !resolvesTimeZone(timeZone)) {
     fail('DATA_PRODUCT_CONTRACT_INVALID', 'The Contract must state a business time zone the platform can resolve.');
   }
-  return { field: field.name, precision, time_zone: timeZone };
+  const definition = readDefinitionKey(fail, field.name, raw['definition']);
+  return {
+    field: field.name,
+    precision,
+    time_zone: timeZone,
+    ...(definition === undefined ? {} : { definition }),
+  };
 }
 
 function resolvesTimeZone(value: string): boolean {

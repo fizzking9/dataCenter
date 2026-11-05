@@ -22,6 +22,9 @@ import { openPlatform, type PlatformSession } from './session.js';
 
 const ENTRY_KINDS = ['metric', 'definition', 'dimension'] as const;
 const KEY_RULE = /^[a-z][a-z0-9_]{1,63}$/;
+const FAVORABLE_DIRECTIONS = ['up', 'down', 'neutral'] as const;
+const METRIC_AGGREGATIONS = ['count', 'sum', 'min', 'max', 'avg'] as const;
+const METRIC_VALUE_TYPES = ['integer', 'decimal', 'money', 'date', 'timestamp'] as const;
 
 interface Resolution {
   commonKeys: Set<string>;
@@ -52,6 +55,41 @@ function requireEntry(session: PlatformSession, actor: string, context: ActionCo
   }
   const unit = candidate['unit'];
   const description = candidate['description'];
+  const favorable = candidate['favorable_direction'];
+  const aggregation = candidate['aggregation'];
+  const valueType = candidate['value_type'];
+  // Only a Metric Definition carries a direction and a formula: a dimension or
+  // a general definition that claimed one would govern something it does not.
+  if (favorable !== undefined
+    && (kind !== 'metric' || !FAVORABLE_DIRECTIONS.includes(favorable as (typeof FAVORABLE_DIRECTIONS)[number]))) {
+    reject(
+      session,
+      actor,
+      context,
+      'CONTEXT_ENTRY_INVALID',
+      `Only a metric entry may state a favorable direction, and it must be one of: ${FAVORABLE_DIRECTIONS.join(', ')}.`,
+    );
+  }
+  if (aggregation !== undefined
+    && (kind !== 'metric' || !METRIC_AGGREGATIONS.includes(aggregation as (typeof METRIC_AGGREGATIONS)[number]))) {
+    reject(
+      session,
+      actor,
+      context,
+      'CONTEXT_ENTRY_INVALID',
+      `Only a metric entry may state an aggregation, and it must be one of: ${METRIC_AGGREGATIONS.join(', ')}.`,
+    );
+  }
+  if (valueType !== undefined
+    && (kind !== 'metric' || !METRIC_VALUE_TYPES.includes(valueType as (typeof METRIC_VALUE_TYPES)[number]))) {
+    reject(
+      session,
+      actor,
+      context,
+      'CONTEXT_ENTRY_INVALID',
+      `Only a metric entry may state a value type, and it must be one of: ${METRIC_VALUE_TYPES.join(', ')}.`,
+    );
+  }
   return {
     key,
     kind: kind as ContextEntry['kind'],
@@ -59,6 +97,9 @@ function requireEntry(session: PlatformSession, actor: string, context: ActionCo
     ...(typeof unit === 'string' ? { unit } : {}),
     ...(typeof description === 'string' ? { description } : {}),
     ...(references.length === 0 ? {} : { references: references as string[] }),
+    ...(favorable === undefined ? {} : { favorable_direction: favorable as NonNullable<ContextEntry['favorable_direction']> }),
+    ...(aggregation === undefined ? {} : { aggregation: aggregation as NonNullable<ContextEntry['aggregation']> }),
+    ...(valueType === undefined ? {} : { value_type: valueType as NonNullable<ContextEntry['value_type']> }),
   };
 }
 
