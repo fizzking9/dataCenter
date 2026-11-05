@@ -136,6 +136,119 @@ export interface ContextView {
   entries: ContextEntryView[];
 }
 
+
+/** One pinned Model Profile Version as the browser reads it, never its credential. */
+export interface ModelPromptView {
+  id: string;
+  body: string;
+  hash: string;
+}
+
+export interface ModelProfileVersionView {
+  model_profile_version: number;
+  adapter: string;
+  model_id: string;
+  purposes: string[];
+  data_categories: string[];
+  tools: string[];
+  max_output_bytes: number;
+  prompts: ModelPromptView[];
+  credential_ref: string;
+  has_credential: boolean;
+  content_hash: string;
+  published_at: string;
+  published_by: string;
+}
+
+export interface ModelProfileCheckView {
+  name: string;
+  passed: boolean;
+  detail?: string;
+}
+
+export interface ModelProfileEvaluationView {
+  model_profile_version: number;
+  model_profile_content_hash: string;
+  evaluated_at: string;
+  evaluated_by: string;
+  adapter: string;
+  model_id: string;
+  passed: boolean;
+  checks: ModelProfileCheckView[];
+  evidence_hash: string;
+}
+
+export interface ModelProfileView {
+  model_profile_id: string;
+  name: string;
+  created_at: string;
+  activated_version: number | null;
+  activated_at: string | null;
+  versions: ModelProfileVersionView[];
+  evaluations: ModelProfileEvaluationView[];
+}
+
+export interface ModelProfileList {
+  model_profiles: ModelProfileView[];
+}
+
+export interface ModelProfileEvaluationResult {
+  model_profile_id: string;
+  model_profile_version: number;
+  content_hash: string;
+  passed: boolean;
+  checks: ModelProfileCheckView[];
+  evidence_hash: string;
+  evaluated_at: string;
+}
+
+export interface ModelProfileActivationResult {
+  model_profile_id: string;
+  activated_version: number;
+  activated_at: string;
+  content_hash: string;
+  evaluation_hash: string;
+}
+
+/** An activated Profile Version a Workspace Administrator may bind. */
+export interface BindableModelProfile {
+  model_profile_id: string;
+  name: string;
+  model_profile_version: number;
+  content_hash: string;
+  purposes: string[];
+  data_categories: string[];
+}
+
+export interface ModelBindingPreflightView {
+  checked_at: string;
+  passed: boolean;
+  checks: ModelProfileCheckView[];
+  evidence_hash: string;
+}
+
+export interface ModelBindingView {
+  binding_id: string;
+  workspace_id: string;
+  model_profile_id: string;
+  model_profile_version: number;
+  model_profile_content_hash: string;
+  purposes: string[];
+  data_categories: string[];
+  preflight: ModelBindingPreflightView;
+  created_at: string;
+  created_by: string;
+  revoked_at: string | null;
+  /** The listing adds the Profile name; the single-Binding read does not. */
+  model_profile_name?: string | null;
+}
+
+export interface WorkspaceModelBindingList {
+  workspace_id: string;
+  bindings: ModelBindingView[];
+  model_profiles: BindableModelProfile[];
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<ApiResult<T>> {
   let response: Response;
   try {
@@ -199,4 +312,31 @@ export const platformApi = {
     request<DataProductList>(`/api/workspace/data-products${workspaceQuery(workspaceId)}`),
   context: (workspaceId: string) =>
     request<ContextView>(`/api/workspace/context${workspaceQuery(workspaceId)}`),
+  modelProfiles: () => request<ModelProfileList>('/api/deployment/model-profiles'),
+  publishModelProfile: (body: Record<string, unknown>) =>
+    request<{ model_profile_id: string }>('/api/deployment/model-profiles', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  evaluateModelProfile: (profileId: string, version: number) =>
+    request<ModelProfileEvaluationResult>(
+      `/api/deployment/model-profiles/${encodeURIComponent(profileId)}/evaluate`,
+      { method: 'POST', body: JSON.stringify({ model_profile_version: version }) },
+    ),
+  activateModelProfile: (profileId: string, version: number) =>
+    request<ModelProfileActivationResult>(
+      `/api/deployment/model-profiles/${encodeURIComponent(profileId)}/activate`,
+      { method: 'POST', body: JSON.stringify({ model_profile_version: version }) },
+    ),
+  modelBindings: (workspaceId: string) =>
+    request<WorkspaceModelBindingList>(`/api/workspace/model-bindings${workspaceQuery(workspaceId)}`),
+  publishModelBinding: (workspaceId: string, body: Record<string, unknown>) =>
+    request<ModelBindingView>(`/api/workspace/model-bindings${workspaceQuery(workspaceId)}`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  revokeModelBinding: (bindingId: string) =>
+    request<ModelBindingView>(`/api/workspace/model-bindings/${encodeURIComponent(bindingId)}/revoke`, {
+      method: 'POST',
+    }),
 };

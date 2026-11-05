@@ -40,9 +40,10 @@ function labelOf(key: string): string | undefined {
 
 function hrefOf(key: string, workspaceId: string | null): string | undefined {
   if (key === 'deployment.workspaces') return '/app/deployment';
+  if (key === 'deployment.modelProfiles') return '/app/deployment/model-profiles';
   if (workspaceId === null || !key.startsWith('workspace.')) return undefined;
   const view = key.slice('workspace.'.length);
-  if (view !== 'overview' && view !== 'products' && view !== 'context') return undefined;
+  if (view !== 'overview' && view !== 'products' && view !== 'context' && view !== 'models') return undefined;
   return `/app/w/${encodeURIComponent(workspaceId)}/${view}`;
 }
 
