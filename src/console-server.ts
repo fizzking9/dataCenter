@@ -3,13 +3,20 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { acquireUpload } from './acquisition.js';
 import { showWorkspaceAudit } from './audit-view.js';
 import { login, logout } from './auth.js';
 import { publishWorkspaceContext, showContext, showContextHistory } from './context.js';
+import {
+  adoptIntegrationConfiguration,
+  previewIntegrationConfiguration,
+  publishIntegrationDeclaration,
+} from './integration.js';
 import { browserIdentity, browserNavigation } from './navigation.js';
 import { listDataProducts } from './products.js';
 import { publishModelBinding, revokeModelBinding, showModelBindingWorkspace } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, listModelProfiles, publishModelProfile } from './model-profile.js';
+import { createSource, listWorkspaceSources, showWorkspaceSource } from './sources.js';
 import { grantMembership, listMemberships, listWorkspaces, revokeMembership } from './workspaces.js';
 import {
   exchangeOperatorEnrollment,
@@ -31,6 +38,8 @@ export const SESSION_COOKIE = 'dc_operator_console';
 export const USER_SESSION_COOKIE = 'dc_user_session';
 
 const MAX_BODY_BYTES = 16 * 1024;
+/** One governed upload is bounded before it reaches any governed module. */
+const MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
 const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -436,6 +445,116 @@ async function handleApi(
     return;
   }
 
+  // A guided Source workflow: create the Source, review and publish its
+  // declarative Configuration, adopt an exact Version, then upload content that
+  // integrates into the next Dataset Release. Every route authorizes server-side
+  // and none of them ever answers with raw bytes or object locators.
+  if (pathname === '/api/workspace/sources' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listWorkspaceSources({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/sources' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, createSource({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: workspaceFromBody(body),
+      name: text(body, 'name'),
+      type: text(body, 'type'),
+    }));
+    return;
+  }
+
+  const sourceRoute = /^\/api\/workspace\/sources\/([^/]+)$/u.exec(pathname);
+  if (sourceRoute !== null && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, showWorkspaceSource({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      sourceId: decodeURIComponent(sourceRoute[1]!),
+    }));
+    return;
+  }
+
+  const configurationRoute = /^\/api\/workspace\/sources\/([^/]+)\/configuration\/(preview|publish|adopt)$/u.exec(pathname);
+  if (configurationRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const sourceId = decodeURIComponent(configurationRoute[1]!);
+    if (configurationRoute[2] === 'preview') {
+      sendJson(response, 200, previewIntegrationConfiguration({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        sourceId,
+        declaration: body['declaration'],
+      }));
+      return;
+    }
+    if (configurationRoute[2] === 'publish') {
+      sendJson(response, 201, publishIntegrationDeclaration({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        sourceId,
+        declaration: body['declaration'],
+      }));
+      return;
+    }
+    sendJson(response, 200, adoptIntegrationConfiguration({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      sourceId,
+      version: number(body, 'version'),
+    }));
+    return;
+  }
+
+  const acquisitionRoute = /^\/api\/workspace\/sources\/([^/]+)\/acquisitions$/u.exec(pathname);
+  if (acquisitionRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const bytes = await readRawBody(request);
+    const outcome = acquireUpload({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      sourceId: decodeURIComponent(acquisitionRoute[1]!),
+      bytes,
+    });
+    if (outcome.failure !== null) {
+      // The bytes are retained as a Raw Acquisition; only integration refused
+      // them, so the current Release stays in force and the answer says so.
+      sendJson(response, 422, { ...outcome.failure, raw_acquisition_saved: true });
+      return;
+    }
+    const raw = outcome.upload['raw_acquisition'] as Record<string, unknown>;
+    sendJson(response, 201, {
+      source_id: outcome.upload['source_id'],
+      acquisition_run_id: outcome.upload['acquisition_run_id'],
+      status: outcome.upload['status'],
+      raw_acquisition: {
+        raw_id: raw['raw_id'],
+        content_hash: raw['content_hash'],
+        byte_length: raw['byte_length'],
+        received_at: raw['received_at'],
+      },
+      integration_batch: outcome.upload['integration_batch'],
+      integration: outcome.integration,
+    });
+    return;
+  }
+
   if (pathname === '/api/workspace/memberships' && method === 'GET') {
     const token = userSession(request);
     sendJson(response, 200, listMemberships({
@@ -632,6 +751,21 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
   return parsed as Record<string, unknown>;
 }
 
+/** One governed upload's bytes, bounded before the governed module sniffs them. */
+async function readRawBody(request: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = chunk as Buffer;
+    size += buffer.length;
+    if (size > MAX_UPLOAD_BYTES) {
+      throw new HttpError(413, 'ACQUISITION_FILE_TOO_LARGE', 'The upload exceeds the largest file this surface accepts.');
+    }
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks);
+}
+
 function text(body: Record<string, unknown>, field: string): string {
   const value = body[field];
   return typeof value === 'string' ? value : '';
@@ -741,11 +875,30 @@ const STATUS_BY_CODE: Record<string, number> = {
   MODEL_BINDING_DATA_CATEGORY_NOT_PERMITTED: 422,
   MODEL_BINDING_DATA_CATEGORY_INCOMPLETE: 422,
   MODEL_BINDING_PREFLIGHT_FAILED: 422,
+  // A guided Source workflow refuses invalid configuration and content explicitly.
+  SOURCE_NOT_AVAILABLE: 404,
+  SOURCE_TYPE_UNSUPPORTED: 400,
+  SOURCE_NAME_INVALID: 400,
+  SOURCE_NAME_TAKEN: 409,
+  SOURCE_INTEGRATION_NOT_ADOPTED: 409,
+  ACQUISITION_MODE_MISMATCH: 409,
+  ACQUISITION_FILE_UNREADABLE: 422,
+  ACQUISITION_FILE_EMPTY: 422,
+  ACQUISITION_FILE_SIGNATURE_INVALID: 422,
+  ACQUISITION_FILE_ENCODING_INVALID: 422,
+  ACQUISITION_DOCUMENT_TOO_LARGE: 413,
+  ACQUISITION_FILE_TOO_LARGE: 413,
+  INTEGRATION_CONFIGURATION_INVALID: 400,
+  INTEGRATION_CLEANING_INVALID: 400,
+  INTEGRATION_MAPPING_INVALID: 422,
+  INTEGRATION_MAPPING_INCOMPLETE: 422,
+  INTEGRATION_MAPPING_UNKNOWN_COLUMN: 422,
+  INTEGRATION_VERSION_NOT_FOUND: 404,
 };
 
 function sendFailure(response: ServerResponse, error: unknown): void {
   if (error instanceof OperatorError) {
-    sendJson(response, STATUS_BY_CODE[error.code] ?? 503, {
+    sendJson(response, error.status ?? STATUS_BY_CODE[error.code] ?? 503, {
       code: error.code,
       message: error.message,
       ...(error.nextStep === undefined ? {} : { next_step: error.nextStep }),

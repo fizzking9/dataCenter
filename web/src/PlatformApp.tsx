@@ -8,10 +8,11 @@ import { PlatformPicker } from './screens/PlatformPicker.js';
 import { PlatformSignInScreen } from './screens/PlatformSignInScreen.js';
 import { WorkspaceAudit, WorkspaceMembers } from './screens/PlatformWorkspaceAdminScreen.js';
 import { WorkspaceContext, WorkspaceOverview, WorkspaceProducts } from './screens/PlatformWorkspaceScreen.js';
+import { WorkspaceSources } from './screens/PlatformSourceScreen.js';
 import { Alert, Panel } from './ui/Panel.js';
 import { Shell } from './ui/Shell.js';
 
-const VIEWS = ['overview', 'products', 'context', 'members', 'audit', 'models', 'modelProfiles'] as const;
+const VIEWS = ['overview', 'sources', 'products', 'context', 'members', 'audit', 'models', 'modelProfiles'] as const;
 type View = (typeof VIEWS)[number];
 
 interface Route {
@@ -27,6 +28,7 @@ const DEPLOYMENT_PROFILES: Route = { workspaceId: null, view: 'modelProfiles', d
 
 function viewOf(value: string | undefined): View {
   switch (value) {
+    case 'sources':
     case 'products':
     case 'context':
     case 'members':
@@ -290,7 +292,9 @@ export function PlatformApp() {
     return frame(null, <Unavailable />);
   }
 
-  const content = route.view === 'products' ? (
+  const content = route.view === 'sources' ? (
+    <WorkspaceSources workspaceId={activeId} onSessionLost={sessionLost} />
+  ) : route.view === 'products' ? (
     <WorkspaceProducts workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'context' ? (
     <WorkspaceContext workspaceId={activeId} onSessionLost={sessionLost} />
