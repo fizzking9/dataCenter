@@ -15,6 +15,8 @@ import type {
   RawAcquisitionRecord,
   ReportRecord,
   ReportTemplateArtifact,
+  ReportCandidateRecord,
+  ReportScheduleRecord,
   SourceAcquisitionArtifact,
   SourceRecord,
   ArtifactProposalRecord,
@@ -209,6 +211,8 @@ export interface PlatformState {
   scraper_diagnostics: ScraperDiagnosticsRecord[];
   report_templates: ReportTemplateArtifact[];
   reports: ReportRecord[];
+  report_candidates: ReportCandidateRecord[];
+  report_schedules: ReportScheduleRecord[];
 }
 
 /** Every human identity is stated as one account identifier of the form name@domain. */
@@ -268,6 +272,8 @@ export function readPlatform(root: string): PlatformState {
         scraper_diagnostics: [],
         report_templates: [],
         reports: [],
+        report_candidates: [],
+        report_schedules: [],
       };
   // A Deployment installed under an earlier schema keeps working: the added
   // Collections start empty rather than failing the read closed.
@@ -310,6 +316,22 @@ export function readPlatform(root: string): PlatformState {
   // Templates and Reports Collections start empty rather than failing the read.
   state.report_templates ??= [];
   state.reports ??= [];
+  // A Deployment written before review and scheduling existed simply holds no
+  // candidates and no schedules; both Collections start empty.
+  state.report_candidates ??= [];
+  state.report_schedules ??= [];
+  // A Report or Template Version recorded before Withdrawal existed was never
+  // withdrawn, so it keeps serving exactly as it did.
+  for (const template of state.report_templates) {
+    for (const version of template.versions) {
+      version.withdrawn_at ??= null;
+      version.withdrawn_by ??= null;
+    }
+  }
+  for (const report of state.reports) {
+    report.withdrawn_at ??= null;
+    report.withdrawn_by ??= null;
+  }
   // A Run recorded before acquisition was queued still reads as a completed
   // manual attempt rather than a Run that never started.
   for (const run of state.acquisition_runs) {

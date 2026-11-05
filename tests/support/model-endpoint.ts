@@ -635,6 +635,9 @@ function clarification(body: Record<string, unknown>, behaviour: MockBehaviour):
   }
   const input = isRecord(body['input']) ? body['input'] : {};
   const missing = stringsOf(input['missing']);
+  if (missing.includes('integration_scope')) {
+    return { question: '请确认要映射哪些源列，以及数据集覆盖的业务范围？' };
+  }
   if (missing.includes('metric')) {
     return { question: '请确认要统计哪个已发布的指标？' };
   }

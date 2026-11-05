@@ -163,6 +163,17 @@ export function showWorkspaceSource(options: {
   const latest = latestDatasetRelease(dataset);
   const batches = session.state.integration_batches.filter((batch) => batch.source_id === source.source_id);
   const lastBatch = batches[batches.length - 1];
+  const acquisition = session.state.source_acquisitions.find(
+    (candidate) => candidate.source_id === source.source_id,
+  );
+  const adoptedAcquisition = acquisition?.versions.find(
+    (candidate) => candidate.version === acquisition.adopted_version,
+  );
+  const pinnedConnection = adoptedAcquisition === undefined
+    ? undefined
+    : session.state.acquisition_connections.find(
+      (candidate) => candidate.connection_id === adoptedAcquisition.connection_id,
+    );
 
   session.audit({ ...scoped, actor: actorLabel(actor.user), outcome: 'succeeded' });
   return {
@@ -186,6 +197,46 @@ export function showWorkspaceSource(options: {
         document_limits: { ...(version.document_limits ?? DEFAULT_DOCUMENT_PARSE_LIMITS) },
       })),
     },
+    // The declarative acquisition configuration and the resume point it holds.
+    // No credential, token, or object locator belongs in this view.
+    acquisition: {
+      adopted_version: acquisition?.adopted_version ?? null,
+      checkpoint: acquisition === undefined || acquisition.checkpoint === null
+        ? null
+        : { ...acquisition.checkpoint },
+      versions: (acquisition?.versions ?? []).map((version) => ({
+        version: version.version,
+        published_at: version.published_at,
+        content_hash: version.content_hash,
+        connection_id: version.connection_id,
+        connection_version: version.connection_version,
+        connector: { ...version.connector },
+        path: version.path,
+        record_path: version.record_path,
+        completion: { ...version.completion },
+        window: version.window === null ? null : { ...version.window },
+        content_type: version.content_type,
+      })),
+      connection: pinnedConnection === undefined
+        ? null
+        : {
+          connection_id: pinnedConnection.connection_id,
+          name: pinnedConnection.name,
+          adopted_version: pinnedConnection.adopted_version,
+          versions: pinnedConnection.versions.map((version) => ({
+            version: version.version,
+            base_url: version.base_url,
+            credential_ref: version.credential_ref,
+            has_credential: version.credential !== null,
+            auth_scheme: version.auth.scheme,
+            retry: { ...version.retry },
+            pacing: { ...version.pacing },
+            schedule: version.schedule === null ? null : { ...version.schedule },
+            publication_targets: version.publication_targets === null ? null : { ...version.publication_targets },
+            content_hash: version.content_hash,
+          })),
+        },
+    },
     dataset: {
       releases: (dataset?.releases ?? []).map((release) => releaseSummary(release)),
       ...(latest === undefined
@@ -201,11 +252,18 @@ export function showWorkspaceSource(options: {
       .filter((run) => run.source_id === source.source_id)
       .map((run) => ({
         acquisition_run_id: run.acquisition_run_id,
+        mode: run.mode,
+        trigger: run.trigger,
         status: run.status,
+        attempts: run.attempts,
+        backfill: run.backfill === null ? null : { ...run.backfill },
+        rerun_of: run.rerun_of ?? null,
         queued_at: run.queued_at,
+        scheduled_for: run.scheduled_for,
         started_at: run.started_at,
         completed_at: run.completed_at,
         integration_configuration_version: run.integration_configuration_version,
+        error_code: run.error_code ?? null,
       })),
     latest_acquisition: lastBatch === undefined
       ? null

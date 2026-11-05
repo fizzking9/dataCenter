@@ -15,6 +15,7 @@ import { message, optional, t } from '../i18n/zh-CN.js';
 import { Button } from '../ui/Button.js';
 import { Field } from '../ui/Field.js';
 import { Alert, DefinitionList, Panel } from '../ui/Panel.js';
+import { ApiSourcePanels } from './PlatformApiSourceScreen.js';
 
 export interface WorkspaceSourcesProps {
   workspaceId: string;
@@ -57,10 +58,11 @@ const FIELD_TYPES: SourceSchemaField['type'][] = ['string', 'integer', 'number',
 const CLEANING_RULES: CleaningRow['rule'][] = ['trim', 'uppercase', 'lowercase', 'default', 'require_non_empty'];
 const SOURCE_TYPES: Array<{
   value: SourceSummary['type'];
-  labelKey: 'value.sourceType.file' | 'value.sourceType.document' | 'value.sourceType.scraper';
+  labelKey: 'value.sourceType.file' | 'value.sourceType.document' | 'value.sourceType.http_json' | 'value.sourceType.scraper';
 }> = [
   { value: 'file', labelKey: 'value.sourceType.file' },
   { value: 'document', labelKey: 'value.sourceType.document' },
+  { value: 'http_json', labelKey: 'value.sourceType.http_json' },
   { value: 'scraper', labelKey: 'value.sourceType.scraper' },
 ];
 
@@ -149,7 +151,9 @@ export function WorkspaceSources({ workspaceId, onSessionLost }: WorkspaceSource
             value={type}
             onChange={(event) => {
               const chosen = event.target.value;
-              if (chosen === 'document' || chosen === 'scraper' || chosen === 'file') setType(chosen);
+              if (chosen === 'file' || chosen === 'document' || chosen === 'http_json' || chosen === 'scraper') {
+                setType(chosen);
+              }
             }}
           >
             {SOURCE_TYPES.map((option) => (
@@ -415,10 +419,20 @@ function SourceManagement({ source, onSessionLost, onChanged }: SourceManagement
   const runs = detail?.runs ?? [];
   const versions = detail?.configuration.versions ?? [];
   const latestAcquisition = detail?.latest_acquisition ?? null;
+  const isConnector = detail?.source.type === 'http_json';
 
   return (
     <>
       {failed ? <Alert tone="error">{t('platform.unavailable')}</Alert> : null}
+      {detail === null || !isConnector ? null : (
+        <ApiSourcePanels
+          workspaceId={detail.source.workspace_id}
+          detail={detail}
+          onSessionLost={onSessionLost}
+          onReload={load}
+          onChanged={onChanged}
+        />
+      )}
       <Panel
         level={2}
         title={t('workspace.sources.wizard.title')}
@@ -681,35 +695,37 @@ function SourceManagement({ source, onSessionLost, onChanged }: SourceManagement
         )}
       </Panel>
 
-      <Panel
-        level={2}
-        title={t('workspace.sources.upload.title')}
-        description={t('workspace.sources.upload.description')}
-      >
-        <div className="field">
-          <label className="field__label" htmlFor="source-upload-file">
-            {t('workspace.sources.upload.file')}
-          </label>
-          <input
-            className="field__input"
-            id="source-upload-file"
-            type="file"
-            ref={fileInput}
-          />
-        </div>
-        <Button busy={uploading} onClick={upload}>
-          {uploading ? t('workspace.sources.upload.uploading') : t('workspace.sources.upload.submit')}
-        </Button>
-        {uploadNotice === null ? null : (
-          <Alert
-            tone={uploadNotice.tone}
-            {...(uploadNotice.code === undefined ? {} : { code: uploadNotice.code })}
-          >
-            {uploadNotice.text}
-          </Alert>
-        )}
-        {preserved === null ? null : <Alert tone="warning">{preserved}</Alert>}
-      </Panel>
+      {isConnector ? null : (
+        <Panel
+          level={2}
+          title={t('workspace.sources.upload.title')}
+          description={t('workspace.sources.upload.description')}
+        >
+          <div className="field">
+            <label className="field__label" htmlFor="source-upload-file">
+              {t('workspace.sources.upload.file')}
+            </label>
+            <input
+              className="field__input"
+              id="source-upload-file"
+              type="file"
+              ref={fileInput}
+            />
+          </div>
+          <Button busy={uploading} onClick={upload}>
+            {uploading ? t('workspace.sources.upload.uploading') : t('workspace.sources.upload.submit')}
+          </Button>
+          {uploadNotice === null ? null : (
+            <Alert
+              tone={uploadNotice.tone}
+              {...(uploadNotice.code === undefined ? {} : { code: uploadNotice.code })}
+            >
+              {uploadNotice.text}
+            </Alert>
+          )}
+          {preserved === null ? null : <Alert tone="warning">{preserved}</Alert>}
+        </Panel>
+      )}
 
       <Panel level={2} title={t('workspace.sources.release.title')}>
         {latest === undefined ? (
@@ -831,30 +847,32 @@ function SourceManagement({ source, onSessionLost, onChanged }: SourceManagement
         )}
       </Panel>
 
-      <Panel level={2} title={t('workspace.sources.runs.title')}>
-        {runs.length === 0 ? (
-          <p className="empty">{t('workspace.sources.runs.empty')}</p>
-        ) : (
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th scope="col">{t('workspace.sources.provenance.run')}</th>
-                <th scope="col">{t('workspace.sources.runs.status')}</th>
-                <th scope="col">{t('workspace.sources.runs.queuedAt')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {runs.map((run) => (
-                <tr key={run.acquisition_run_id}>
-                  <td className="data-table__mono">{run.acquisition_run_id}</td>
-                  <td>{optional(`value.state.${run.status}`) ?? run.status}</td>
-                  <td>{formatInstant(run.queued_at)}</td>
+      {isConnector ? null : (
+        <Panel level={2} title={t('workspace.sources.runs.title')}>
+          {runs.length === 0 ? (
+            <p className="empty">{t('workspace.sources.runs.empty')}</p>
+          ) : (
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th scope="col">{t('workspace.sources.provenance.run')}</th>
+                  <th scope="col">{t('workspace.sources.runs.status')}</th>
+                  <th scope="col">{t('workspace.sources.runs.queuedAt')}</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Panel>
+              </thead>
+              <tbody>
+                {runs.map((run) => (
+                  <tr key={run.acquisition_run_id}>
+                    <td className="data-table__mono">{run.acquisition_run_id}</td>
+                    <td>{optional(`value.state.${run.status}`) ?? run.status}</td>
+                    <td>{formatInstant(run.queued_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Panel>
+      )}
     </>
   );
 }

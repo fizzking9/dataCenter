@@ -180,6 +180,14 @@ _Avoid_: Dashboard definition, stored answer, ungoverned prompt
 An immutable stored Workspace Artifact answering one business question, generated from an exact Report Template Version and exact Data Product Releases for consumption by users, downstream applications, or agents without regenerating its content on retrieval.
 _Avoid_: Dashboard, presentation layout, Report Template, Data Product, ungoverned narrative
 
+**Review Candidate**:
+A deduplicated administrator review item for one unmatched business question, naming the exact draft Report Template Version and exact stored Report a human must approve before either becomes reusable stock.
+_Avoid_: Auto-approved answer, similarity match, duplicate review item
+
+**Report Schedule**:
+A durable Workspace-scoped fact naming one published Report Template, a designated Consumer, and an interval, evaluated only by an explicit tick that revalidates that Consumer and its Grants on every run.
+_Avoid_: Background subscription, ambient authorization, per-run Approval
+
 **Natural-Language Query**:
 A read-only Consumer interaction that clarifies and compiles a question into one or more deterministically validated Data Product Queries within one Workspace, then grounds its answer and explanations in the governed results.
 _Avoid_: Arbitrary SQL generation, cross-workspace search, LLM-authorized query
