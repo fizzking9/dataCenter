@@ -741,6 +741,137 @@ export interface ProductQueryAnswer {
   cache?: { reused: boolean };
 }
 
+/** One window a Natural-Language Query answer evaluated, with the release coverage. */
+export interface NlqWindowView {
+  field: string;
+  precision: string;
+  time_zone: string;
+  start: string;
+  end: string;
+  coverage: { start: string; end: string } | null;
+  partial: boolean;
+}
+
+/** The interpretation the deterministic layer resolved for one part. */
+export interface NlqResolvedView {
+  interpretation: string;
+  metrics: string[];
+  dimensions: string[];
+  filters: Array<Record<string, unknown>>;
+  window: NlqWindowView | null;
+  comparison_window: NlqWindowView | null;
+  partial_period: boolean;
+  defaults_applied: Array<{ name: string; value: unknown }>;
+}
+
+/** The permitted lineage one executed part cites, never chain-of-thought. */
+export interface NlqProvenanceView {
+  source: { source_id: string; name: string | null };
+  dataset_release: number;
+  integration_configuration_version: number;
+  business_context: Record<string, number>;
+  record_count: number | null;
+  acquired_at: string;
+  integrated_at: string;
+  released_at: string;
+  relationships: Array<Record<string, unknown>>;
+}
+
+/** The deterministic result one part may return under its Contract kind. */
+export interface NlqResultView {
+  kind: string;
+  columns?: string[];
+  records?: Array<Record<string, unknown>>;
+  matched_count?: number;
+  suggestions?: Array<{ value: string; count: number }>;
+  grouped_by?: string[];
+  metrics?: Array<{ name: string; description?: string }>;
+  groups?: ProductQueryGroup[];
+  totals?: { metrics: Record<string, ProductScalar>; comparison?: Record<string, ProductComparedMetric> } | null;
+  groups_total?: number;
+  returned?: number;
+  window?: NlqWindowView | null;
+  comparison_window?: NlqWindowView | null;
+}
+
+/** One independent part of an answer, with its own Release, freshness, and evidence. */
+export interface NlqPartView {
+  name: string | null;
+  data_product: Record<string, unknown> | null;
+  status?: string;
+  outcome: string;
+  executed: boolean;
+  reason_code: string | null;
+  interpretation: string | null;
+  query: Record<string, unknown> | null;
+  resolved: NlqResolvedView | null;
+  result: NlqResultView | null;
+  window: NlqWindowView | null;
+  comparison_window: NlqWindowView | null;
+  partial_period: boolean;
+  defaults_applied: Array<{ name: string; value: unknown }>;
+  provenance: NlqProvenanceView | null;
+  freshness: { acquired_at: string | null; integrated_at: string | null; released_at: string | null; data_through: string | null } | null;
+  evidence: Record<string, unknown> | null;
+  limitations: string[];
+}
+
+/** One governed Natural-Language Query turn, exactly as the server answered it. */
+export interface NaturalLanguageAnswerView {
+  outcome: 'answered' | 'clarification' | 'empty' | 'no_evidence' | 'unavailable' | 'refused' | 'partial';
+  status: 'complete' | 'incomplete';
+  workspace_id: string;
+  question: string;
+  normalized_question: string;
+  follow_up: boolean;
+  origin: 'stock' | 'generated';
+  stock: {
+    report_id: string;
+    reused: boolean;
+    generated_at: string;
+    age_minutes: number;
+    max_age_minutes: number;
+  } | null;
+  report: Record<string, unknown> | null;
+  template: Record<string, unknown> | null;
+  authorization: {
+    workspace_id: string;
+    role: string;
+    parts: Array<{
+      data_product_id: string;
+      restricted: boolean;
+      columns: string[];
+      row_filter_count: number;
+      scope_fingerprint: string;
+    }>;
+  } | null;
+  reason_code: string | null;
+  executed: boolean;
+  summary: string;
+  limitations: string[];
+  data_product: Record<string, unknown> | null;
+  parts: NlqPartView[];
+  as_of: Array<Record<string, unknown>>;
+  interpretation: string | null;
+  resolved: NlqResolvedView | null;
+  clarification: {
+    question: string;
+    missing: string[];
+    candidates: string[];
+    part: { name: string; data_product_id: string } | null;
+  } | null;
+  query: Record<string, unknown> | null;
+  result: NlqResultView | null;
+  answer: { narrative: string; evidence_refs: Array<Record<string, unknown>>; model: Record<string, unknown> } | null;
+  window: NlqWindowView | null;
+  comparison_window: NlqWindowView | null;
+  partial_period: boolean;
+  defaults_applied: Array<{ name: string; value: unknown }>;
+  provenance: NlqProvenanceView | null;
+  freshness: NlqPartView['freshness'];
+  conversation: string | null;
+}
+
 export interface ProductExportCreated {
   export_id: string;
   workspace_id: string;
@@ -2878,6 +3009,11 @@ export const platformApi = {
     request<ProductQueryAnswer>(
       `/api/workspace/products/${encodeURIComponent(dataProductId)}/query${workspaceQuery(workspaceId)}`,
       { method: 'POST', body: JSON.stringify({ request: query }) },
+    ),
+  askWorkspaceQuestion: (workspaceId: string, body: Record<string, unknown>) =>
+    request<NaturalLanguageAnswerView>(
+      `/api/workspace/nlq${workspaceQuery(workspaceId)}`,
+      { method: 'POST', body: JSON.stringify(body) },
     ),
   createProductExport: (dataProductId: string, workspaceId: string, query: unknown) =>
     request<ProductExportCreated>(

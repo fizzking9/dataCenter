@@ -48,6 +48,7 @@ import {
   publishIntegrationDeclaration,
 } from './integration.js';
 import { browserIdentity, browserNavigation } from './navigation.js';
+import { askWorkspaceQuery } from './natural-language-query.js';
 import { listDataProductReleases, listDataProducts, previewDataProductEvolution, publishDataProductEvolution, rollbackDataProductVersion, withdrawDataProductVersion } from './products.js';
 import { publishModelBinding, revokeModelBinding, showModelBindingWorkspace } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, listModelProfiles, publishModelProfile } from './model-profile.js';
@@ -730,6 +731,31 @@ async function handleApi(
       masterKey: options.masterKey,
       token,
       workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  // The conversational workbench answers through the very same governed
+  // Natural-Language Query engine the lifecycle CLI and MCP use. The browser
+  // states one Chinese question, and a clarification only after the platform
+  // itself asked for one; every turn is normalized and reauthorized server-side.
+  if (pathname === '/api/workspace/nlq' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const clarification = text(body, 'clarification');
+    const conversation = text(body, 'conversation');
+    const bindingId = text(body, 'binding_id');
+    const at = text(body, 'at');
+    sendJson(response, 200, await askWorkspaceQuery({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+      question: text(body, 'question'),
+      ...(clarification === '' ? {} : { clarification }),
+      ...(conversation === '' ? {} : { conversation }),
+      ...(bindingId === '' ? {} : { bindingId }),
+      ...(at === '' ? {} : { now: at }),
     }));
     return;
   }
@@ -2433,6 +2459,9 @@ const STATUS_BY_CODE: Record<string, number> = {
   DATA_PRODUCT_QUERY_TOO_COMPLEX: 422,
   DATA_PRODUCT_QUERY_RESULT_TOO_LARGE: 422,
   DATA_PRODUCT_QUERY_TIMEOUT: 504,
+  // A Natural-Language Query validates its own entry facts before any model or data work.
+  NLQ_QUESTION_REQUIRED: 400,
+  NLQ_AT_INVALID: 400,
   DATA_PRODUCT_QUERY_CURSOR_NOT_SUPPORTED: 400,
   DATA_PRODUCT_QUERY_LIMIT_EXCEEDED: 400,
   DATA_PRODUCT_RELEASE_INVALID: 409,
