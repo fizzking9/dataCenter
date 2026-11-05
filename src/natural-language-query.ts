@@ -1,6 +1,7 @@
 import { resolveActor } from './auth.js';
 import { actorLabel, deny, reject, type ActionContext } from './authz.js';
 import {
+  findDataProduct,
   findModelBinding,
   findModelProfile,
   findModelProfileVersion,
@@ -44,7 +45,7 @@ import {
 } from './nlq-handles.js';
 import { workspaceRoleOf } from './platform.js';
 import { executeDataProductQuery } from './product-query.js';
-import { contractView, productIdentity, requireReadableProduct } from './products.js';
+import { contractView, productIdentity } from './products.js';
 import {
   DEFAULT_CANDIDATE_GROUNDED_PROMPT_HASH,
   recordReviewCandidate,
@@ -881,7 +882,7 @@ function reportTurnResponse(
 function visibleTargets(
   session: PlatformSession,
   reader: GrantReader,
-  userId: string,
+  subject: string,
   workspaceId: string,
 ): PartTarget[] {
   return session.state.data_products
@@ -891,7 +892,7 @@ function visibleTargets(
       return left.name < right.name ? -1 : 1;
     })
     .flatMap((product) => {
-      const target = targetFor(session, reader, userId, workspaceId, product);
+      const target = targetFor(session, reader, subject, workspaceId, product);
       return target === null ? [] : [target];
     });
 }
@@ -900,7 +901,7 @@ function visibleTargets(
 function targetFor(
   session: PlatformSession,
   reader: GrantReader,
-  userId: string,
+  subject: string,
   workspaceId: string,
   product: DataProductArtifact,
 ): PartTarget | null {
@@ -911,7 +912,7 @@ function targetFor(
   if (scope === null) return null;
   return {
     handle: encodeProductHandle(session.dataKey, {
-      userId,
+      subject,
       workspaceId,
       dataProductId: product.data_product_id,
     }),
@@ -978,6 +979,33 @@ interface TurnOptions {
   workspaceId?: string;
 }
 
+/** One already-authorized principal a turn runs for, whichever surface resolved it. */
+export interface TurnPrincipal {
+  session: PlatformSession;
+  reader: GrantReader;
+  /** The role the response discloses; Agents are not Workspace members. */
+  role: string;
+  /** The identity a conversation handle binds: both parties when delegated. */
+  subject: string;
+  /** The User who owns any candidate a turn creates, or null for an autonomous Agent. */
+  attributedUserId: string | null;
+  /** The identity a generated Report attributes itself to. */
+  generatedBy: string;
+  /** Anything every governed Audit Event must state beside the actor label. */
+  auditDetail: Record<string, string | number | boolean>;
+  workspaceId: string;
+  dataProductId: string | null;
+}
+
+/** One turn's question and continuation context, without any identity claim. */
+interface TurnRequest {
+  question: string;
+  clarification?: string;
+  bindingId?: string;
+  conversation?: string;
+  now?: string;
+}
+
 /**
  * Answers one Natural-Language Query turn.
  *
@@ -990,40 +1018,36 @@ interface TurnOptions {
  *
  * A follow-up is normalized and reauthorized from the current state: the
  * conversation handle only records what the previous turn said, so a revoked
- * membership, changed Grant, or advanced Release takes effect on the next turn.
+ * membership, changed Grant, delegation, or advanced Release takes effect on the
+ * next turn.
  */
-async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<string, unknown>> {
-  const session = openPlatform(options.root, options.masterKey);
+async function runTurn(principal: TurnPrincipal, options: TurnRequest): Promise<Record<string, unknown>> {
+  const { session, reader } = principal;
   const entry: ActionContext = {
     action: 'natural_language_query',
     scope: 'workspace',
-    ...(options.dataProductId === undefined ? {} : { target: options.dataProductId }),
+    workspace_id: principal.workspaceId,
+    ...(principal.dataProductId === null ? {} : { target: principal.dataProductId }),
   };
-  const actor = resolveActor(session, options.token, entry);
   const question = normalizeQuestion(options.question);
   if (question.length === 0) {
-    reject(session, actorLabel(actor.user), entry, 'NLQ_QUESTION_REQUIRED', 'A Natural-Language Query must state a question.');
+    reject(session, reader.label, entry, 'NLQ_QUESTION_REQUIRED', 'A Natural-Language Query must state a question.');
   }
   const now = options.now === undefined ? new Date() : new Date(options.now);
   if (Number.isNaN(now.getTime())) {
-    reject(session, actorLabel(actor.user), entry, 'NLQ_AT_INVALID', 'A Natural-Language Query freshness instant must be an ISO 8601 instant.');
+    reject(session, reader.label, entry, 'NLQ_AT_INVALID', 'A Natural-Language Query freshness instant must be an ISO 8601 instant.');
   }
 
-  const requestedProduct = options.dataProductId === undefined
-    ? null
-    : requireReadableProduct(session, actor, entry, options.dataProductId);
-  const workspaceId = requestedProduct?.workspace_id ?? options.workspaceId ?? '';
-  const role = workspaceRoleOf(session.state, actor.user.user_id, workspaceId);
-  if (role === null) {
-    deny(
-      session,
-      actorLabel(actor.user),
-      { ...entry, workspace_id: workspaceId },
-      'WORKSPACE_ACCESS_DENIED',
-      'The Workspace is not available to this actor.',
-    );
+  let requestedProduct: DataProductArtifact | null = null;
+  if (principal.dataProductId !== null) {
+    const found = findDataProduct(session.state.data_products, principal.dataProductId);
+    if (!found || found.workspace_id !== principal.workspaceId) {
+      deny(session, reader.label, entry, 'DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product is not available to this actor.');
+    }
+    requestedProduct = found;
   }
-  const reader = memberReader(session, actor.user, role);
+  const workspaceId = principal.workspaceId;
+  const role = principal.role;
   const scoped: ActionContext = {
     ...entry,
     workspace_id: workspaceId,
@@ -1032,12 +1056,12 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
   const response = baseResponse(question, workspaceId);
   response['authorization'] = authorizationView(workspaceId, role, []);
 
-  let prior: ConversationPayload = { workspaceId, userId: actor.user.user_id, questions: [], productIds: [] };
+  let prior: ConversationPayload = { workspaceId, subject: principal.subject, questions: [], productIds: [] };
   if (options.conversation !== undefined) {
     try {
       prior = decodeConversation(
         session.dataKey,
-        { userId: actor.user.user_id, workspaceId },
+        { subject: principal.subject, workspaceId },
         options.conversation,
         (code, message) => {
           throw new NaturalLanguageFailure(code, message);
@@ -1072,7 +1096,7 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
   if (options.clarification === undefined) {
     const reuse = await reuseReport({
       session,
-      actor,
+      generatedBy: principal.generatedBy,
       reader,
       workspaceId,
       role,
@@ -1083,7 +1107,7 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
     if (reuse.kind !== 'none') {
       const conversation = encodeConversation(session.dataKey, {
         workspaceId,
-        userId: actor.user.user_id,
+        subject: principal.subject,
         questions: [...prior.questions, question],
         productIds: [reuse.report.data_product.data_product_id],
       });
@@ -1122,7 +1146,7 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
     }
     targets = [{
       handle: encodeProductHandle(session.dataKey, {
-        userId: actor.user.user_id,
+        subject: principal.subject,
         workspaceId,
         dataProductId: requestedProduct.data_product_id,
       }),
@@ -1134,7 +1158,7 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
       identity: productIdentity(requestedProduct, version, release),
     }];
   } else {
-    targets = visibleTargets(session, reader, actor.user.user_id, workspaceId);
+    targets = visibleTargets(session, reader, principal.subject, workspaceId);
     if (targets.length === 0) {
       response['outcome'] = 'unavailable';
       response['reason_code'] = 'NLQ_NO_VISIBLE_PRODUCT';
@@ -1479,7 +1503,9 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
   // from what already ran, so Approval publishes them without regeneration. A
   // repeated normalized semantic joins the one open item without a new notice.
   const single = parts.length === 1 ? parts[0]! : null;
+  const candidateOwner = principal.attributedUserId;
   if (single !== null
+    && candidateOwner !== null
     && single['executed'] === true
     && isSimplifiedChinese(question)
     && (outcome === 'answered' || outcome === 'empty' || outcome === 'no_evidence')) {
@@ -1494,7 +1520,7 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
         const review = recordReviewCandidate({
           session,
           workspaceId,
-          userId: actor.user.user_id,
+          userId: candidateOwner,
           question,
           interpretation: String(single['interpretation'] ?? interpretation),
           request,
@@ -1531,7 +1557,7 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
 
   response['conversation'] = encodeConversation(session.dataKey, {
     workspaceId,
-    userId: actor.user.user_id,
+    subject: principal.subject,
     questions: [...prior.questions, question],
     productIds: planned.flatMap((part) => (part.target === null ? [] : [part.target.product.data_product_id])),
   });
@@ -1631,9 +1657,91 @@ function finishTurn(
       ...(model === null || typeof model['model_profile_version'] !== 'number'
         ? {}
         : { model_profile_version: model['model_profile_version'] }),
+      ...reader.auditDetail,
     },
   });
   return response;
+}
+
+/**
+ * Answers one Natural-Language Query for an already-authorized principal: a
+ * Workspace member through the CLI, or an Agent Identity (autonomous or
+ * delegated) through MCP. The turn is normalized and reauthorized from the
+ * current state before anything executes.
+ */
+export interface AgentTurnOptions extends TurnRequest {
+  session: PlatformSession;
+  reader: GrantReader;
+  role: string;
+  subject: string;
+  attributedUserId: string | null;
+  generatedBy: string;
+  workspaceId: string;
+  dataProductId?: string;
+}
+
+export async function askNaturalLanguageQueryForAgent(
+  options: AgentTurnOptions,
+): Promise<Record<string, unknown>> {
+  return runTurn(
+    {
+      session: options.session,
+      reader: options.reader,
+      role: options.role,
+      subject: options.subject,
+      attributedUserId: options.attributedUserId,
+      generatedBy: options.generatedBy,
+      auditDetail: options.reader.auditDetail,
+      workspaceId: options.workspaceId,
+      dataProductId: options.dataProductId ?? null,
+    },
+    options,
+  );
+}
+
+/**
+ * Resolves the member identity a CLI turn runs under, then hands the turn to
+ * the shared engine.
+ */
+async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<string, unknown>> {
+  const session = openPlatform(options.root, options.masterKey);
+  const entry: ActionContext = {
+    action: 'natural_language_query',
+    scope: 'workspace',
+    ...(options.dataProductId === undefined ? {} : { target: options.dataProductId }),
+  };
+  const actor = resolveActor(session, options.token, entry);
+  const requestedProduct = options.dataProductId === undefined
+    ? null
+    : findDataProduct(session.state.data_products, options.dataProductId);
+  const workspaceId = requestedProduct?.workspace_id ?? options.workspaceId ?? '';
+  const role = workspaceRoleOf(session.state, actor.user.user_id, workspaceId);
+  if (options.dataProductId !== undefined && (requestedProduct === null || role === null)) {
+    deny(session, actorLabel(actor.user), entry, 'DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product is not available to this actor.');
+  }
+  if (role === null) {
+    deny(
+      session,
+      actorLabel(actor.user),
+      { ...entry, workspace_id: workspaceId },
+      'WORKSPACE_ACCESS_DENIED',
+      'The Workspace is not available to this actor.',
+    );
+  }
+  return runTurn(
+    {
+      session,
+      reader: memberReader(session, actor.user, role),
+      role,
+      subject: actor.user.user_id,
+      attributedUserId: actor.user.user_id,
+      generatedBy: actor.user.user_id,
+      auditDetail: {},
+      workspaceId,
+      dataProductId: requestedProduct?.data_product_id ?? null,
+    },
+    options,
+  );
 }
 
 /**
