@@ -8,6 +8,7 @@ import {
   cancelAcquisition,
   enqueueAcquisition,
   listSourceAcquisition,
+  readAcquisitionPlan,
   resetAcquisitionCheckpoint,
   tickSchedules,
   workAcquisition,
@@ -393,6 +394,10 @@ async function main(): Promise<void> {
   }
   if (command === 'acquisition' && subcommand === 'checkpoint') {
     emit(acquisitionCheckpoint({ ...governed(options), sourceId: required(options, 'source') }));
+    return;
+  }
+  if (command === 'acquisition' && subcommand === 'plan') {
+    emit(readAcquisitionPlan({ ...governed(options), runId: required(options, 'run') }));
     return;
   }
   if (command === 'acquisition' && subcommand === 'targets') {
