@@ -10,6 +10,7 @@ import {
   workAcquisition,
 } from './acquisition-run.js';
 import { listAuditEvents } from './audit-view.js';
+import { createAgentIdentity, registerOAuthClient, revokeAgentIdentity, revokeOAuthClient } from './agents.js';
 import { login, logout } from './auth.js';
 import { issueOperatorEnrollment, revokeOperator, revokeOperatorEnrollment } from './operators.js';
 import { startConsoleServer } from './console-server.js';
@@ -39,7 +40,7 @@ import { createWorkspace, grantMembership, listWorkspaces, revokeMembership } fr
 const GROUPED_COMMANDS = new Set([
   'user', 'workspace', 'membership', 'ownership', 'context', 'audit',
   'source', 'connection', 'acquisition', 'acquisition-config', 'integration', 'dataset',
-  'product', 'grant', 'export', 'console',
+  'product', 'grant', 'export', 'console', 'agent',
 ]);
 const BOOLEAN_FLAGS = new Set([
   'admin-password-stdin', 'password-stdin', 'deployment-administrator', 'credential-stdin',
@@ -95,6 +96,11 @@ function assertStdinFlag(options: Map<string, string>, flag: string): void {
   if (options.get(flag) !== 'true') {
     throw new Error(`--${flag} is required; passwords are not accepted as command arguments.`);
   }
+}
+
+/** Reads one comma- or space-separated list of names, dropping empty entries. */
+function list(value: string): string[] {
+  return value.split(/[\s,]+/).filter((entry) => entry !== '');
 }
 
 function readStdin(): string {
@@ -398,7 +404,10 @@ async function main(): Promise<void> {
     emit(publishGrant({
       ...governed(options),
       dataProductId: required(options, 'product'),
-      username: required(options, 'username'),
+      // A Grant narrows exactly one principal: a Workspace member or an Agent Identity.
+      ...(options.has('agent')
+        ? { agentIdentityId: required(options, 'agent') }
+        : { username: required(options, 'username') }),
       requestPath: required(options, 'request'),
     }));
     return;
@@ -409,6 +418,33 @@ async function main(): Promise<void> {
   }
   if (command === 'grant' && subcommand === 'revoke') {
     emit(revokeGrant({ ...governed(options), grantId: required(options, 'grant') }));
+    return;
+  }
+  if (command === 'agent' && subcommand === 'create') {
+    emit(createAgentIdentity({
+      ...governed(options),
+      name: required(options, 'name'),
+      workspaceIds: list(required(options, 'workspaces')),
+      scopes: list(required(options, 'scopes')),
+    }));
+    return;
+  }
+  if (command === 'agent' && subcommand === 'revoke') {
+    emit(revokeAgentIdentity({ ...governed(options), agentIdentityId: required(options, 'agent') }));
+    return;
+  }
+  if (command === 'agent' && subcommand === 'client-register') {
+    emit(registerOAuthClient({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      token: required(options, 'session-token'),
+      agentIdentityId: required(options, 'agent'),
+      metadataPath: required(options, 'metadata'),
+    }));
+    return;
+  }
+  if (command === 'agent' && subcommand === 'client-revoke') {
+    emit(revokeOAuthClient({ ...governed(options), clientId: required(options, 'client') }));
     return;
   }
   if (command === 'export' && subcommand === 'create') {

@@ -383,8 +383,10 @@ export interface DataProductGrantRecord {
   grant_id: string;
   workspace_id: string;
   data_product_id: string;
-  /** The member whose reads this Grant narrows. */
-  grantee_user_id: string;
+  /** The member whose reads this Grant narrows; null when it names an Agent Identity. */
+  grantee_user_id: string | null;
+  /** The Agent Identity whose reads this Grant narrows; absent on a member's Grant. */
+  grantee_agent_identity_id?: string | null;
   /** Permitted Contract fields; every field the Contract publishes when unstated. */
   columns: string[] | null;
   row_filters: GrantRowFilter[];
@@ -529,7 +531,7 @@ export function findDataProductRelease(
   return product?.releases.find((candidate) => candidate.release === release);
 }
 
-/** The Grants still in force for one principal on one Data Product. */
+/** The Grants still in force for one member on one Data Product. */
 export function activeGrants(
   grants: DataProductGrantRecord[],
   dataProductId: string,
@@ -538,6 +540,19 @@ export function activeGrants(
   return grants.filter(
     (grant) => grant.data_product_id === dataProductId
       && grant.grantee_user_id === granteeUserId
+      && grant.revoked_at === null,
+  );
+}
+
+/** The Grants still in force for one Agent Identity on one Data Product. */
+export function activeAgentGrants(
+  grants: DataProductGrantRecord[],
+  dataProductId: string,
+  agentIdentityId: string,
+): DataProductGrantRecord[] {
+  return grants.filter(
+    (grant) => grant.data_product_id === dataProductId
+      && grant.grantee_agent_identity_id === agentIdentityId
       && grant.revoked_at === null,
   );
 }

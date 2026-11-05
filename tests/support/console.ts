@@ -27,7 +27,7 @@ export async function startConsole(fixture: PlatformFixture): Promise<ConsoleHan
     url,
     port: Number(listening.port),
     async stop() {
-      if (child.exitCode !== null) return;
+      if (child.exitCode !== null || child.signalCode !== null) return;
       const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
       child.kill();
       await exited;
@@ -79,11 +79,12 @@ export interface HttpResult {
 export async function callApi(
   url: string,
   path: string,
-  options: { method?: string; body?: unknown; cookie?: string } = {},
+  options: { method?: string; body?: unknown; cookie?: string; token?: string } = {},
 ): Promise<HttpResult> {
   const headers: Record<string, string> = { accept: 'application/json' };
   if (options.body !== undefined) headers['content-type'] = 'application/json';
   if (options.cookie) headers.cookie = options.cookie;
+  if (options.token) headers.authorization = `Bearer ${options.token}`;
   const response = await fetch(`${url}${path}`, {
     method: options.method ?? (options.body === undefined ? 'GET' : 'POST'),
     headers,

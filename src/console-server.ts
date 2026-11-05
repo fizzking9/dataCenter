@@ -15,8 +15,10 @@ import {
   signOutOperator,
   OPERATOR_SESSION_LIFETIME_MS,
 } from './operators.js';
+import { queryDataProductApi } from './data-product-api.js';
 import { OperatorError } from './errors.js';
 import { readLicenseSummary } from './license.js';
+import { handleMcpSurface, type McpServerIdentity } from './mcp.js';
 import { openPlatform } from './session.js';
 import { deploymentStatus } from './status.js';
 import { readDeployment } from './state.js';
@@ -99,7 +101,10 @@ export async function startConsoleServer(options: ConsoleServerOptions): Promise
       'Build the application before serving the Operator Console.',
     );
   }
-  const handler = createHandler(options, assets);
+  // The MCP resource and issuer are the Deployment's own bound origin, not a
+  // client-supplied Host header, so no token can name another resource server.
+  const identity: McpServerIdentity = { origin: '' };
+  const handler = createHandler(options, assets, identity);
   const server: Server = createServer((request, response) => {
     handler(request, response).catch((error: unknown) => {
       if (!response.headersSent) sendFailure(response, error);
@@ -111,6 +116,7 @@ export async function startConsoleServer(options: ConsoleServerOptions): Promise
     // The Console is a host-local surface: it never binds off the loopback address.
     server.listen(options.port, '127.0.0.1', () => {
       server.off('error', rejectListen);
+      identity.origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
       resolveListen();
     });
   });
@@ -124,12 +130,15 @@ export async function startConsoleServer(options: ConsoleServerOptions): Promise
   };
 }
 
-function createHandler(options: ConsoleServerOptions, assets: string) {
+function createHandler(options: ConsoleServerOptions, assets: string, identity: McpServerIdentity) {
   return async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) response.setHeader(name, value);
     const url = new URL(request.url ?? '/', 'http://localhost');
     if (url.pathname.startsWith('/api/')) {
       await handleApi(options, request, response, url.pathname);
+      return;
+    }
+    if (await handleMcpSurface({ root: options.root, masterKey: options.masterKey, identity }, request, response, url)) {
       return;
     }
     await serveAsset(request, response, assets, url.pathname);
@@ -315,6 +324,25 @@ async function handleApi(
     return;
   }
 
+  // A Publication advertises this path. It answers the very same governed read
+  // the MCP direct-query tool answers, with a Consumer's own Bearer credential.
+  const queryRoute = /^\/api\/workspaces\/([^/]+)\/data-products\/([^/]+)\/query$/.exec(pathname);
+  if (queryRoute !== null && method === 'POST') {
+    const credential = bearerCredential(request);
+    if (credential === undefined) {
+      throw new HttpError(401, 'SESSION_INVALID', 'A Data Product Query requires a Bearer session token.');
+    }
+    sendJson(response, 200, queryDataProductApi({
+      root: options.root,
+      masterKey: options.masterKey,
+      token: credential,
+      workspaceId: decodeURIComponent(queryRoute[1]!),
+      dataProductId: decodeURIComponent(queryRoute[2]!),
+      request: await readJson(request),
+    }));
+    return;
+  }
+
   throw new HttpError(404, 'API_NOT_FOUND', 'No such application API.');
 }
 
@@ -370,6 +398,15 @@ function sessionCookie(token: string, expiresAt: unknown): string {
   const remaining = Date.parse(String(expiresAt)) - Date.now();
   const maxAge = token === '' || !Number.isFinite(remaining) ? 0 : Math.max(0, Math.floor(remaining / 1000));
   return `${USER_SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
+}
+
+/** Reads the Bearer credential a published Data Product API path presents. */
+function bearerCredential(request: IncomingMessage): string | undefined {
+  const header = request.headers.authorization;
+  const value = Array.isArray(header) ? header[0] : header;
+  if (value === undefined) return undefined;
+  const match = /^Bearer +([A-Za-z0-9._~+/-]+=*)$/i.exec(value.trim());
+  return match?.[1];
 }
 
 function cookieValue(request: IncomingMessage): string | undefined {
@@ -484,6 +521,17 @@ const STATUS_BY_CODE: Record<string, number> = {
   AUTHORIZATION_DENIED: 403,
   WORKSPACE_ACCESS_DENIED: 403,
   CONTEXT_NOT_PUBLISHED: 404,
+  // A Data Product Query failure is a governed answer, not a server fault.
+  DATA_PRODUCT_QUERY_INVALID: 400,
+  DATA_PRODUCT_QUERY_CURSOR_INVALID: 400,
+  DATA_PRODUCT_QUERY_REFUSED: 403,
+  DATA_PRODUCT_NOT_AVAILABLE: 404,
+  DATA_PRODUCT_NOT_PUBLISHED: 409,
+  DATA_PRODUCT_RELEASE_NOT_FOUND: 404,
+  DATASET_RELEASE_NOT_FOUND: 409,
+  DATA_PRODUCT_QUERY_TOO_COMPLEX: 422,
+  DATA_PRODUCT_QUERY_RESULT_TOO_LARGE: 422,
+  DATA_PRODUCT_QUERY_TIMEOUT: 504,
 };
 
 function sendFailure(response: ServerResponse, error: unknown): void {

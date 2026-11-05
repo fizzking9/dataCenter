@@ -12,7 +12,8 @@ export interface QueryCacheKey {
   release: number;
   major: number;
   contractHash: string;
-  actorUserId: string;
+  /** The reader the page is bound to: a User or an Agent Identity. */
+  subject: string;
   scopeFingerprint: string;
   queryHash: string;
   offset: number;

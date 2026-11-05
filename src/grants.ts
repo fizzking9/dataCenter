@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { resolveActor } from './auth.js';
 import { actorLabel, deny, reject, type ActionContext } from './authz.js';
 import {
+  activeAgentGrants,
   activeGrants,
   ISO_DATE,
   ISO_TIMESTAMP,
@@ -16,7 +17,7 @@ import {
 import { canonicalDigest } from './crypto.js';
 import { isRecord, readJsonDocument } from './documents.js';
 import type { Fail } from './errors.js';
-import { findUser, workspaceRoleOf } from './platform.js';
+import { findAgentIdentity, findUser, workspaceRoleOf, type UserRecord } from './platform.js';
 import { requireAdministeredProduct } from './products.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
@@ -75,6 +76,19 @@ export function grantScopeOf(
  * Nothing is inferred from a previous request: the Grant set, the membership,
  * and the identity are all read again.
  */
+function applicableScope(
+  grants: ReturnType<typeof activeGrants>,
+  contract: DataProductContract,
+  restricted: boolean,
+): GrantScope | null {
+  const scope = grantScopeOf(grants, contract, restricted);
+  // A Grant names filters of the Contract it was published against. If a later
+  // line no longer publishes one, the narrowing cannot be applied, so the read
+  // is refused rather than silently reading wider.
+  const inapplicable = scope.rowFilters.find((filter) => !contract.filters.includes(filter.field));
+  return inapplicable === undefined ? scope : null;
+}
+
 export function readableGrantScope(
   session: PlatformSession,
   userId: string,
@@ -82,13 +96,57 @@ export function readableGrantScope(
   product: DataProductArtifact,
   contract: DataProductContract,
 ): GrantScope | null {
-  const grants = activeGrants(session.state.data_product_grants, product.data_product_id, userId);
-  const scope = grantScopeOf(grants, contract, role !== 'Workspace Administrator');
-  // A Grant names filters of the Contract it was published against. If a later
-  // line no longer publishes one, the narrowing cannot be applied, so the read
-  // is refused rather than silently reading wider.
-  const inapplicable = scope.rowFilters.find((filter) => !contract.filters.includes(filter.field));
-  return inapplicable === undefined ? scope : null;
+  return applicableScope(
+    activeGrants(session.state.data_product_grants, product.data_product_id, userId),
+    contract,
+    role !== 'Workspace Administrator',
+  );
+}
+
+/**
+ * The scope an Agent Identity reads under. An Agent is not a Workspace member,
+ * so it holds no baseline at all: a Data Product it has no Grant on is exactly
+ * as unavailable to it as one that does not exist.
+ */
+export function readableAgentGrantScope(
+  session: PlatformSession,
+  agentIdentityId: string,
+  product: DataProductArtifact,
+  contract: DataProductContract,
+): GrantScope | null {
+  const grants = activeAgentGrants(session.state.data_product_grants, product.data_product_id, agentIdentityId);
+  if (grants.length === 0) return null;
+  return applicableScope(grants, contract, true);
+}
+
+/** Resolves the Agent Identity scope a read must honour, failing closed when it cannot. */
+export function resolveAgentGrantScope(
+  session: PlatformSession,
+  agentIdentityId: string,
+  product: DataProductArtifact,
+  contract: DataProductContract,
+  fail: Fail,
+): GrantScope {
+  const grants = activeAgentGrants(session.state.data_product_grants, product.data_product_id, agentIdentityId);
+  if (grants.length === 0) {
+    fail(
+      'DATA_PRODUCT_NOT_AVAILABLE',
+      'No Data Product Grant permits this Agent Identity to read this Data Product.',
+      'Ask a Workspace Administrator for a Grant naming this Agent Identity.',
+    );
+  }
+  const scope = applicableScope(grants, contract, true);
+  if (scope === null) {
+    const stale = grants
+      .flatMap((grant) => grant.row_filters)
+      .find((filter) => !contract.filters.includes(filter.field));
+    fail(
+      'DATA_PRODUCT_QUERY_REFUSED',
+      `A Grant on ${stale?.field ?? 'a withdrawn filter'} does not apply to this Contract line, so the read is refused.`,
+      'Republish the Grant against the Contract line its Consumers read.',
+    );
+  }
+  return scope;
 }
 
 /** Resolves the scope a governed read must honour, failing closed when it cannot. */
@@ -112,6 +170,53 @@ export function resolveGrantScope(
     );
   }
   return scope;
+}
+
+/**
+ * Who a governed read runs for. The query engine and the Contract projection take
+ * one of these instead of an identity of their own, so the lifecycle CLI, the
+ * Data Product API, and MCP cannot authorize, narrow, or audit a read differently.
+ */
+export interface GrantReader {
+  /** The Actor label every Audit Event of this read records. */
+  readonly label: string;
+  /** The subject a cached page is bound to, so no two principals share one. */
+  readonly subject: string;
+  /** The scope this reader reads one Contract line under, or null when none applies. */
+  scopeOf(product: DataProductArtifact, contract: DataProductContract): GrantScope | null;
+  /** The same scope, failing closed with the codes the Deployment publishes. */
+  requireScope(product: DataProductArtifact, contract: DataProductContract, fail: Fail): GrantScope;
+}
+
+/** A Workspace member reads under their Role and their own Grants. */
+export function memberReader(
+  session: PlatformSession,
+  user: UserRecord,
+  role: string | null,
+): GrantReader {
+  return {
+    label: actorLabel(user),
+    subject: user.user_id,
+    scopeOf: (product, contract) => readableGrantScope(session, user.user_id, role, product, contract),
+    requireScope: (product, contract, fail) => resolveGrantScope(session, user.user_id, role, product, contract, fail),
+  };
+}
+
+/**
+ * An Agent Identity is not a Workspace member, so it reads under the Grants that
+ * name it and holds no baseline of its own.
+ */
+export function agentReader(
+  session: PlatformSession,
+  agentIdentityId: string,
+  label: string,
+): GrantReader {
+  return {
+    label,
+    subject: agentIdentityId,
+    scopeOf: (product, contract) => readableAgentGrantScope(session, agentIdentityId, product, contract),
+    requireScope: (product, contract, fail) => resolveAgentGrantScope(session, agentIdentityId, product, contract, fail),
+  };
 }
 
 function schemaField(schema: DatasetSchemaField[], name: string): DatasetSchemaField | undefined {
@@ -236,7 +341,9 @@ export function publishGrant(options: {
   masterKey: string;
   token: string;
   dataProductId: string;
-  username: string;
+  /** The member whose reads to narrow, or the Agent Identity instead. */
+  username?: string;
+  agentIdentityId?: string;
   requestPath: string;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
@@ -247,9 +354,10 @@ export function publishGrant(options: {
   const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), scoped, code, message, nextStep);
   const { contract, schema } = currentContract(session, product, fail);
 
-  const grantee = findUser(session.state, options.username);
-  if (!grantee || grantee.status !== 'active'
-    || workspaceRoleOf(session.state, grantee.user_id, product.workspace_id) === null) {
+  const grantee = options.agentIdentityId === undefined ? findUser(session.state, options.username ?? '') : undefined;
+  if (options.agentIdentityId === undefined
+    && (!grantee || grantee.status !== 'active'
+      || workspaceRoleOf(session.state, grantee.user_id, product.workspace_id) === null)) {
     reject(
       session,
       actorLabel(actor.user),
@@ -257,6 +365,18 @@ export function publishGrant(options: {
       'GRANT_GRANTEE_NOT_FOUND',
       'A Grant names an active member of this Workspace.',
       'Grant Workspace membership before narrowing what that member may read.',
+    );
+  }
+  const agent = options.agentIdentityId === undefined ? undefined : findAgentIdentity(session.state, options.agentIdentityId);
+  if (options.agentIdentityId !== undefined
+    && (!agent || agent.status !== 'active' || !agent.workspace_ids.includes(product.workspace_id))) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      scoped,
+      'GRANT_GRANTEE_NOT_FOUND',
+      'A Grant names an active Agent Identity bound to this Workspace.',
+      'Create the Agent Identity for this Workspace before narrowing what it may read.',
     );
   }
   const request = readJsonDocument(
@@ -271,11 +391,13 @@ export function publishGrant(options: {
   const columns = readColumns(session, actorLabel(actor.user), scoped, request['columns'], contract);
   const rowFilters = readRowFilters(session, actorLabel(actor.user), scoped, request['row_filters'], contract, schema);
 
+  const granteeLabel = agent === undefined ? String(grantee?.username) : `agent:${agent.name}`;
   const grant: DataProductGrantRecord = {
     grant_id: randomUUID(),
     workspace_id: product.workspace_id,
     data_product_id: product.data_product_id,
-    grantee_user_id: grantee.user_id,
+    grantee_user_id: grantee?.user_id ?? null,
+    ...(agent === undefined ? {} : { grantee_agent_identity_id: agent.agent_identity_id }),
     columns,
     row_filters: rowFilters,
     created_at: new Date().toISOString(),
@@ -289,7 +411,7 @@ export function publishGrant(options: {
     outcome: 'succeeded',
     detail: {
       grant_id: grant.grant_id,
-      grantee: grantee.username,
+      grantee: granteeLabel,
       column_count: columns === null ? -1 : columns.length,
       row_filter_count: rowFilters.length,
     },
@@ -299,7 +421,9 @@ export function publishGrant(options: {
     grant_id: grant.grant_id,
     workspace_id: grant.workspace_id,
     data_product_id: grant.data_product_id,
-    grantee: { type: 'user', username: grantee.username },
+    grantee: agent === undefined
+      ? { type: 'user', username: grantee?.username ?? null }
+      : { type: 'agent', agent_identity_id: agent.agent_identity_id },
     columns,
     row_filters: rowFilters.map((filter) => ({ ...filter })),
     created_at: grant.created_at,
@@ -322,7 +446,9 @@ export function listGrants(options: {
     .filter((grant) => grant.data_product_id === product.data_product_id && grant.revoked_at === null)
     .map((grant) => ({
       grant_id: grant.grant_id,
-      grantee: { type: 'user', username: findUserById(session, grant.grantee_user_id) },
+      grantee: grant.grantee_agent_identity_id !== undefined && grant.grantee_agent_identity_id !== null
+        ? { type: 'agent', agent_identity_id: grant.grantee_agent_identity_id }
+        : { type: 'user', username: findUserById(session, grant.grantee_user_id ?? '') },
       columns: grant.columns === null ? null : [...grant.columns],
       row_filters: grant.row_filters.map((filter) => ({ ...filter })),
       created_at: grant.created_at,
