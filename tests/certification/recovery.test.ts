@@ -164,6 +164,14 @@ test('a base backup set states every authoritative component, the settled cadenc
   assert.equal(text.includes('master-key'), false);
   assert.equal(manifest['payloads_encrypted'], true);
 
+  // The checkpoint enters the continuous off-host WAL journal, so the set names
+  // the exact position the journal kept writing from.
+  const journal = readFileSync(join(backupRoot, 'replication', 'checkpoints.jsonl'), 'utf8')
+    .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(journal.at(-1)?.['checkpoint_id'], created['checkpoint_id']);
+  assert.equal(asRecord(journal.at(-1)?.['wal'] ?? {})['continuous'], true);
+  assert.equal(asRecord(journal.at(-1)?.['objects'] ?? {})['replicated_at'], created['created_at']);
+
   // The sequenced Purge Ledger is replicated off-host with every base backup.
   const ledger = JSON.parse(readFileSync(join(backupRoot, 'ledger', 'purge-ledger.json'), 'utf8')) as Record<string, unknown>;
   assert.equal(ledger['deployment_id'], created['deployment_id']);

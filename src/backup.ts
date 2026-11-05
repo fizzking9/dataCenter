@@ -885,8 +885,12 @@ function recordPresent(state: PlatformState, kind: PurgeRecordKind, recordId: st
     }
     case 'report':
       return state.reports.some((record) => record.report_id === recordId);
-    case 'proposal_evidence':
-      return state.artifact_proposals.some((record) => record.proposal_id === recordId);
+    case 'proposal_evidence': {
+      // A Purge clears the evidence but keeps the Proposal shell for Provenance,
+      // so presence is judged by the evidence a replay would have removed.
+      const proposal = state.artifact_proposals.find((record) => record.proposal_id === recordId);
+      return proposal !== undefined && (proposal.validations.length > 0 || proposal.previews.length > 0);
+    }
     case 'export':
       return state.exports.some((record) => record.export_id === recordId);
   }
