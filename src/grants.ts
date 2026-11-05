@@ -43,12 +43,26 @@ export interface GrantScope {
   fingerprint: string;
 }
 
+/**
+ * Every column a Contract publishes, including the fields of each declared
+ * relationship under `<relationship>.<field>`. A Grant narrows this one universe,
+ * so a linked record is narrowed exactly like a base record.
+ */
+export function publishedColumns(contract: DataProductContract): string[] {
+  return [
+    ...contract.fields.map((field) => field.name),
+    ...(contract.relationships ?? []).flatMap((relationship) => relationship.fields.map(
+      (field) => `${relationship.name}.${field.name}`,
+    )),
+  ];
+}
+
 export function grantScopeOf(
   grants: DataProductGrantRecord[],
   contract: DataProductContract,
   restricted: boolean,
 ): GrantScope {
-  const allColumns = contract.fields.map((field) => field.name);
+  const allColumns = publishedColumns(contract);
   if (!restricted || grants.length === 0) {
     return {
       columns: allColumns,
@@ -292,9 +306,10 @@ function readColumns(
   if (!Array.isArray(raw) || raw.length === 0) {
     reject(session, actor, context, 'GRANT_COLUMNS_INVALID', 'Grant columns must name at least one field the Contract publishes.');
   }
+  const published = publishedColumns(contract);
   const columns: string[] = [];
   for (const candidate of raw) {
-    if (typeof candidate !== 'string' || !contract.fields.some((field) => field.name === candidate)) {
+    if (typeof candidate !== 'string' || !published.includes(candidate)) {
       reject(
         session,
         actor,

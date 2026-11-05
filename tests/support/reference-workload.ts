@@ -533,18 +533,19 @@ function configureSource(
 }
 
 /**
- * Configures the nine business Sources the way an operator would: one shared
+ * Configures any set of business Sources the way an operator would: one shared
  * Connection for the physical export system, and one independently adopted
  * acquisition and Integration Configuration per Source.
  */
-export function configureBmsWorkload(
+export function configureReferenceWorkload(
   source: { url: string },
+  entries: ReferenceSource[],
   options: ConnectionOptions & { window?: Record<string, unknown> } = {},
 ): ReferenceWorkload {
   const workspace = workspaceFixture();
   const { fixture, workspaceId, workspaceAdministratorToken: token } = workspace;
   const connection = publishConnection(fixture, workspaceId, token, source.url, BMS_CONNECTION, options);
-  const sources = BMS_SOURCES.map((entry) => configureSource(
+  const sources = entries.map((entry) => configureSource(
     fixture,
     workspaceId,
     token,
@@ -561,4 +562,12 @@ export function configureBmsWorkload(
     connectionVersion: connection.connectionVersion,
     sources,
   };
+}
+
+/** Configures the nine Sources of the business export system. */
+export function configureBmsWorkload(
+  source: { url: string },
+  options: ConnectionOptions & { window?: Record<string, unknown> } = {},
+): ReferenceWorkload {
+  return configureReferenceWorkload(source, BMS_SOURCES, options);
 }

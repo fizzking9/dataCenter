@@ -457,6 +457,7 @@ async function main(): Promise<void> {
       sourceId: required(options, 'source'),
       name: required(options, 'name'),
       contractPath: required(options, 'contract'),
+      ...(options.has('related') ? { relatedPath: required(options, 'related') } : {}),
     }));
     return;
   }

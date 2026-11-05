@@ -12,6 +12,7 @@ import {
   type DataProductArtifact,
   type DataProductContract,
   type DataProductMajorLine,
+  type DataProductRelationship,
   type DataProductRelease,
   type DataProductVersion,
   type DatasetArtifact,
@@ -20,6 +21,7 @@ import {
   type SourceRecord,
 } from './catalog.js';
 import { canonicalDigest } from './crypto.js';
+import { isRecord, readJsonDocument } from './documents.js';
 import type { Fail } from './errors.js';
 import { workspaceRoleOf } from './platform.js';
 import { readContract } from './product-contract.js';
@@ -43,11 +45,18 @@ export interface ContractPublication {
   release: DataProductRelease;
 }
 
+/** One declared relationship, bound to the exact Dataset Release it reads. */
+export interface RelationshipBinding {
+  name: string;
+  dataset: DatasetArtifact;
+  datasetRelease: DatasetReleaseRecord;
+}
+
 /**
  * Publishes one Contract Version and its Data Product Release into the open
- * Session, binding both to the exact Dataset Release the caller pinned. The
- * caller owns the save, so a Proposal Publication and its lifecycle fact land
- * together or not at all.
+ * Session, binding both to the exact Dataset Release the caller pinned for the
+ * base Dataset and for every declared relationship. The caller owns the save,
+ * so a Proposal Publication and its lifecycle fact land together or not at all.
  */
 export function publishContractVersion(options: {
   session: PlatformSession;
@@ -58,8 +67,10 @@ export function publishContractVersion(options: {
   datasetRelease: DatasetReleaseRecord;
   name: string;
   contract: DataProductContract;
+  relationships?: RelationshipBinding[];
 }): ContractPublication {
   const { session, actor, source, dataset, datasetRelease, contract } = options;
+  const relationships = options.relationships ?? [];
   const scoped = options.context;
   const actorName = actorLabel(actor.user);
   const name = options.name.trim();
@@ -67,6 +78,16 @@ export function publishContractVersion(options: {
     reject(session, actorName, scoped, 'DATA_PRODUCT_NAME_INVALID', 'A Data Product name must contain 2 to 128 characters.');
   }
   requireServeableGrain(session, actorName, scoped, contract, datasetRelease);
+  requireBoundRelationships(session, actorName, scoped, contract, relationships, source.workspace_id);
+  for (const relationship of contract.relationships ?? []) {
+    requireServeableRelationship(
+      session,
+      actorName,
+      scoped,
+      relationship,
+      relationships.find((binding) => binding.name === relationship.name)!,
+    );
+  }
 
   let product = session.state.data_products.find(
     (candidate) => candidate.workspace_id === source.workspace_id && candidate.name.toLowerCase() === name.toLowerCase(),
@@ -112,6 +133,15 @@ export function publishContractVersion(options: {
     data_product_version: version.version,
     dataset_id: dataset.dataset_id,
     dataset_release: datasetRelease.release,
+    ...(relationships.length === 0
+      ? {}
+      : {
+        relationships: relationships.map((binding) => ({
+          name: binding.name,
+          dataset_id: binding.dataset.dataset_id,
+          dataset_release: binding.datasetRelease.release,
+        })),
+      }),
     created_at: new Date().toISOString(),
     created_by: actor.user.user_id,
   };
@@ -133,6 +163,8 @@ export function publishDataProduct(options: {
   sourceId: string;
   name: string;
   contractPath: string;
+  /** The JSON object binding each declared relationship to a Source of this Workspace. */
+  relatedPath?: string;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'data_product_publication', scope: 'workspace' };
@@ -153,11 +185,15 @@ export function publishDataProduct(options: {
     );
   }
   const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), scoped, code, message, nextStep);
-  const contract = readContract(
-    fail,
-    options.contractPath,
-    schemaOf(session, actorLabel(actor.user), scoped, source.source_id, datasetRelease),
-  );
+  const baseSchema = schemaOf(session, actorLabel(actor.user), scoped, source.source_id, datasetRelease);
+  const bindings = options.relatedPath === undefined
+    ? []
+    : readRelationshipBindings(session, actor, scoped, options.relatedPath, source.workspace_id);
+  const relatedSchemas = Object.fromEntries(bindings.map((binding) => [
+    binding.name,
+    schemaOf(session, actorLabel(actor.user), scoped, binding.dataset.source_id, binding.datasetRelease),
+  ]));
+  const contract = readContract(fail, options.contractPath, baseSchema, relatedSchemas);
   const { product, version, release } = publishContractVersion({
     session,
     actor,
@@ -167,6 +203,7 @@ export function publishDataProduct(options: {
     datasetRelease,
     name: options.name,
     contract,
+    relationships: bindings,
   });
 
   session.audit({
@@ -226,6 +263,171 @@ function advanceLine(
 }
 
 /**
+ * Reads the binding of each declared relationship to one Source of the same
+ * Workspace. A relationship never reaches another Workspace's Dataset, and a
+ * Source without a Release has nothing a link could read.
+ */
+function readRelationshipBindings(
+  session: PlatformSession,
+  actor: Actor,
+  context: ActionContext,
+  path: string,
+  workspaceId: string,
+): RelationshipBinding[] {
+  const actorName = actorLabel(actor.user);
+  const fail: Fail = (code, message, nextStep) => reject(session, actorName, context, code, message, nextStep);
+  const parsed = readJsonDocument(
+    path,
+    fail,
+    'DATA_PRODUCT_RELATIONSHIPS_UNREADABLE',
+    'The relationship binding file must contain valid JSON.',
+  );
+  if (!isRecord(parsed)) {
+    fail(
+      'DATA_PRODUCT_RELATIONSHIPS_UNREADABLE',
+      'The relationship binding must map each declared relationship to one Source of this Workspace.',
+    );
+  }
+  const bindings: RelationshipBinding[] = [];
+  for (const [name, value] of Object.entries(parsed)) {
+    if (typeof value !== 'string' || value.length === 0) {
+      fail('DATA_PRODUCT_RELATIONSHIPS_UNREADABLE', `The ${name} relationship must name the Source it links to.`);
+    }
+    const related = requireAdministeredSource(session, actor, context, value);
+    if (related.workspace_id !== workspaceId) {
+      reject(
+        session,
+        actorName,
+        context,
+        'DATA_PRODUCT_RELATIONSHIP_SCOPE',
+        `${name} would link a Dataset of another Workspace, and a Data Product never reaches across Workspaces.`,
+        'Bind a Source of the Data Product\'s own Workspace.',
+      );
+    }
+    const dataset = findDataset(session.state.datasets, related.source_id);
+    const datasetRelease = latestDatasetRelease(dataset);
+    if (!dataset || !datasetRelease) {
+      reject(
+        session,
+        actorName,
+        { ...context, target: related.source_id },
+        'DATASET_RELEASE_NOT_FOUND',
+        `The ${name} relationship Source has no Dataset Release to link.`,
+        'Release the related Dataset before publishing a Data Product that links to it.',
+      );
+    }
+    bindings.push({ name, dataset, datasetRelease });
+  }
+  return bindings;
+}
+
+/**
+ * Proves the Publication binds exactly the relationships its Contract declares:
+ * every declared relationship to one Release of this Workspace, and nothing a
+ * Consumer could not have read from the Contract.
+ */
+function requireBoundRelationships(
+  session: PlatformSession,
+  actor: string,
+  context: ActionContext,
+  contract: DataProductContract,
+  bindings: RelationshipBinding[],
+  workspaceId: string,
+): void {
+  const declared = (contract.relationships ?? []).map((relationship) => relationship.name);
+  const bound = bindings.map((binding) => binding.name);
+  const duplicated = bound.filter((name, index) => bound.indexOf(name) !== index);
+  if (duplicated.length > 0) {
+    reject(
+      session,
+      actor,
+      context,
+      'DATA_PRODUCT_RELATIONSHIP_DUPLICATED',
+      `${duplicated.join(', ')} is bound to more than one Dataset, so the link would be ambiguous.`,
+      'Bind each declared relationship once.',
+    );
+  }
+  const unbound = declared.filter((name) => !bound.includes(name));
+  if (unbound.length > 0) {
+    reject(
+      session,
+      actor,
+      context,
+      'DATA_PRODUCT_RELATIONSHIP_UNBOUND',
+      `${unbound.join(', ')} is declared without a Dataset Release, so its join has no governed meaning.`,
+      'Bind every declared relationship to one Source of this Workspace.',
+    );
+  }
+  const undeclared = bound.filter((name) => !declared.includes(name));
+  if (undeclared.length > 0) {
+    reject(
+      session,
+      actor,
+      context,
+      'DATA_PRODUCT_RELATIONSHIP_UNDECLARED',
+      `${undeclared.join(', ')} is bound to a Dataset, but the Contract declares no such relationship.`,
+      'Bind exactly the relationships the Contract declares, or declare this one.',
+    );
+  }
+  const foreign = bindings.find((binding) => binding.dataset.workspace_id !== workspaceId);
+  if (foreign !== undefined) {
+    reject(
+      session,
+      actor,
+      context,
+      'DATA_PRODUCT_RELATIONSHIP_SCOPE',
+      `${foreign.name} links a Dataset of another Workspace, and a Data Product never reaches across Workspaces.`,
+    );
+  }
+}
+
+/**
+ * Proves a declared relationship really can be read from the Release it was
+ * bound to: its own grain identifies one linked record, and a relationship that
+ * promises at most one record really reaches at most one, so no query can fan
+ * out and no linked record is guessed between two candidates.
+ */
+function requireServeableRelationship(
+  session: PlatformSession,
+  actor: string,
+  context: ActionContext,
+  relationship: DataProductRelationship,
+  binding: RelationshipBinding,
+): void {
+  const seen = new Set<string>();
+  for (const record of binding.datasetRelease.records) {
+    const key = JSON.stringify(relationship.grain.map((field) => record.values[field] ?? null));
+    if (seen.has(key)) {
+      reject(
+        session,
+        actor,
+        context,
+        'DATA_PRODUCT_GRAIN_NOT_UNIQUE',
+        `The ${relationship.grain.join(', ')} grain of the ${relationship.name} relationship does not identify each linked record, so its results would double count.`,
+        'Declare the related grain the Dataset holds one record at.',
+      );
+    }
+    seen.add(key);
+  }
+  if (relationship.cardinality !== 'one') return;
+  const reached = new Set<string>();
+  for (const record of binding.datasetRelease.records) {
+    const key = JSON.stringify(Object.values(relationship.on).map((field) => record.values[field] ?? null));
+    if (reached.has(key)) {
+      reject(
+        session,
+        actor,
+        context,
+        'DATA_PRODUCT_RELATIONSHIP_AMBIGUOUS',
+        `The ${relationship.name} relationship promises one record per device, but this Release holds several for the same join, so the answer would be ambiguous.`,
+        'Link to a Dataset Release whose join identifies at most one record, or declare the relationship as many.',
+      );
+    }
+    reached.add(key);
+  }
+}
+
+/**
  * Proves the Contract's declared grain really identifies each record of the
  * Release it is published over. A coarser grain would let one record stand for
  * several and double count every metric, so the Publication is refused instead.
@@ -272,6 +474,35 @@ export function schemaOf(
 }
 
 /**
+ * The relationships one reader may see: a Grant narrows each linked record set
+ * the same way it narrows the base fields, so a withheld field is absent rather
+ * than empty, and a relationship with nothing permitted is not disclosed at all.
+ */
+function relationshipViews(
+  contract: DataProductContract,
+  scope: GrantScope,
+): Array<Record<string, unknown>> {
+  return (contract.relationships ?? []).flatMap((relationship) => {
+    const fields = relationship.fields
+      .filter((field) => scope.columns.includes(`${relationship.name}.${field.name}`))
+      .map((field) => ({ ...field }));
+    if (fields.length === 0) return [];
+    return [{
+      name: relationship.name,
+      description: relationship.description ?? null,
+      cardinality: relationship.cardinality,
+      on: Object.fromEntries(
+        Object.entries(relationship.on).filter(([local]) => scope.columns.includes(local)),
+      ),
+      fields,
+      grain: relationship.grain.filter((field) => scope.columns.includes(`${relationship.name}.${field}`)),
+      filters: relationship.filters.filter((field) => scope.columns.includes(`${relationship.name}.${field}`)),
+      limit: relationship.limit,
+    }];
+  });
+}
+
+/**
  * The Contract as one reader may see it. A Grant narrows the columns, so the
  * fields, dimensions, metrics, and filters it hides are absent rather than
  * empty: no surface may disclose that a withheld column exists.
@@ -299,6 +530,7 @@ export function contractView(contract: DataProductContract, scope: GrantScope): 
     grain: [...contract.grain],
     time: contract.time === undefined ? null : { ...contract.time },
     filters: contract.filters.filter((filter) => scope.columns.includes(filter)),
+    relationships: relationshipViews(contract, scope),
     limits: { ...contract.limits },
   };
 }
@@ -376,7 +608,7 @@ export function listDataProducts(options: {
         name: product.name,
         api_path: product.api_path,
         title: version.contract.title,
-        fields: [...scope.columns],
+        fields: version.contract.fields.map((field) => field.name).filter((name) => scope.columns.includes(name)),
         dimensions: version.contract.dimensions.filter((dimension) => scope.columns.includes(dimension)),
         metrics: version.contract.metrics
           .filter((metric) => metric.field === undefined || scope.columns.includes(metric.field))
@@ -393,6 +625,7 @@ export function listDataProducts(options: {
         grain: [...version.contract.grain],
         time: version.contract.time === undefined ? null : { ...version.contract.time },
         filters: version.contract.filters.filter((filter) => scope.columns.includes(filter)),
+        relationships: relationshipViews(version.contract, scope),
         data_product_version: version.version,
         data_product_release: release.release,
         dataset_release: release.dataset_release,
@@ -464,6 +697,7 @@ export function listDataProductReleases(options: {
       contract_version: version === undefined ? null : { ...version.contract_version },
       withdrawn: version?.withdrawn_at !== null && version?.withdrawn_at !== undefined,
       dataset_release: release.dataset_release,
+      relationships: (release.relationships ?? []).map((binding) => ({ ...binding })),
       created_at: release.created_at,
     };
   });

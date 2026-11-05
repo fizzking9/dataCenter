@@ -3,6 +3,7 @@ import {
   ISO_TIMESTAMP,
   type DataProductContract,
   type DataProductMetric,
+  type DataProductRelationship,
   type DataProductSearch,
   type DataProductTime,
   type DatasetSchemaField,
@@ -34,10 +35,10 @@ export const REFUSED_KEYS = [
   'relationship', 'relationships', 'select', 'where', 'having',
 ];
 
-const RECORD_KEYS = ['kind', 'filters', 'limit', 'window', 'cursor', 'release', 'major'];
+const RECORD_KEYS = ['kind', 'filters', 'limit', 'window', 'cursor', 'release', 'major', 'include'];
 const AGGREGATE_KEYS = [
   'kind', 'group_by', 'metrics', 'filters', 'metric_filters',
-  'include_totals', 'sort', 'limit', 'window', 'comparison', 'cursor', 'release', 'major',
+  'include_totals', 'sort', 'limit', 'window', 'comparison', 'cursor', 'release', 'major', 'include',
 ];
 /** A search reads the same page cursor and Release a record query does; a suggestion never pages. */
 const SEARCH_KEYS = ['kind', 'q', 'limit', 'cursor', 'release', 'major'];
@@ -83,7 +84,7 @@ export interface QueryTarget {
 }
 
 export type ParsedQuery =
-  | { kind: 'records'; filters: QueryFilter[]; limit: number; window?: Window }
+  | { kind: 'records'; filters: QueryFilter[]; limit: number; window?: Window; include: IncludeSpec[] }
   | {
     kind: 'search';
     /** The capability the Contract declared, already proven to exist. */
@@ -106,6 +107,16 @@ export type ParsedQuery =
     window?: Window;
     comparison?: Window;
   };
+
+/**
+ * One declared relationship a record query asked to read, with the filters it
+ * states over that linked record set. The relationship was already proven to be
+ * one the Contract publishes under exactly this name.
+ */
+export interface IncludeSpec {
+  relationship: DataProductRelationship;
+  filters: QueryFilter[];
+}
 
 /**
  * Refuses every member the query language does not define. Arbitrary SQL, a
@@ -134,19 +145,20 @@ function acceptsValue(field: DatasetSchemaField, value: unknown): value is strin
 }
 
 /**
- * Reads the typed filters a query states. A filter must name a filter the
- * Contract permits and state a value the field's own type can hold, so a string
- * standing in for a number never silently matches nothing.
+ * Reads the typed filters a query states over one governed record set. A filter
+ * must name a filter that surface permits and state a value the field's own type
+ * can hold, so a string standing in for a number never silently matches nothing.
  */
-function readFilters(
+function readFilterList(
   raw: unknown,
-  contract: DataProductContract,
+  allowed: string[],
   schema: DatasetSchemaField[],
+  label: string,
   fail: Fail,
 ): QueryFilter[] {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) {
-    fail(MALFORMED, 'Query filters must be an array.');
+    fail(MALFORMED, `${label} filters must be an array.`);
   }
   const filters: QueryFilter[] = [];
   for (const candidate of raw) {
@@ -158,10 +170,13 @@ function readFilters(
     if (!OPERATORS.includes(op)) {
       fail(MALFORMED, `Each query filter operator must be one of: ${OPERATORS.join(', ')}.`);
     }
-    if (!contract.filters.includes(field)) {
-      fail(REFUSED, `${field} is not a filter the Data Product Contract permits.`);
+    if (!allowed.includes(field)) {
+      fail(REFUSED, `${field} is not a filter ${label} permits.`);
     }
-    const schemaField = schema.find((candidateField) => candidateField.name === field)!;
+    const schemaField = schema.find((candidateField) => candidateField.name === field);
+    if (schemaField === undefined) {
+      fail(REFUSED, `${field} is not a field ${label} reads.`);
+    }
     if (NULL_TESTS.includes(op)) {
       if (candidate['value'] !== undefined) {
         fail(MALFORMED, `The ${op} filter tests for a missing value, so it states no value.`);
@@ -176,6 +191,89 @@ function readFilters(
     filters.push({ field, op, value });
   }
   return filters;
+}
+
+function readFilters(
+  raw: unknown,
+  contract: DataProductContract,
+  schema: DatasetSchemaField[],
+  fail: Fail,
+): QueryFilter[] {
+  refuseLinkedFields(fail, contract, raw, 'filter');
+  return readFilterList(raw, contract.filters, schema, 'the Data Product Contract', fail);
+}
+
+/** Refuses a linked field stated wherever only the Product's own fields belong. */
+function refuseLinkedFields(fail: Fail, contract: DataProductContract, raw: unknown, surface: string): void {
+  if (!Array.isArray(raw)) return;
+  for (const candidate of raw) {
+    if (isRecord(candidate) && typeof candidate['field'] === 'string') {
+      refuseLinkedField(fail, contract, candidate['field'], surface);
+    }
+  }
+}
+
+/**
+ * Reads the declared relationships a record query asks to follow. A relationship
+ * is read as its own record set, filtered only by the fields it publishes, so a
+ * linked record never changes which base records the query answers.
+ */
+function readInclude(
+  raw: unknown,
+  contract: DataProductContract,
+  related: Record<string, DatasetSchemaField[]>,
+  fail: Fail,
+): IncludeSpec[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    fail(MALFORMED, 'Query include must be an array of declared relationships.');
+  }
+  const specs: IncludeSpec[] = [];
+  for (const candidate of raw) {
+    const entry = typeof candidate === 'string' ? { name: candidate } : candidate;
+    if (!isRecord(entry) || typeof entry['name'] !== 'string') {
+      fail(MALFORMED, 'Each included relationship must name a relationship the Contract declares.');
+    }
+    for (const key of Object.keys(entry)) {
+      if (key !== 'name' && key !== 'filters') {
+        fail(MALFORMED, `${key} is not a part of an included relationship.`);
+      }
+    }
+    const name = entry['name'];
+    const relationship = (contract.relationships ?? []).find((candidateRelationship) => candidateRelationship.name === name);
+    if (relationship === undefined) {
+      fail(REFUSED, `${name} is not a relationship this Data Product Contract publishes.`);
+    }
+    if (specs.some((spec) => spec.relationship.name === name)) {
+      fail(MALFORMED, `The ${name} relationship is included more than once, so the linked records would be ambiguous.`);
+    }
+    const schema = related[name];
+    if (schema === undefined) {
+      fail(REFUSED, `The ${name} relationship has no Dataset Release in the Release this query reads.`);
+    }
+    specs.push({
+      relationship,
+      filters: readFilterList(entry['filters'], relationship.filters, schema, `the ${name} relationship`, fail),
+    });
+  }
+  return specs;
+}
+
+/**
+ * A query reads linked records only through `include`, under the Data Product's
+ * own grain. Naming a linked field anywhere else would silently change which base
+ * records match or how they group, which is exactly the join fanout the Contract
+ * refuses to guess at.
+ */
+function refuseLinkedField(fail: Fail, contract: DataProductContract, name: string, surface: string): void {
+  const prefix = name.slice(0, name.indexOf('.'));
+  const relationship = (contract.relationships ?? []).find((candidate) => candidate.name === prefix);
+  if (name.includes('.') && relationship !== undefined) {
+    fail(
+      REFUSED,
+      `${name} belongs to the ${relationship.name} relationship, so it cannot ${surface} the Data Product's own records; linked records are read through include.`,
+    );
+  }
 }
 
 /**
@@ -257,6 +355,7 @@ function readGroupBy(raw: unknown, contract: DataProductContract, metrics: DataP
     if (typeof candidate !== 'string') {
       fail(MALFORMED, 'Each grouping must name a Contract dimension.');
     }
+    refuseLinkedField(fail, contract, candidate, 'group');
     if (!contract.dimensions.includes(candidate)) {
       fail(REFUSED, `${candidate} is not a dimension the Data Product Contract declares.`);
     }
@@ -308,7 +407,13 @@ function readMetricFilters(raw: unknown, metrics: DataProductMetric[], fail: Fai
 }
 
 /** Ordering names a dimension or a requested metric; the dimension tuple breaks every tie. */
-function readSort(raw: unknown, groupBy: string[], metrics: DataProductMetric[], fail: Fail): SortClause[] {
+function readSort(
+  raw: unknown,
+  contract: DataProductContract,
+  groupBy: string[],
+  metrics: DataProductMetric[],
+  fail: Fail,
+): SortClause[] {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) {
     fail(MALFORMED, 'Query sort must be an array of ordering clauses.');
@@ -322,6 +427,7 @@ function readSort(raw: unknown, groupBy: string[], metrics: DataProductMetric[],
       fail(MALFORMED, 'Each ordering clause must state a dimension or metric to order by.');
     }
     const by = candidate['by'];
+    refuseLinkedField(fail, contract, by, 'order');
     if (!groupBy.includes(by) && !metrics.some((metric) => metric.name === by)) {
       fail(REFUSED, `${by} is neither a grouped dimension nor a requested metric.`);
     }
@@ -340,6 +446,12 @@ function readAggregate(
   schema: DatasetSchemaField[],
   fail: Fail,
 ): ParsedQuery {
+  if (parsed['include'] !== undefined) {
+    fail(
+      REFUSED,
+      'An aggregate query counts the Data Product\'s own records, so it cannot include linked records; read them through a record query.',
+    );
+  }
   const metrics$ = readMetrics(parsed['metrics'], contract, fail);
   const metrics = metrics$.metrics;
   const groupBy = readGroupBy(parsed['group_by'], contract, metrics, fail);
@@ -360,7 +472,7 @@ function readAggregate(
     filters: readFilters(parsed['filters'], contract, schema, fail),
     metricFilters: readMetricFilters(parsed['metric_filters'], metrics, fail),
     includeTotals,
-    sort: readSort(parsed['sort'], groupBy, metrics, fail),
+    sort: readSort(parsed['sort'], contract, groupBy, metrics, fail),
     limit: readLimit(parsed['limit'], contract, fail),
     ...(window === undefined ? {} : { window }),
     ...(comparison === undefined ? {} : { comparison }),
@@ -396,24 +508,28 @@ export function readQueryTarget(parsed: Record<string, unknown>, fail: Fail): Qu
 
 /**
  * Reads the Data Product Query a Consumer composes against the Contract. Every
- * surface it names — fields, dimensions, metrics, operators, and windows — must
- * be one the Contract publishes, so nothing ungoverned can reach the records.
+ * surface it names — fields, dimensions, metrics, operators, windows, and the
+ * declared relationships it includes — must be one the Contract publishes, so
+ * nothing ungoverned can reach the records.
  */
 export function readQuery(
   parsed: Record<string, unknown>,
   contract: DataProductContract,
   schema: DatasetSchemaField[],
   fail: Fail,
+  related: Record<string, DatasetSchemaField[]> = {},
 ): ParsedQuery {
   const kind = parsed['kind'];
   if (kind === 'records') {
     readShape(parsed, RECORD_KEYS, 'record', fail);
     const window = readWindow(parsed['window'], contract.time, 'time window', fail);
+    const include = readInclude(parsed['include'], contract, related, fail);
     return {
       kind: 'records',
       filters: readFilters(parsed['filters'], contract, schema, fail),
       limit: readLimit(parsed['limit'], contract, fail),
       ...(window === undefined ? {} : { window }),
+      include,
     };
   }
   if (kind === 'aggregate') {

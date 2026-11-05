@@ -2,6 +2,7 @@ import type {
   DataProductContract,
   DataProductContractVersion,
   DataProductMetric,
+  DataProductRelationship,
   DataProductVersion,
 } from './catalog.js';
 
@@ -40,6 +41,27 @@ function narrower(previous: string[], next: string[]): string[] {
   return previous.filter((name) => !next.includes(name));
 }
 
+/**
+ * A published relationship is part of the Contract's shape: withdrawing one,
+ * narrowing its fields, or changing what one base record reaches would change
+ * what an already composed query answers, so it opens a new major line instead.
+ */
+function relationshipsBreak(previous: DataProductRelationship[], next: DataProductRelationship[]): boolean {
+  for (const relationship of previous) {
+    const candidate = next.find((other) => other.name === relationship.name);
+    if (candidate === undefined
+      || candidate.cardinality !== relationship.cardinality
+      || JSON.stringify(candidate.on) !== JSON.stringify(relationship.on)
+      || JSON.stringify(candidate.grain) !== JSON.stringify(relationship.grain)
+      || narrower(relationship.fields.map((field) => field.name), candidate.fields.map((field) => field.name)).length > 0
+      || narrower(relationship.filters, candidate.filters).length > 0
+      || candidate.limit < relationship.limit) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function readContractChange(
   previous: DataProductContract,
   next: DataProductContract,
@@ -54,6 +76,7 @@ export function readContractChange(
   if (narrower(previous.fields.map((field) => field.name), nextFields).length > 0) breaking.push('fields');
   if (narrower(previous.dimensions, next.dimensions).length > 0) breaking.push('dimensions');
   if (narrower(previous.filters, next.filters).length > 0) breaking.push('filters');
+  if (relationshipsBreak(previous.relationships ?? [], next.relationships ?? [])) breaking.push('relationships');
 
   for (const metric of previous.metrics) {
     const candidate = next.metrics.find((other) => other.name === metric.name);
