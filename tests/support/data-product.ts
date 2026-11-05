@@ -57,6 +57,27 @@ const CONTRACT = {
   limit: { default: 100, max: 500 },
 };
 
+/**
+ * The same ledger Contract widened additively for Natural-Language Query
+ * certification: the device identifier becomes filterable, and an average over
+ * a nullable amount can produce a genuinely absent metric value.
+ */
+export const EXTENDED_LEDGER_CONTRACT = {
+  ...CONTRACT,
+  metrics: [
+    ...CONTRACT.metrics,
+    {
+      name: 'settled_average',
+      description: '平均结算金额',
+      aggregation: 'avg',
+      field: 'settled_amount',
+      value_type: 'money',
+      currency: 'CNY',
+    },
+  ],
+  filters: ['sn', ...CONTRACT.filters],
+};
+
 export interface PublishedProduct extends WorkspaceFixture {
   sourceId: string;
   dataProductId: string;
@@ -66,14 +87,14 @@ export interface PublishedProduct extends WorkspaceFixture {
  * Publishes one Data Product over a governed Dataset Release, so a Consumer and
  * an Agent Identity can read exactly the same Artifact through two surfaces.
  */
-export function publishLedgerProduct(): PublishedProduct {
+export function publishLedgerProduct(contract: unknown = CONTRACT): PublishedProduct {
   const base: WorkspaceFixture = workspaceFixture();
   const { fixture, workspaceId, workspaceAdministratorToken } = base;
   const sourceId = publishSource(fixture, workspaceAdministratorToken, workspaceId);
   acquireAndRelease(fixture, workspaceAdministratorToken, sourceId);
   const published = command(
     fixture,
-    ['product', 'publish', '--source', sourceId, '--name', '设备维修台账', '--contract', jsonFile(fixture, 'contract', CONTRACT)],
+    ['product', 'publish', '--source', sourceId, '--name', '设备维修台账', '--contract', jsonFile(fixture, 'contract', contract)],
     { token: workspaceAdministratorToken },
   );
   assert.equal(published.status, 0, published.stderr);

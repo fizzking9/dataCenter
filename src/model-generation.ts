@@ -10,9 +10,15 @@ import {
   type ModelPromptPin,
   type PinnedModelProfile,
 } from './model-adapter.js';
+import { REFUSED_KEYS } from './product-query-document.js';
 
 /** The purposes a Model Profile Version may declare, in evaluation order. */
-export const MODEL_PURPOSES: ModelPurpose[] = ['integration_proposal', 'grounded_narration', 'clarification'];
+export const MODEL_PURPOSES: ModelPurpose[] = [
+  'integration_proposal',
+  'grounded_narration',
+  'clarification',
+  'query_plan',
+];
 
 /** The data categories a Model Profile Version may be permitted to receive. */
 export const MODEL_DATA_CATEGORIES: ModelDataCategory[] = [
@@ -20,6 +26,7 @@ export const MODEL_DATA_CATEGORIES: ModelDataCategory[] = [
   'cleaning_rules',
   'source_mapping',
   'sample_records',
+  'product_contract',
 ];
 
 /** The declared structured-output shape each purpose has to answer with. */
@@ -27,6 +34,7 @@ export const STRUCTURED_OUTPUT: Record<ModelPurpose, string> = {
   integration_proposal: 'integration_configuration_candidate',
   grounded_narration: 'grounded_narrative',
   clarification: 'clarification_question',
+  query_plan: 'data_product_query_plan',
 };
 
 /** The tools each purpose may expose; nothing outside this closed set exists. */
@@ -34,6 +42,7 @@ const PURPOSE_TOOLS: Record<ModelPurpose, string[]> = {
   integration_proposal: ['read_data_dictionary'],
   grounded_narration: ['read_governed_result'],
   clarification: [],
+  query_plan: [],
 };
 
 const CJK = /[\u3400-\u4dbf\u4e00-\u9fff]/gu;
@@ -125,6 +134,76 @@ export function narrationFailure(output: Record<string, unknown>, input: unknown
   return null;
 }
 
+/** The members a query-plan answer may state, and nothing wider. */
+const PLAN_KEYS = ['action', 'query', 'missing', 'candidates', 'interpretation'];
+const PLAN_QUERY_KEYS = [
+  'kind', 'filters', 'metric_filters', 'group_by', 'metrics', 'sort',
+  'window', 'comparison', 'include_totals', 'limit', 'q',
+  'release', 'major', 'cursor',
+];
+const MISSING_KINDS = ['period', 'dimension', 'metric', 'filter_value'];
+const QUERY_KINDS = ['records', 'aggregate', 'search', 'suggest'];
+
+/** Finds any key the published query language never accepts, at any depth. */
+function refusedKeyIn(value: unknown): string | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = refusedKeyIn(item);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (!isRecord(value)) return null;
+  for (const [key, child] of Object.entries(value)) {
+    if (REFUSED_KEYS.includes(key)) return key;
+    const found = refusedKeyIn(child);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+/**
+ * The declared query-plan shape every model answer is judged against before it
+ * can become a Data Product Query. It never widens the published vocabulary:
+ * SQL, formulas, joins, and unpublished request keys are refused by name.
+ */
+export function queryPlanFailure(output: Record<string, unknown>): string | null {
+  if (Object.keys(output).some((key) => !PLAN_KEYS.includes(key))) return 'QUERY_PLAN_KEY_UNSUPPORTED';
+  const action = output['action'];
+  if (action !== 'query' && action !== 'clarify') return 'QUERY_PLAN_ACTION_INVALID';
+  const interpretation = output['interpretation'];
+  if (typeof interpretation !== 'string' || interpretation.trim().length === 0) {
+    return 'QUERY_PLAN_INTERPRETATION_MISSING';
+  }
+  if (output['candidates'] !== undefined) {
+    const candidates = output['candidates'];
+    if (!Array.isArray(candidates) || candidates.some((candidate) => typeof candidate !== 'string')) {
+      return 'QUERY_PLAN_CANDIDATES_INVALID';
+    }
+  }
+  if (action === 'clarify') {
+    const missing = output['missing'];
+    if (!Array.isArray(missing) || missing.length === 0) return 'QUERY_PLAN_MISSING_UNDECLARED';
+    if (missing.some((kind) => typeof kind !== 'string' || !MISSING_KINDS.includes(kind))) {
+      return 'QUERY_PLAN_MISSING_UNSUPPORTED';
+    }
+    if (output['query'] !== undefined) return 'QUERY_PLAN_QUERY_UNEXPECTED';
+    return null;
+  }
+  const query = output['query'];
+  if (!isRecord(query)) return 'QUERY_PLAN_QUERY_MISSING';
+  if (typeof query['kind'] !== 'string' || !QUERY_KINDS.includes(query['kind'])) {
+    return 'QUERY_PLAN_KIND_INVALID';
+  }
+  for (const key of Object.keys(query)) {
+    if (PLAN_QUERY_KEYS.includes(key)) continue;
+    if (REFUSED_KEYS.includes(key)) return 'QUERY_PLAN_CODE_REFUSED';
+    return 'QUERY_PLAN_KEY_UNSUPPORTED';
+  }
+  if (refusedKeyIn(query) !== null) return 'QUERY_PLAN_CODE_REFUSED';
+  return null;
+}
+
 /**
  * Runs one integration generation under the exact pinned Version, then validates
  * the answer with the same Integration Configuration parser publication uses, so
@@ -197,5 +276,28 @@ export const EVALUATION_INPUTS = {
   clarification: {
     question: '处理量',
     missing: ['time_range'],
+  },
+  query_plan: {
+    question: '杭州的处理量合计是多少？',
+    clarification: null,
+    today: '2026-01-31',
+    contract: {
+      title: '设备维修台账',
+      fields: [
+        { name: 'sn', description: '设备序列号' },
+        { name: 'city', description: '所属城市' },
+        { name: 'handled_count', description: '处理量' },
+        { name: 'reported_on', description: '上报日期' },
+      ],
+      dimensions: ['city'],
+      metrics: [
+        { name: 'handled_total', aggregation: 'sum', value_type: 'integer', unit: '次', dimensions: ['city'] },
+        { name: 'device_count', aggregation: 'count', value_type: 'integer', dimensions: ['city'] },
+      ],
+      filters: ['city'],
+      time: { field: 'reported_on', precision: 'date', time_zone: 'Asia/Shanghai' },
+      limits: { max_scanned_records: 10_000, max_groups: 100, max_execution_ms: 1_000 },
+    },
+    defaults: { limit: 100 },
   },
 } as const;

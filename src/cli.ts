@@ -36,6 +36,7 @@ import { adoptIntegrationConfiguration, publishIntegrationConfiguration } from '
 import { publishModelBinding, showModelBinding } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, publishModelProfile, showModelProfile } from './model-profile.js';
 import { importLicense, readLicenseSummary } from './license.js';
+import { askDataProduct } from './natural-language-query.js';
 import { queryDataProduct } from './product-query.js';
 import { listDataProductReleases, listDataProducts, publishDataProduct, withdrawDataProductVersion } from './products.js';
 import {
@@ -448,6 +449,16 @@ async function main(): Promise<void> {
       ...governed(options),
       dataProductId: required(options, 'product'),
       requestPath: required(options, 'request'),
+    }));
+    return;
+  }
+  if (command === 'product' && subcommand === 'ask') {
+    emit(await askDataProduct({
+      ...governed(options),
+      dataProductId: required(options, 'product'),
+      question: required(options, 'question'),
+      ...(options.has('clarification') ? { clarification: required(options, 'clarification') } : {}),
+      ...(options.has('binding') ? { bindingId: required(options, 'binding') } : {}),
     }));
     return;
   }

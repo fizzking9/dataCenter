@@ -27,6 +27,7 @@ import {
   isSimplifiedChinese,
   narrationFailure,
   promptHash,
+  queryPlanFailure,
   promptOf,
   promptPinsSimplifiedChinese,
   toolsFor,
@@ -460,6 +461,25 @@ export async function evaluateModelProfile(options: {
       const question = String(answer.output['question'] ?? '');
       if (!isSimplifiedChinese(question)) {
         throw new OperatorError('CLARIFICATION_NOT_SIMPLIFIED_CHINESE', 'The clarification is not Simplified Chinese.');
+      }
+      return 'zh-CN';
+    });
+  }
+
+  if (version.purposes.includes('query_plan')) {
+    await record('query_plan', async () => {
+      const answer = await generateForPurpose(pinned, 'query_plan', EVALUATION_INPUTS.query_plan, failure);
+      const mismatch = queryPlanFailure(answer.output);
+      if (mismatch !== null) {
+        throw new OperatorError(mismatch, 'The plan is not a request in the published query vocabulary.');
+      }
+      return answer.output['action'] === 'clarify' ? 'clarify' : 'query';
+    });
+    await record('simplified_chinese_plan', async () => {
+      const answer = await generateForPurpose(pinned, 'query_plan', EVALUATION_INPUTS.query_plan, failure);
+      const interpretation = String(answer.output['interpretation'] ?? '');
+      if (!isSimplifiedChinese(interpretation)) {
+        throw new OperatorError('QUERY_PLAN_NOT_SIMPLIFIED_CHINESE', 'The plan is not explained in Simplified Chinese.');
       }
       return 'zh-CN';
     });
