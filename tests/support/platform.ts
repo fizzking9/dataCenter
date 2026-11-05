@@ -28,6 +28,8 @@ export interface PlatformFixture {
 export interface CommandOptions {
   input?: string;
   token?: string;
+  /** Extra environment for one command, so a test can drive a timer seam. */
+  env?: NodeJS.ProcessEnv;
 }
 
 const enrolmentSecrets = new Map<string, string>();
@@ -125,7 +127,7 @@ export function command(
   if (options.token) full.push('--session-token', options.token);
   return runOperator(full, {
     ...(options.input === undefined ? {} : { input: options.input }),
-    env: fixture.docker,
+    env: { ...fixture.docker, ...(options.env ?? {}) },
   });
 }
 

@@ -36,6 +36,13 @@ import {
   type WorkspaceModelBindingRecord,
 } from './catalog.js';
 import { canonicalDigest } from './crypto.js';
+import {
+  DeadlineExceeded,
+  REPORT_TIMEOUT_MS,
+  timeoutBudgetFromEnv,
+  withDeadline,
+  type Deadline,
+} from './deadline.js';
 import { isRecord, readJsonDocument } from './documents.js';
 import type { Fail } from './errors.js';
 import { classifyResult, freshnessOf, narrationFacts, narrativeViolation } from './governed-result.js';
@@ -895,6 +902,30 @@ export interface GenerateReportOptions {
  * narrative is generated, and only after the engine has answered.
  */
 export async function generateReport(options: GenerateReportOptions): Promise<ReportRecord> {
+  const budget = timeoutBudgetFromEnv('DC_REPORT_TIMEOUT_MS', REPORT_TIMEOUT_MS);
+  try {
+    return await withDeadline((deadline) => generateReportWithinBudget(options, deadline), budget);
+  } catch (error) {
+    if (error instanceof DeadlineExceeded) {
+      throw new ReportGenerationFailure(
+        'REPORT_TIMEOUT',
+        `Report generation exceeded its ${String(Math.round(budget / 1000))}-second hard timeout before a complete answer existed.`,
+        'Narrow the Report Template question or retry when the inference endpoint is responsive.',
+      );
+    }
+    throw error;
+  }
+}
+
+/**
+ * The generation work itself, run under the settled Report hard timeout. The
+ * deterministic read may finish late, but a Report is committed only while the
+ * deadline still holds: an expired generation stores nothing.
+ */
+async function generateReportWithinBudget(
+  options: GenerateReportOptions,
+  deadline: Deadline,
+): Promise<ReportRecord> {
   const { session, reader, template, version } = options;
   if (session.license?.status === 'expired') {
     throw new ReportGenerationFailure(
@@ -946,6 +977,9 @@ export async function generateReport(options: GenerateReportOptions): Promise<Re
   // One report is one metered operation, so the identifier the narrative is
   // metered under is the identifier the immutable Report carries.
   const reportId = randomUUID();
+  // Narration is the only slow, model-backed step; an expired deadline stops
+  // before it spends anything more.
+  deadline.ensure();
   const narrated = await narrate(session, template.workspace_id, version, product, result, reference, {
     root: session.root,
     class: 'report',
@@ -981,6 +1015,9 @@ export async function generateReport(options: GenerateReportOptions): Promise<Re
     withdrawn_at: null,
     withdrawn_by: null,
   };
+  // The commit point: a generation whose deadline passed while the narrative
+  // was being produced stores no Report and audits no success.
+  deadline.ensure();
   session.state.reports.push(report);
   session.audit({
     ...context,

@@ -2,6 +2,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { resolveActor } from './auth.js';
 import { actorLabel, deny, reject, type ActionContext } from './authz.js';
 import {
+  DeadlineExceeded,
+  NLQ_TIMEOUT_MS,
+  timeoutBudgetFromEnv,
+  withDeadline,
+  type Deadline,
+} from './deadline.js';
+import {
   findDataProduct,
   findModelBinding,
   findModelProfile,
@@ -1024,8 +1031,86 @@ interface TurnRequest {
  * conversation handle only records what the previous turn said, so a revoked
  * membership, changed Grant, delegation, or advanced Release takes effect on the
  * next turn.
+ *
+ * The turn runs under the settled 60-second hard timeout. Once the deadline
+ * passes the caller answers with an explicit timeout, and the abandoned turn can
+ * neither execute further parts nor persist anything: its writes are dropped.
  */
-async function runTurn(principal: TurnPrincipal, options: TurnRequest): Promise<Record<string, unknown>> {
+async function runTurnWithDeadline(
+  principal: TurnPrincipal,
+  options: TurnRequest,
+): Promise<Record<string, unknown>> {
+  const budget = timeoutBudgetFromEnv('DC_NLQ_TIMEOUT_MS', NLQ_TIMEOUT_MS);
+  try {
+    return await withDeadline(
+      (deadline) => runTurn(guardedPrincipal(principal, deadline), options, deadline),
+      budget,
+    );
+  } catch (error) {
+    if (!(error instanceof DeadlineExceeded)) throw error;
+    return timedOutTurn(principal, options, budget);
+  }
+}
+
+/**
+ * The same principal under a deadline-aware session: anything the abandoned turn
+ * still does after expiry is computed but never audited or persisted.
+ */
+function guardedPrincipal(principal: TurnPrincipal, deadline: Deadline): TurnPrincipal {
+  const session = principal.session;
+  return {
+    ...principal,
+    session: {
+      ...session,
+      audit(input) {
+        if (!deadline.expired) session.audit(input);
+      },
+      save() {
+        if (!deadline.expired) session.save();
+      },
+    },
+  };
+}
+
+/** The explicit outcome of a turn that passed its hard deadline. */
+function timedOutTurn(
+  principal: TurnPrincipal,
+  options: TurnRequest,
+  budget: number,
+): Record<string, unknown> {
+  const { session, reader } = principal;
+  const entry: ActionContext = {
+    action: 'natural_language_query',
+    scope: 'workspace',
+    workspace_id: principal.workspaceId,
+    ...(principal.dataProductId === null ? {} : { target: principal.dataProductId }),
+  };
+  const question = normalizeQuestion(options.question);
+  const response = baseResponse(question, principal.workspaceId);
+  response['reason_code'] = 'NLQ_TIMEOUT';
+  response['authorization'] = authorizationView(principal.workspaceId, principal.role, []);
+  response['summary'] = '本次自然语言查询超过平台硬性时限，平台已终止该次回答，未返回任何部分结果。';
+  response['limitations'] = [`本次查询超过 ${String(Math.round(budget / 1000))} 秒硬性时限，平台已终止该次回答。`];
+  session.audit({
+    ...entry,
+    actor: reader.label,
+    outcome: 'failed',
+    detail: {
+      nlq_outcome: 'unavailable',
+      nlq_status: 'incomplete',
+      reason_code: 'NLQ_TIMEOUT',
+      timeout_ms: budget,
+      ...reader.auditDetail,
+    },
+  });
+  return response;
+}
+
+async function runTurn(
+  principal: TurnPrincipal,
+  options: TurnRequest,
+  deadline: Deadline,
+): Promise<Record<string, unknown>> {
   const { session, reader } = principal;
   const entry: ActionContext = {
     action: 'natural_language_query',
@@ -1112,6 +1197,9 @@ async function runTurn(principal: TurnPrincipal, options: TurnRequest): Promise<
   // under exactly this reader. A Template that cannot produce one falls through
   // to the settled Natural-Language Query path below.
   if (!ephemeral && options.clarification === undefined) {
+    // Stock reuse may generate and store a Report; it never starts after the
+    // deadline has already passed.
+    deadline.ensure();
     const reuse = await reuseReport({
       session,
       generatedBy: principal.generatedBy,
@@ -1382,6 +1470,9 @@ async function runTurn(principal: TurnPrincipal, options: TurnRequest): Promise<
     throw new NaturalLanguageFailure(code, message);
   };
   const parts: Array<Record<string, unknown>> = [];
+  // No part executes once the deadline has passed: a timed-out turn answers
+  // nothing rather than a partial set of parts.
+  deadline.ensure();
   for (const part of planned) {
     if (part.target === null || part.failure !== null || part.request === null) {
       parts.push(failedPart(
@@ -1719,7 +1810,7 @@ export interface AgentTurnOptions extends TurnRequest {
 export async function askNaturalLanguageQueryForAgent(
   options: AgentTurnOptions,
 ): Promise<Record<string, unknown>> {
-  return runTurn(
+  return runTurnWithDeadline(
     {
       session: options.session,
       reader: options.reader,
@@ -1764,7 +1855,7 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
       'The Workspace is not available to this actor.',
     );
   }
-  return runTurn(
+  return runTurnWithDeadline(
     {
       session,
       reader: memberReader(session, actor.user, role),
