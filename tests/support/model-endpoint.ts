@@ -15,6 +15,9 @@ export type MockBehaviour =
   | 'ungrounded_narration'
   | 'undeclared_tool'
   | 'malformed_structured_output'
+  | 'unauthorized_field'
+  | 'unauthorized_dimension'
+  | 'unauthorized_metric'
   | 'identity_mismatch';
 
 export interface MockModelEndpoint {
@@ -101,6 +104,7 @@ function profileHashOf(body: Record<string, unknown>): string {
 function outputFor(purpose: string, body: Record<string, unknown>, behaviour: MockBehaviour): unknown {
   if (purpose === 'grounded_narration') return narration(body, behaviour);
   if (purpose === 'clarification') return clarification(behaviour);
+  if (purpose === 'data_product_proposal') return productContract(body, behaviour);
   return integrationConfiguration(body, behaviour);
 }
 
@@ -160,6 +164,87 @@ function narration(body: Record<string, unknown>, behaviour: MockBehaviour): Rec
     narrative: `根据证据，第一条受治理记录的处理量为 ${String(value)}。`,
     evidence_refs: [{ field: 'handled_count', value }],
   };
+}
+
+/**
+ * Composes the Data Product Contract the supplied authorised evidence asks
+ * for. It is deliberately mechanical: certification needs a frozen answer, not
+ * a model. Every name it emits comes from the input it was given, except the
+ * adverse modes, which name something the input never authorised.
+ */
+function productContract(body: Record<string, unknown>, behaviour: MockBehaviour): Record<string, unknown> {
+  const input = isRecord(body['input']) ? body['input'] : {};
+  const dataset = isRecord(input['dataset']) ? input['dataset'] : {};
+  const fields = Array.isArray(dataset['fields'])
+    ? dataset['fields'].filter((field): field is Record<string, unknown> => isRecord(field))
+    : [];
+  const identity = Array.isArray(dataset['identity_fields']) ? dataset['identity_fields'].map(String) : [];
+  const definitions = Array.isArray(input['metric_definitions'])
+    ? input['metric_definitions'].filter((entry): entry is Record<string, unknown> => isRecord(entry))
+    : [];
+  const schema: Array<{ name: string; type: string }> = fields.map((field) => ({
+    name: String(field['name']),
+    type: String(field['type']),
+  }));
+  const typeOf = (name: string): string | undefined => schema.find((field) => field.name === name)?.type;
+  const exposed: Array<Record<string, unknown>> = schema.map((field) => ({ name: field.name, description: `${field.name} 字段` }));
+  const dimensions: string[] = schema
+    .filter((field) => field.type === 'string' && !identity.includes(field.name))
+    .map((field) => field.name);
+  const metrics: Array<Record<string, unknown>> = [];
+  for (const definition of definitions) {
+    const key = String(definition['key']);
+    const suffix = ([['_total', 'sum'], ['_count', 'count'], ['_avg', 'avg'], ['_min', 'min'], ['_max', 'max']] as const)
+      .find(([ending]) => key.endsWith(ending));
+    const field = suffix === undefined ? undefined : key.slice(0, -suffix[0].length);
+    const fieldType = field === undefined ? undefined : typeOf(field);
+    if (suffix === undefined || fieldType === undefined || suffix[1] === 'count') {
+      metrics.push({ name: key, aggregation: 'count', value_type: 'integer' });
+      continue;
+    }
+    const aggregation = suffix[1];
+    const valueType = aggregation === 'avg' ? 'decimal' : fieldType === 'integer' ? 'integer' : fieldType === 'number' ? 'decimal' : fieldType;
+    metrics.push({
+      name: key,
+      description: String(definition['value'] ?? key),
+      aggregation,
+      field,
+      value_type: valueType,
+      ...(typeof definition['unit'] === 'string' ? { unit: definition['unit'] } : {}),
+    });
+  }
+  const timeField = schema.find((field) => field.type === 'date' || field.type === 'timestamp');
+  const grain = identity.length > 0 ? identity : schema.slice(0, 1).map((field) => field.name);
+  const contract: Record<string, unknown> = {
+    title: String(input['name'] ?? '数据产品契约'),
+    description: String(input['requirement'] ?? ''),
+    fields: exposed,
+    dimensions,
+    metrics,
+    grain,
+    ...(timeField === undefined ? {} : { time: { field: timeField.name, precision: timeField.type, time_zone: 'Asia/Shanghai' } }),
+    filters: exposed.map((field) => String(field['name'])),
+    limit: { default: 100, max: 500 },
+  };
+  if (behaviour === 'malformed_structured_output') return { fields: [] };
+  if (behaviour === 'unauthorized_field') {
+    exposed.push({ name: 'secret_field', description: '另一个工作区的字段' });
+  }
+  if (behaviour === 'unauthorized_dimension') {
+    dimensions.push('secret_dimension');
+  }
+  if (behaviour === 'unauthorized_metric') {
+    const numeric = schema.find((field) => field.type === 'integer' || field.type === 'number');
+    if (numeric !== undefined) {
+      metrics.push({
+        name: 'foreign_total',
+        aggregation: 'sum',
+        field: numeric.name,
+        value_type: numeric.type === 'integer' ? 'integer' : 'decimal',
+      });
+    }
+  }
+  return contract;
 }
 
 function clarification(behaviour: MockBehaviour): Record<string, unknown> {

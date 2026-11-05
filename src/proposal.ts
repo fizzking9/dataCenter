@@ -9,6 +9,7 @@ import {
   findModelProfile,
   findModelProfileVersion,
   latestIntegrationVersion,
+  type IntegrationProposalRecord,
   type ArtifactProposalRecord,
   type CleaningRule,
   type CleaningRuleName,
@@ -53,12 +54,24 @@ function digest(value: unknown): string {
   return canonicalDigest(value);
 }
 
+/**
+ * Resolves the integration Proposal kind. A Data Product Proposal is a
+ * different review unit, so this lifecycle never governs it by mistake.
+ */
+function findIntegrationProposal(
+  proposals: ArtifactProposalRecord[],
+  proposalId: string,
+): IntegrationProposalRecord | undefined {
+  const proposal = findArtifactProposal(proposals, proposalId);
+  return proposal !== undefined && proposal.kind !== 'data_product' ? proposal : undefined;
+}
+
 /** The content address of every Proposal fact; a mismatch means tampering. */
 function hashOf(proposal: {
   workspace_id: string;
   source_id: string;
   binding_id: string;
-  base: ArtifactProposalRecord['base'];
+  base: IntegrationProposalRecord['base'];
   model: ProposalModelPin;
   evidence: ProposalEvidence;
   candidates: ProposalCandidates;
@@ -196,7 +209,7 @@ function requireBinding(
 
 /** The Artifact Version a Proposal was generated against, and whether it moved. */
 function baseOf(session: PlatformSession, sourceId: string): {
-  base: ArtifactProposalRecord['base'];
+  base: IntegrationProposalRecord['base'];
   version: IntegrationConfigurationVersion | undefined;
 } {
   const version = latestIntegrationVersion(
@@ -217,7 +230,7 @@ function assertFresh(
   session: PlatformSession,
   actorName: string,
   context: ActionContext,
-  proposal: ArtifactProposalRecord,
+  proposal: IntegrationProposalRecord,
 ): void {
   const current = baseOf(session, proposal.source_id).base;
   if (
@@ -239,14 +252,14 @@ function assertIntact(
   session: PlatformSession,
   actorName: string,
   context: ActionContext,
-  proposal: ArtifactProposalRecord,
+  proposal: IntegrationProposalRecord,
 ): void {
   if (proposal.proposal_hash !== hashOf(proposal)) {
     reject(session, actorName, context, 'PROPOSAL_TAMPERED', 'The Proposal record does not match its content address.');
   }
 }
 
-function statusOf(proposal: ArtifactProposalRecord): string {
+function statusOf(proposal: IntegrationProposalRecord): string {
   if (proposal.adoptions.length > 0) return 'adopted';
   if (proposal.publications.length > 0) return 'published';
   const decision = proposal.decisions[proposal.decisions.length - 1];
@@ -301,7 +314,7 @@ function driftOf(
   };
 }
 
-function rulesOf(proposal: ArtifactProposalRecord): IntegrationRules {
+function rulesOf(proposal: IntegrationProposalRecord): IntegrationRules {
   return {
     identity: proposal.candidates.integration_configuration.identity_fields,
     schema: proposal.candidates.schema.fields,
@@ -311,7 +324,7 @@ function rulesOf(proposal: ArtifactProposalRecord): IntegrationRules {
   };
 }
 
-function candidateOf(proposal: ArtifactProposalRecord): IntegrationConfigurationInput {
+function candidateOf(proposal: IntegrationProposalRecord): IntegrationConfigurationInput {
   return {
     identity: proposal.candidates.integration_configuration.identity_fields,
     schema: proposal.candidates.schema.fields,
@@ -395,7 +408,7 @@ export async function generateProposal(options: {
     evidence,
     candidates,
   };
-  const proposal: ArtifactProposalRecord = {
+  const proposal: IntegrationProposalRecord = {
     proposal_id: randomUUID(),
     workspace_id: source.workspace_id,
     source_id: source.source_id,
@@ -875,7 +888,7 @@ export function showProposal(options: {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'proposal_read', scope: 'workspace', target: options.proposalId };
   const actor = resolveActor(session, options.token, context);
-  const proposal = findArtifactProposal(session.state.artifact_proposals, options.proposalId);
+  const proposal = findIntegrationProposal(session.state.artifact_proposals, options.proposalId);
   if (!proposal) {
     reject(session, actorLabel(actor.user), context, 'PROPOSAL_NOT_FOUND', 'The requested Artifact Proposal does not exist.');
   }
@@ -891,9 +904,9 @@ function requireWritableProposal(
   actor: ReturnType<typeof resolveActor>,
   context: ActionContext,
   proposalId: string,
-): ArtifactProposalRecord {
+): IntegrationProposalRecord {
   const actorName = actorLabel(actor.user);
-  const proposal = findArtifactProposal(session.state.artifact_proposals, proposalId);
+  const proposal = findIntegrationProposal(session.state.artifact_proposals, proposalId);
   if (!proposal) {
     reject(session, actorName, context, 'PROPOSAL_NOT_FOUND', 'The requested Artifact Proposal does not exist.');
   }
@@ -903,7 +916,7 @@ function requireWritableProposal(
 }
 
 /** The lineage every decision, publication, and adoption restates. */
-function provenanceOf(proposal: ArtifactProposalRecord): ProposalProvenance {
+function provenanceOf(proposal: IntegrationProposalRecord): ProposalProvenance {
   const validation = proposal.validations[proposal.validations.length - 1];
   const preview = proposal.previews[proposal.previews.length - 1];
   return {
@@ -923,7 +936,7 @@ function provenanceOf(proposal: ArtifactProposalRecord): ProposalProvenance {
   };
 }
 
-function viewProposal(proposal: ArtifactProposalRecord): Record<string, unknown> {
+function viewProposal(proposal: IntegrationProposalRecord): Record<string, unknown> {
   return {
     proposal_id: proposal.proposal_id,
     status: statusOf(proposal),
