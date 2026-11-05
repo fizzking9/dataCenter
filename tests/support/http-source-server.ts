@@ -11,7 +11,7 @@
  * token, and every other path rejects a token the scenario says is expired or
  * rejected.
  */
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -45,7 +45,12 @@ interface Scenario {
   auth?: AuthScenario;
 }
 
-const scenario = JSON.parse(process.argv[2] ?? '{}') as Scenario;
+const argument = process.argv[2] ?? '{}';
+// The scenario may be passed inline or as the path of the file that holds it;
+// a frozen reference-workload snapshot exceeds what a command line admits.
+const scenario = JSON.parse(
+  argument.startsWith('{') ? argument : readFileSync(argument, 'utf8'),
+) as Scenario;
 let served = 0;
 let issuedIndex = 0;
 const uses = new Map<string, number>();

@@ -13,10 +13,12 @@ import { canonicalDigest } from './crypto.js';
 import { readJsonDocument } from './documents.js';
 import type { Fail } from './errors.js';
 import { memberReader, type GrantReader, type GrantScope } from './grants.js';
-import { workspaceRoleOf } from './platform.js';
+import { pinnedMetricDefinitions } from './metric-definition.js';
+import { workspaceRoleOf, type ContextEntry } from './platform.js';
 import { evaluateAggregate, orderGroups, type EvaluatedGroup, type MetricValue } from './product-aggregate.js';
 import { queryCacheKey, readCachedPage, writeCachedPage } from './product-cache.js';
 import { decodeCursor, encodeCursor } from './product-cursor.js';
+import { periodComplete, sameElapsedInterval } from './product-period.js';
 import { readQuery, readQueryTarget, type ParsedQuery, type QueryOperator, type QueryTarget, type Window } from './product-query-document.js';
 import { resolveRelease, type ResolvedRelease } from './product-release.js';
 import { orderSearchHits, searchRecords, suggestValues } from './product-search.js';
@@ -94,10 +96,12 @@ function windowView(
   time: DataProductTime,
   window: Window,
   coverage: { start: string; end: string } | null,
+  sameElapsed?: boolean,
 ): Record<string, unknown> {
   const uncovered = coverage === null
     || timeKey(coverage.start, time.precision)! > timeKey(window.start, time.precision)!
     || timeKey(coverage.end, time.precision)! < timeKey(window.end, time.precision)!;
+  const partial = uncovered || !periodComplete(time, window);
   return {
     field: time.field,
     precision: time.precision,
@@ -105,7 +109,11 @@ function windowView(
     start: window.start,
     end: window.end,
     coverage,
-    partial: uncovered,
+    partial,
+    ...(window.period === undefined
+      ? {}
+      : { period: window.period, complete: !partial }),
+    ...(sameElapsed === undefined ? {} : { same_elapsed_interval: sameElapsed }),
   };
 }
 
@@ -122,6 +130,31 @@ function numericOf(value: MetricValue): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+/** The direction a numeric change moved, in the vocabulary a comparison reports. */
+type ChangeDirection = 'up' | 'down' | 'flat';
+
+function changeDirection(change: number): ChangeDirection {
+  if (change > 0) return 'up';
+  if (change < 0) return 'down';
+  return 'flat';
+}
+
+/**
+ * Judges one numeric change against the favourable direction the approved
+ * Metric Definition states. A metric that binds no direction reports the
+ * change without inventing a judgement.
+ */
+function judge(change: number, favorable: ContextEntry['favorable_direction']): Record<string, unknown> {
+  const direction = changeDirection(change);
+  if (favorable === undefined) return { direction };
+  const judgment = direction === 'flat'
+    ? 'neutral'
+    : direction === favorable
+      ? 'favorable'
+      : 'adverse';
+  return { direction, judgment };
+}
+
 /**
  * Compares one metric against its comparison window: the change is always
  * numeric, and a zero or missing comparison value yields an explicit
@@ -131,6 +164,7 @@ function compareMetric(
   metric: DataProductMetric,
   base: MetricValue,
   compared: MetricValue,
+  favorable?: ContextEntry['favorable_direction'],
 ): Record<string, unknown> {
   if (metric.value_type === 'date' || metric.value_type === 'timestamp') {
     return { value: compared, change: null, change_percent: null, change_percent_reason: 'not_numeric' };
@@ -142,10 +176,11 @@ function compareMetric(
   }
   const change = baseNumber - comparedNumber;
   const rendered = metric.value_type === 'integer' ? Math.trunc(change) : change.toFixed(2);
+  const judged = favorable === undefined ? {} : judge(change, favorable);
   if (comparedNumber === 0) {
-    return { value: compared, change: rendered, change_percent: null, change_percent_reason: 'zero_base' };
+    return { value: compared, change: rendered, ...judged, change_percent: null, change_percent_reason: 'zero_base' };
   }
-  return { value: compared, change: rendered, change_percent: ((change / Math.abs(comparedNumber)) * 100).toFixed(2) };
+  return { value: compared, change: rendered, ...judged, change_percent: ((change / Math.abs(comparedNumber)) * 100).toFixed(2) };
 }
 
 interface MergedGroup extends EvaluatedGroup {
@@ -157,6 +192,7 @@ function mergeWindows(
   metrics: DataProductMetric[],
   base: EvaluatedGroup[],
   comparison: EvaluatedGroup[] | null,
+  directionOf: (metric: DataProductMetric) => ContextEntry['favorable_direction'],
 ): MergedGroup[] {
   const baseByKey = new Map(base.map((entry) => [JSON.stringify(entry.dimension_order), entry]));
   const comparedByKey = new Map((comparison ?? []).map((entry) => [JSON.stringify(entry.dimension_order), entry]));
@@ -174,7 +210,7 @@ function mergeWindows(
       order[metric.name] = baseEntry === undefined ? null : baseEntry.metric_order[metric.name]!;
       if (comparison !== null) {
         const comparedValue = comparedEntry === undefined ? absentValue(metric) : comparedEntry.metrics[metric.name]!;
-        compared[metric.name] = compareMetric(metric, baseValue, comparedValue);
+        compared[metric.name] = compareMetric(metric, baseValue, comparedValue, directionOf(metric));
       }
     }
     return {
@@ -188,13 +224,19 @@ function mergeWindows(
   });
 }
 
-function metricView(metric: DataProductMetric): Record<string, unknown> {
+function metricView(metric: DataProductMetric, definition: ContextEntry | undefined): Record<string, unknown> {
   return {
     name: metric.name,
     aggregation: metric.aggregation,
     value_type: metric.value_type,
     unit: metric.unit ?? null,
     currency: metric.currency ?? null,
+    ...(metric.definition === undefined
+      ? {}
+      : {
+        definition: metric.definition,
+        favorable_direction: definition?.favorable_direction ?? null,
+      }),
   };
 }
 
@@ -421,6 +463,11 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
     ?.versions.find((candidate) => candidate.version === datasetRelease.integration_configuration_version)
     ?.schema ?? [];
   const source = session.state.sources.find((candidate) => candidate.source_id === dataset.source_id);
+  // The approved Metric Definitions the Release pinned interpret its metrics;
+  // a metric that binds none reports its change without a judgement.
+  const definitions = pinnedMetricDefinitions(session, dataset.workspace_id, datasetRelease.pins);
+  const directionOf = (metric: DataProductMetric): ContextEntry['favorable_direction'] =>
+    metric.definition === undefined ? undefined : definitions.get(metric.definition)?.favorable_direction;
 
   const query = readQuery(request as Record<string, unknown>, contract, schema, fail);
   const scope = reader.requireScope(product, contract, fail);
@@ -647,7 +694,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
   const compared = query.comparison === undefined || contract.time === undefined
     ? null
     : evaluateAggregate(selectRecords(datasetRelease.records, contract, queryFilters, query.comparison), spec);
-  const merged = mergeWindows(metrics, base.groups, compared?.groups ?? null)
+  const merged = mergeWindows(metrics, base.groups, compared?.groups ?? null, directionOf)
     .filter((entry) => query.metricFilters.every(
       (filter) => matches(entry.metrics[filter.metric] ?? null, filter.op, filter.value),
     ));
@@ -678,7 +725,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
     ...identity,
     kind: 'aggregate',
     grouped_by: [...query.groupBy],
-    metrics: metrics.map(metricView),
+    metrics: metrics.map((metric) => metricView(metric, metric.definition === undefined ? undefined : definitions.get(metric.definition))),
     groups: returned.map((entry) => ({
       group: { ...entry.group },
       null_dimensions: [...entry.null_dimensions],
@@ -693,7 +740,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
           : {
             comparison: Object.fromEntries(metrics.map((metric) => [
               metric.name,
-              compareMetric(metric, base.totals[metric.name] ?? null, compared.totals[metric.name] ?? null),
+              compareMetric(metric, base.totals[metric.name] ?? null, compared.totals[metric.name] ?? null, directionOf(metric)),
             ])),
           }),
       }
@@ -716,7 +763,14 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
       : { window: windowView(contract.time, query.window, coverage) }),
     ...(query.comparison === undefined || contract.time === undefined
       ? { comparison_window: null }
-      : { comparison_window: windowView(contract.time, query.comparison, coverage) }),
+      : {
+        comparison_window: windowView(
+          contract.time,
+          query.comparison,
+          coverage,
+          query.window === undefined ? undefined : sameElapsedInterval(contract.time, query.window, query.comparison),
+        ),
+      }),
     provenance,
   });
 }

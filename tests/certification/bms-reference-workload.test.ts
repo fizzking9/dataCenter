@@ -13,6 +13,7 @@ import {
   bmsReplies,
   configureBmsWorkload,
   expectedIdentities,
+  recordsOnSweep,
   type ConfiguredSource,
   type ReferenceWorkload,
 } from '../support/reference-workload.js';
@@ -385,10 +386,10 @@ test('nine independently configured Sources acquire an hourly full sweep through
     assert.equal(result.plan?.status, 'complete');
     assert.equal(result.plan?.pages.length, 1, 'one export fragment completes this Source');
     assert.equal(result.plan?.pages[0]?.outcome, 'received');
-    assert.equal(result.plan?.pages[0]?.record_count, BMS_EXPECTED.sweeps[0]!.records_per_source);
+    assert.equal(result.plan?.pages[0]?.record_count, recordsOnSweep(0, index));
     assert.equal(result.raw_acquisition_count, 1);
     assert.equal(result.batch_raw_acquisition_count, 1, 'the complete Plan hands over exactly its fragments');
-    assert.equal(result.records, BMS_EXPECTED.sweeps[0]!.records_per_source);
+    assert.equal(result.records, recordsOnSweep(0, index));
     assert.equal(result.dataset_release, 1);
     assert.equal(result.error_code, null);
     rawAcquisitions += result.raw_acquisition_count;
@@ -401,7 +402,7 @@ test('nine independently configured Sources acquire an hourly full sweep through
     );
 
     const released = dataset(workload, source.sourceId);
-    assert.equal(released.record_count, BMS_EXPECTED.sweeps[0]!.records_per_source);
+    assert.equal(released.record_count, recordsOnSweep(0, index));
     assert.equal(released.record_rejection_count, 0);
     assert.deepEqual(
       released.records.map((record) => record.identity).sort(),
@@ -551,7 +552,7 @@ test('hourly scheduled sweeps keep start tolerance, publication freshness, and i
   for (const [index, result] of first.entries()) {
     assert.equal(result.raw_acquisition_count, 1, `${workload.sources[index]!.name} kept one export fragment`);
     assert.equal(result.batch_raw_acquisition_count, 1);
-    assert.equal(result.records, BMS_EXPECTED.sweeps[0]!.records_per_source);
+    assert.equal(result.records, recordsOnSweep(0, index));
     assert.equal(result.dataset_release, 1, `${workload.sources[index]!.name} published its first Release`);
     const released = dataset(workload, workload.sources[index]!.sourceId);
     assert.deepEqual(
@@ -593,7 +594,7 @@ test('hourly scheduled sweeps keep start tolerance, publication freshness, and i
     const released = dataset(workload, workload.sources[index]!.sourceId);
     assert.equal(result.raw_acquisition_count, 1, 'the overlapping export really was acquired again');
     assert.equal(result.dataset_release, 2, `${workload.sources[index]!.name} published one further Release`);
-    assert.equal(released.record_count, BMS_EXPECTED.sweeps[1]!.records_per_source);
+    assert.equal(released.record_count, recordsOnSweep(1, index));
     assert.deepEqual(released.records.map((record) => record.identity).sort(), expectedIdentities(BMS_SOURCES[index]!, 1));
     assert.equal(checkpoint(workload, workload.sources[index]!.sourceId)?.['watermark'], BMS_EXPECTED.sweeps[1]!.window.to);
   }
@@ -611,7 +612,7 @@ test('hourly scheduled sweeps keep start tolerance, publication freshness, and i
     assert.equal(result.dataset_release, 2, 'but it reconciled to the Release already governed');
     const released = dataset(workload, workload.sources[index]!.sourceId);
     assert.equal(released.dataset_release, 2);
-    assert.equal(released.record_count, BMS_EXPECTED.sweeps[2]!.records_per_source);
+    assert.equal(released.record_count, recordsOnSweep(2, index));
     assert.deepEqual(
       released.records.map((record) => record.identity).sort(),
       expectedIdentities(BMS_SOURCES[index]!, 2),

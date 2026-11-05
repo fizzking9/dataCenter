@@ -10,6 +10,16 @@
  * the console never learn a business case.
  */
 import assert from 'node:assert/strict';
+import {
+  BMS_DICTIONARIES,
+  type BusinessDataset,
+} from '../fixtures/reference-workload/bms/data-dictionary.js';
+import {
+  COMPLAINT_EXPORTS,
+  REFUND_EXPORTS,
+  SERVICE_ORDER_EXPORTS,
+  type BusinessRow,
+} from '../fixtures/reference-workload/bms/exports.js';
 import type { SourceReply } from './http-source.js';
 import { pageBody } from './http-source.js';
 import {
@@ -69,6 +79,15 @@ function columns(entries: Array<[string, string, ReferenceFieldType]>): Referenc
   return entries.map(([source, field, type]) => ({ source, field, type }));
 }
 
+/** The canonical mapping the frozen data dictionary declares for one business dataset. */
+function dictionaryColumns(dataset: BusinessDataset): ReferenceColumn[] {
+  return BMS_DICTIONARIES[dataset].map((entry) => ({
+    source: entry.column,
+    field: entry.field,
+    type: entry.type,
+  }));
+}
+
 /**
  * The business export system: one physical endpoint per logical dataset, shared
  * pacing, and an hourly sweep. None of this is known to the platform.
@@ -104,29 +123,9 @@ export const BMS_WINDOW = {
   end_inclusive: false,
 };
 
-const serviceOrders = hourlyExports(
-  [
-    { order_no: 'SO-2026-0001', updated_at: '2026-10-31T23:10:00.000Z', status_text: '已受理', handled_count: 2 },
-    { order_no: 'SO-2026-0002', updated_at: '2026-11-01T00:20:00.000Z', status_text: '维修中', handled_count: 1 },
-  ],
-  [
-    { order_no: 'SO-2026-0001', updated_at: '2026-11-01T00:40:00.000Z', status_text: '已受理', handled_count: 3 },
-    { order_no: 'SO-2026-0002', updated_at: '2026-11-01T00:20:00.000Z', status_text: '维修中', handled_count: 1 },
-    { order_no: 'SO-2026-0003', updated_at: '2026-11-01T01:15:00.000Z', status_text: '已完工', handled_count: 4 },
-  ],
-);
+const serviceOrders = SERVICE_ORDER_EXPORTS as ExportRow[][];
 
-const refunds = hourlyExports(
-  [
-    { refund_no: 'RF-2026-0101', updated_at: '2026-10-31T23:05:00.000Z', refund_status: '待审批', refund_amount: 120.5 },
-    { refund_no: 'RF-2026-0102', updated_at: '2026-11-01T00:05:00.000Z', refund_status: '已退款', refund_amount: 80 },
-  ],
-  [
-    { refund_no: 'RF-2026-0101', updated_at: '2026-11-01T01:05:00.000Z', refund_status: '已退款', refund_amount: 120.5 },
-    { refund_no: 'RF-2026-0102', updated_at: '2026-11-01T00:05:00.000Z', refund_status: '已退款', refund_amount: 80 },
-    { refund_no: 'RF-2026-0103', updated_at: '2026-11-01T01:30:00.000Z', refund_status: '待审批', refund_amount: 260 },
-  ],
-);
+const refunds = REFUND_EXPORTS as ExportRow[][];
 
 const sparePartIssues = hourlyExports(
   [
@@ -164,17 +163,7 @@ const visits = hourlyExports(
   ],
 );
 
-const complaints = hourlyExports(
-  [
-    { complaint_no: 'CP-2026-4401', updated_at: '2026-10-31T23:15:00.000Z', channel_name: '电话', waiting_days: 1 },
-    { complaint_no: 'CP-2026-4402', updated_at: '2026-11-01T00:15:00.000Z', channel_name: '网点', waiting_days: 2 },
-  ],
-  [
-    { complaint_no: 'CP-2026-4401', updated_at: '2026-10-31T23:15:00.000Z', channel_name: '电话', waiting_days: 1 },
-    { complaint_no: 'CP-2026-4402', updated_at: '2026-11-01T00:15:00.000Z', channel_name: '网点', waiting_days: 2 },
-    { complaint_no: 'CP-2026-4403', updated_at: '2026-11-01T01:25:00.000Z', channel_name: '小程序', waiting_days: 0 },
-  ],
-);
+const complaints = COMPLAINT_EXPORTS as ExportRow[][];
 
 const branchStock = hourlyExports(
   [
@@ -222,24 +211,14 @@ export const BMS_SOURCES: ReferenceSource[] = [
     name: '服务工单',
     path: '/exports/service-orders',
     identity: 'order_no',
-    columns: columns([
-      ['order_no', 'order_no', 'string'],
-      ['updated_at', 'updated_at', 'timestamp'],
-      ['status_text', 'service_status', 'string'],
-      ['handled_count', 'handled_count', 'integer'],
-    ]),
+    columns: dictionaryColumns('service_orders'),
     exports: serviceOrders,
   },
   {
     name: '退款单',
     path: '/exports/refunds',
     identity: 'refund_no',
-    columns: columns([
-      ['refund_no', 'refund_no', 'string'],
-      ['updated_at', 'updated_at', 'timestamp'],
-      ['refund_status', 'refund_status', 'string'],
-      ['refund_amount', 'refund_amount', 'number'],
-    ]),
+    columns: dictionaryColumns('refunds'),
     exports: refunds,
   },
   {
@@ -281,13 +260,8 @@ export const BMS_SOURCES: ReferenceSource[] = [
   {
     name: '投诉工单',
     path: '/exports/complaints',
-    identity: 'complaint_no',
-    columns: columns([
-      ['complaint_no', 'complaint_no', 'string'],
-      ['updated_at', 'updated_at', 'timestamp'],
-      ['channel_name', 'channel_name', 'string'],
-      ['waiting_days', 'waiting_days', 'integer'],
-    ]),
+    identity: 'report_no',
+    columns: dictionaryColumns('complaints'),
     exports: complaints,
   },
   {
@@ -332,6 +306,11 @@ export const BMS_SOURCES: ReferenceSource[] = [
  * The frozen expected results of three hourly sweeps of the nine Sources. The
  * counts are written down rather than recomputed, so a fixture that quietly
  * changed would fail the oracle instead of agreeing with itself.
+ *
+ * Three of the Sources carry the two representative complete weeks the business
+ * Data Products are certified over, so their exports are larger than the six
+ * operational Sources beside them; `record_counts` states each Source's own
+ * count in BMS_SOURCES order.
  */
 export const BMS_EXPECTED = {
   sources: 9,
@@ -343,20 +322,20 @@ export const BMS_EXPECTED = {
     {
       window: { from: '2026-10-31T23:00:00.000Z', to: '2026-11-01T01:00:00.000Z' },
       raw_acquisitions: 9,
-      records_per_source: 2,
-      records: 18,
+      record_counts: [31, 57, 2, 2, 2, 45, 2, 2, 2],
+      records: 145,
     },
     {
       window: { from: '2026-11-01T00:00:00.000Z', to: '2026-11-01T02:00:00.000Z' },
       raw_acquisitions: 9,
-      records_per_source: 3,
-      records: 27,
+      record_counts: [33, 61, 3, 3, 3, 48, 3, 3, 3],
+      records: 160,
     },
     {
       window: { from: '2026-11-01T01:00:00.000Z', to: '2026-11-01T03:00:00.000Z' },
       raw_acquisitions: 9,
-      records_per_source: 3,
-      records: 27,
+      record_counts: [33, 61, 3, 3, 3, 48, 3, 3, 3],
+      records: 160,
       new_releases: 0,
     },
   ],
@@ -367,6 +346,13 @@ export function identityOf(source: ReferenceSource, row: ExportRow): string {
   const column = source.columns.find((candidate) => candidate.field === source.identity);
   assert.ok(column !== undefined, `${source.name} maps its business identifier to a canonical field`);
   return String(row[column.source]);
+}
+
+/** How many records one Source's export carried on one sweep. */
+export function recordsOnSweep(sweep: number, sourceIndex: number): number {
+  const counts = BMS_EXPECTED.sweeps[sweep]?.record_counts;
+  assert.ok(counts !== undefined && sourceIndex < counts.length, 'the sweep froze this Source\'s count');
+  return counts[sourceIndex]!;
 }
 
 /** The identities a Release must govern after one sweep, taken from the frozen export. */
@@ -425,6 +411,16 @@ interface ConnectionOptions {
   connection?: { connectionId: string; connectionVersion: number };
   /** Overrides the Connection Version's schedule, for scheduler certification. */
   schedule?: Record<string, unknown>;
+}
+
+interface WorkloadOptions extends ConnectionOptions {
+  window?: Record<string, unknown>;
+  /**
+   * Workspace Business Context published before any Integration Configuration
+   * is pinned, so the Releases the Source produces carry the exact approved
+   * Metric Definitions the business questions read.
+   */
+  context?: unknown[];
 }
 
 function publishConnection(
@@ -539,10 +535,18 @@ function configureSource(
  */
 export function configureBmsWorkload(
   source: { url: string },
-  options: ConnectionOptions & { window?: Record<string, unknown> } = {},
+  options: WorkloadOptions = {},
 ): ReferenceWorkload {
   const workspace = workspaceFixture();
   const { fixture, workspaceId, workspaceAdministratorToken: token } = workspace;
+  if (options.context !== undefined) {
+    const published = command(
+      fixture,
+      ['context', 'publish-workspace', '--workspace', workspaceId, '--entries', jsonFile(fixture, 'workspace-context', options.context)],
+      { token },
+    );
+    assert.equal(published.status, 0, published.stderr);
+  }
   const connection = publishConnection(fixture, workspaceId, token, source.url, BMS_CONNECTION, options);
   const sources = BMS_SOURCES.map((entry) => configureSource(
     fixture,
@@ -561,4 +565,59 @@ export function configureBmsWorkload(
     connectionVersion: connection.connectionVersion,
     sources,
   };
+}
+
+/** One Source of a configured Workload, found by the name its Workspace publishes. */
+export function bmsSource(workload: ReferenceWorkload, name: string): ConfiguredSource {
+  const source = workload.sources.find((candidate) => candidate.name === name);
+  assert.ok(source !== undefined, `${name} is one of the configured Sources`);
+  return source;
+}
+
+/**
+ * Works one Source at the earliest instant its Connection admits it: never
+ * before the previous export on that Connection has been closed for the whole
+ * minimum interval. Nothing sleeps; the worker clock is stated, and every call
+ * is a fresh process, so durable pacing is what admits it.
+ */
+export function workWhenConnectionIsFree(
+  workload: ReferenceWorkload,
+  source: ConfiguredSource,
+  notEarlier: number,
+): Record<string, unknown> {
+  const state = command(workload.fixture, ['connection', 'pacing', '--connection', workload.connectionId], { token: workload.token });
+  assert.equal(state.status, 0, state.stderr);
+  const lastFinished = state.output['last_finished_at'];
+  const free = typeof lastFinished === 'string'
+    ? Date.parse(lastFinished) + BMS_EXPECTED.interval_seconds * 1_000
+    : notEarlier;
+  const result = command(
+    workload.fixture,
+    ['acquisition', 'work', '--source', source.sourceId, '--at', new Date(Math.max(notEarlier, free)).toISOString()],
+    { token: workload.token },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const output = result.output as Record<string, unknown>;
+  assert.equal(output['status'], 'complete', `${source.name}: ${JSON.stringify(output)}`);
+  return output;
+}
+
+/**
+ * One manual sweep over every Source of the physical export system, drained
+ * through the Connection's own durable pacing. The clock starts at the stated
+ * instant, so the sweeps of one Certification never depend on wall time.
+ */
+export function sweepBmsWorkload(
+  workload: ReferenceWorkload,
+  fromAt = Date.now(),
+): Array<Record<string, unknown>> {
+  let notEarlier = fromAt;
+  return workload.sources.map((source) => {
+    const enqueued = command(workload.fixture, ['acquisition', 'enqueue', '--source', source.sourceId], { token: workload.token });
+    assert.equal(enqueued.status, 0, enqueued.stderr);
+    const result = workWhenConnectionIsFree(workload, source, notEarlier);
+    const plan = result['plan'] as Record<string, unknown> | null;
+    notEarlier = Date.parse(String(plan?.['completed_at'])) + BMS_EXPECTED.interval_seconds * 1_000;
+    return result;
+  });
 }

@@ -110,6 +110,9 @@ interface MetricDefinition {
   value: string;
   unit?: string;
   description?: string;
+  aggregation?: ContextEntry['aggregation'];
+  value_type?: ContextEntry['value_type'];
+  favorable_direction?: ContextEntry['favorable_direction'];
 }
 
 /** One authorised semantic entry the generator may read, beyond the Dataset Schema. */
@@ -146,6 +149,16 @@ function semanticOf(entry: ContextEntry): SemanticEntry {
   };
 }
 
+/** A Metric Definition also carries the formula and favourable direction it was approved with. */
+function metricDefinitionOf(entry: ContextEntry): MetricDefinition {
+  return {
+    ...semanticOf(entry),
+    ...(entry.aggregation === undefined ? {} : { aggregation: entry.aggregation }),
+    ...(entry.value_type === undefined ? {} : { value_type: entry.value_type }),
+    ...(entry.favorable_direction === undefined ? {} : { favorable_direction: entry.favorable_direction }),
+  };
+}
+
 function contextOf(session: PlatformSession, workspaceId: string): AuthorizedContext {
   const common = latestVersion(findContextArtifact(session.state, DEPLOYMENT_CONTEXT_ARTIFACT));
   const workspace = latestVersion(findContextArtifact(session.state, workspaceContextArtifact(workspaceId)));
@@ -156,7 +169,7 @@ function contextOf(session: PlatformSession, workspaceId: string): AuthorizedCon
     workspaceVersion: workspace?.version ?? 0,
     workspaceHash: workspace?.content_hash ?? '',
     entries,
-    metricDefinitions: entries.filter((entry) => entry.kind === 'metric').map(semanticOf),
+    metricDefinitions: entries.filter((entry) => entry.kind === 'metric').map(metricDefinitionOf),
     dimensions: entries.filter((entry) => entry.kind === 'dimension').map(semanticOf),
     definitions: entries.filter((entry) => entry.kind === 'definition').map(semanticOf),
     contentHash: digest({ common: common?.content_hash ?? '', workspace: workspace?.content_hash ?? '' }),

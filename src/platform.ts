@@ -23,6 +23,8 @@ import type {
   ScraperTaskArtifact,
   SourceScraperServiceRecord,
   WorkspaceModelBindingRecord,
+  MetricAggregation,
+  MetricValueType,
 } from './catalog.js';
 import type { MfaRecord } from './enrollment.js';
 import { readJsonFile, writeJsonFile } from './state.js';
@@ -144,6 +146,11 @@ export interface ContextEntry {
   unit?: string;
   description?: string;
   references?: string[];
+  /** Where a metric improves when it rises, falls, or neither; approved with the entry. */
+  favorable_direction?: 'up' | 'down' | 'neutral';
+  /** The formula a metric is approved to use, so a Contract can bind it. */
+  aggregation?: MetricAggregation;
+  value_type?: MetricValueType;
 }
 
 export interface ContextVersion {

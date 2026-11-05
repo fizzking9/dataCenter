@@ -21,6 +21,7 @@ import {
 } from './catalog.js';
 import { canonicalDigest } from './crypto.js';
 import type { Fail } from './errors.js';
+import { requireGovernedContract, pinnedMetricDefinitions } from './metric-definition.js';
 import { workspaceRoleOf } from './platform.js';
 import { readContract } from './product-contract.js';
 import { nextContractVersion } from './product-version.js';
@@ -67,6 +68,7 @@ export function publishContractVersion(options: {
     reject(session, actorName, scoped, 'DATA_PRODUCT_NAME_INVALID', 'A Data Product name must contain 2 to 128 characters.');
   }
   requireServeableGrain(session, actorName, scoped, contract, datasetRelease);
+  requireGovernedContract(session, actorName, scoped, contract, source.workspace_id, datasetRelease.pins);
 
   let product = session.state.data_products.find(
     (candidate) => candidate.workspace_id === source.workspace_id && candidate.name.toLowerCase() === name.toLowerCase(),
@@ -271,6 +273,18 @@ export function schemaOf(
   return version.schema;
 }
 
+/** The Business Context versions one published Release pinned through its Dataset Release. */
+function datasetPins(
+  session: PlatformSession,
+  datasetId: string,
+  datasetReleaseNumber: number,
+): DatasetReleaseRecord['pins'] {
+  return session.state.datasets
+    .find((candidate) => candidate.dataset_id === datasetId)
+    ?.releases.find((candidate) => candidate.release === datasetReleaseNumber)
+    ?.pins ?? { common_business_context_version: 0, workspace_business_context_version: 0 };
+}
+
 /**
  * The Contract as one reader may see it. A Grant narrows the columns, so the
  * fields, dimensions, metrics, and filters it hides are absent rather than
@@ -292,6 +306,7 @@ export function contractView(contract: DataProductContract, scope: GrantScope): 
         value_type: metric.value_type,
         unit: metric.unit ?? null,
         currency: metric.currency ?? null,
+        ...(metric.definition === undefined ? {} : { definition: metric.definition }),
         dimensions: metric.dimensions === undefined
           ? [...dimensions]
           : metric.dimensions.filter((dimension) => scope.columns.includes(dimension)),
@@ -371,6 +386,11 @@ export function listDataProducts(options: {
       // refusing the whole Workspace listing.
       const scope = readableGrantScope(session, actor.user.user_id, role, product, version.contract);
       if (scope === null) return [];
+      const definitions = pinnedMetricDefinitions(
+        session,
+        product.workspace_id,
+        datasetPins(session, release.dataset_id, release.dataset_release),
+      );
       return [{
         data_product_id: product.data_product_id,
         name: product.name,
@@ -386,6 +406,12 @@ export function listDataProducts(options: {
             value_type: metric.value_type,
             unit: metric.unit ?? null,
             currency: metric.currency ?? null,
+            ...(metric.definition === undefined
+              ? {}
+              : {
+                definition: metric.definition,
+                favorable_direction: definitions.get(metric.definition)?.favorable_direction ?? null,
+              }),
             dimensions: metric.dimensions === undefined
               ? version.contract.dimensions.filter((dimension) => scope.columns.includes(dimension))
               : metric.dimensions.filter((dimension) => scope.columns.includes(dimension)),

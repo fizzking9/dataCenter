@@ -499,6 +499,12 @@ export interface DataProductMetric {
   value_type: MetricValueType;
   unit?: string;
   currency?: string;
+  /**
+   * The Business Context Metric Definition this metric binds. When stated, the
+   * approved definition governs the metric's formula, unit, and value type, and
+   * supplies its favourable direction.
+   */
+  definition?: string;
   /** The dimensions this metric may be grouped by; absent permits every declared dimension. */
   dimensions?: string[];
 }
@@ -508,7 +514,15 @@ export interface DataProductTime {
   field: string;
   precision: 'date' | 'timestamp';
   time_zone: string;
+  /**
+   * The Business Context definition the business time zone is approved by.
+   * When stated, the Contract's zone must be exactly the approved value.
+   */
+  definition?: string;
 }
+
+/** The natural period a comparison window names, so a partial period is labelled. */
+export type DataProductPeriod = 'day' | 'week';
 
 /** How a Document Contract ranks the documents one search matches. */
 export interface DataProductSearchRanking {

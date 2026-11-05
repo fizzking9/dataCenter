@@ -3,12 +3,14 @@ import {
   ISO_TIMESTAMP,
   type DataProductContract,
   type DataProductMetric,
+  type DataProductPeriod,
   type DataProductSearch,
   type DataProductTime,
   type DatasetSchemaField,
 } from './catalog.js';
 import { isRecord } from './documents.js';
 import type { Fail } from './errors.js';
+import { validatePeriodWindow } from './product-period.js';
 import { readSearchTerms } from './product-search.js';
 
 export type QueryOperator =
@@ -64,6 +66,8 @@ export interface MetricFilter {
 export interface Window {
   start: string;
   end: string;
+  /** The natural period the window is a slice of, when the query declares one. */
+  period?: DataProductPeriod;
 }
 
 export interface SortClause {
@@ -201,7 +205,14 @@ function readWindow(raw: unknown, time: DataProductTime | undefined, label: stri
   if (!(startKey <= endKey)) {
     fail(REFUSED, `A ${label} must start no later than it ends.`);
   }
-  return { start, end };
+  const period = raw['period'];
+  if (period !== undefined) {
+    if (period !== 'day' && period !== 'week') {
+      fail(MALFORMED, `A ${label} period must be day or week.`);
+    }
+    validatePeriodWindow(fail, period, time, start, end);
+  }
+  return { start, end, ...(period === undefined ? {} : { period }) };
 }
 
 function readLimit(raw: unknown, contract: DataProductContract, fail: Fail): number {
