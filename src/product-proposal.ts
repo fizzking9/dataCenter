@@ -377,12 +377,31 @@ function readRequirement(
   path: string,
 ): RequirementDocument {
   const fail: Fail = (code, message, nextStep) => reject(session, actorName, context, code, message, nextStep);
-  const parsed: unknown = readJsonDocument(
-    path,
-    fail,
-    'PRODUCT_PROPOSAL_REQUIREMENT_UNREADABLE',
-    'The Data Product requirement must be a readable JSON document.',
+  return readRequirementDocument(
+    session,
+    actorName,
+    context,
+    readJsonDocument(
+      path,
+      fail,
+      'PRODUCT_PROPOSAL_REQUIREMENT_UNREADABLE',
+      'The Data Product requirement must be a readable JSON document.',
+    ),
   );
+}
+
+/**
+ * Reads one requirement document the CLI loaded or the browser already stated.
+ * Both surfaces are validated here, so the browser never decides what a
+ * requirement means or whether it is complete.
+ */
+function readRequirementDocument(
+  session: PlatformSession,
+  actorName: string,
+  context: ActionContext,
+  parsed: unknown,
+): RequirementDocument {
+  const fail: Fail = (code, message, nextStep) => reject(session, actorName, context, code, message, nextStep);
   if (!isRecord(parsed)) {
     fail('PRODUCT_PROPOSAL_REQUIREMENT_INVALID', 'A Data Product requirement must be a JSON object.');
   }
@@ -526,7 +545,10 @@ export async function generateProductProposal(options: {
   token: string;
   sourceId: string;
   bindingId: string;
-  requirementPath: string;
+  /** A requirement document on disk, which the CLI reads. */
+  requirementPath?: string;
+  /** A requirement the browser states; validated identically. */
+  requirement?: unknown;
 }): Promise<Record<string, unknown>> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'data_product_proposal_generation', scope: 'workspace', target: options.sourceId };
@@ -539,7 +561,9 @@ export async function generateProductProposal(options: {
   const bound = requireBinding(session, actorName, scoped, options.bindingId, source.workspace_id);
   const profile = findModelProfile(session.state.model_profiles, bound.pin.model_profile_id)!;
   const pinned = pinnedForBinding(session, profile, bound.version, bound.binding);
-  const document = readRequirement(session, actorName, scoped, options.requirementPath);
+  const document = options.requirement !== undefined
+    ? readRequirementDocument(session, actorName, scoped, options.requirement)
+    : readRequirement(session, actorName, scoped, options.requirementPath ?? '');
   const surface = requireDataset(session, actorName, scoped, source.source_id);
   if (document.datasetId !== null && document.datasetId !== surface.dataset.dataset_id) {
     reject(
@@ -565,8 +589,8 @@ export async function generateProductProposal(options: {
       actorName,
       scoped,
       'PRODUCT_PROPOSAL_CLARIFICATION_REQUIRED',
-      `The requirement is too broad to generate a governed Data Product yet: ${question}`,
-      'Record the answer in the requirement document and generate the Proposal again.',
+      question,
+      '在需求中补齐中文澄清问答后重新生成；未经澄清的宽泛需求不能生成受治理的数据产品提案。',
     );
   }
 
@@ -671,6 +695,66 @@ export async function generateProductProposal(options: {
   });
   session.save();
   return viewProductProposal(proposal);
+}
+
+/**
+ * The exact inputs a Proposal named, and whether they are still current. A
+ * Proposal whose Dataset Release, Business Context, or Data Product Version
+ * moved can no longer be validated, approved, or published.
+ */
+function freshnessOfProduct(
+  session: PlatformSession,
+  proposal: DataProductProposalRecord,
+): { fresh: boolean; current: DataProductProposalBase | null } {
+  const dataset = findDataset(session.state.datasets, proposal.source_id);
+  const release = latestDatasetRelease(dataset);
+  if (!dataset || !release) return { fresh: false, current: null };
+  const product = proposal.base.data_product_id === null
+    ? undefined
+    : session.state.data_products.find((candidate) => candidate.data_product_id === proposal.base.data_product_id);
+  const current = baseOf(
+    { dataset, release, schema: [], identity: [] },
+    contextOf(session, proposal.workspace_id),
+    product,
+  );
+  return { fresh: sameBase(current, proposal.base), current };
+}
+
+/**
+ * Lists the Data Product Proposals of one administered Source together with
+ * whether each still names the current inputs. The browser renders this answer;
+ * it makes no freshness or authorization decision of its own.
+ */
+export function listProductProposals(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  sourceId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'data_product_proposal_listing', scope: 'workspace', target: options.sourceId };
+  const actor = resolveActor(session, options.token, context);
+  const source = requireAdministeredSource(session, actor, context, options.sourceId);
+  const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
+  const actorName = actorLabel(actor.user);
+  const proposals = session.state.artifact_proposals
+    .filter(
+      (proposal): proposal is DataProductProposalRecord =>
+        proposal.kind === 'data_product'
+        && proposal.source_id === source.source_id
+        && proposal.workspace_id === source.workspace_id,
+    )
+    .map((proposal) => {
+      assertIntact(session, actorName, scoped, proposal);
+      return {
+        created_at: proposal.created_at,
+        view: { ...viewProductProposal(proposal), freshness: freshnessOfProduct(session, proposal) },
+      };
+    })
+    .sort((left, right) => right.created_at.localeCompare(left.created_at))
+    .map((entry) => entry.view);
+  session.audit({ ...scoped, actor: actorName, outcome: 'succeeded', detail: { proposals: proposals.length } });
+  return { source_id: source.source_id, proposals };
 }
 
 /**
@@ -1184,6 +1268,7 @@ export function publishProductProposal(options: {
     data_product_id: publication.product.data_product_id,
     data_product_version: publication.version.version,
     data_product_release: publication.release.release,
+    dataset_release: publication.release.dataset_release,
     contract_hash: publication.version.contract_hash,
     model: proposal.model,
     evidence_hash: proposal.proposal_hash,
@@ -1355,8 +1440,10 @@ function viewProductProposal(proposal: DataProductProposalRecord): Record<string
       published_at: publication.published_at,
       published_by: publication.published_by,
       data_product_id: publication.data_product_id,
+      api_path: apiPath(proposal.workspace_id, publication.data_product_id),
       data_product_version: publication.data_product_version,
       data_product_release: publication.data_product_release,
+      dataset_release: publication.dataset_release,
       contract_hash: publication.contract_hash,
       evidence_hash: publication.evidence_hash,
       provenance: { ...publication.provenance },

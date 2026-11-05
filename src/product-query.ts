@@ -34,6 +34,7 @@ import {
 import { resolveRelease, type ResolvedRelease } from './product-release.js';
 import { orderSearchHits, searchRecords, suggestValues } from './product-search.js';
 import { requireReadableProduct } from './products.js';
+import { isPastRetention, purgeRevoked, retentionExpiredMessage } from './retention.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
 /** Applies a typed operator the way the field's own type is compared. */
@@ -310,6 +311,13 @@ function linkedDatasets(
     const dataset = session.state.datasets.find((candidate) => candidate.dataset_id === binding.dataset_id);
     const datasetRelease = dataset?.releases.find((candidate) => candidate.release === binding.dataset_release);
     if (!dataset || !datasetRelease) {
+      if (purgeRevoked(session.state, 'dataset_release', `${binding.dataset_id}#${binding.dataset_release}`)) {
+        fail(
+          'RETENTION_EXPIRED',
+          `The Dataset Release the ${relationship.name} relationship pins has expired under the retention policy and was purged.`,
+          'Query the current Release instead.',
+        );
+      }
       fail(
         'DATASET_RELEASE_NOT_FOUND',
         `The Dataset Release the ${relationship.name} relationship pins is not available.`,
@@ -628,12 +636,55 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
   if (product.versions.length === 0 || product.releases.length === 0) {
     fail('DATA_PRODUCT_NOT_PUBLISHED', 'The Data Product has no Publication to query.');
   }
+  // A purged historical Release is explicitly expired even though its record is
+  // gone; resolution must not answer with "not found" for content that existed.
+  if (target.release !== undefined
+    && purgeRevoked(session.state, 'data_product_release', `${product.data_product_id}#${target.release}`)) {
+    fail(
+      'RETENTION_EXPIRED',
+      `Data Product Release ${target.release} was purged under the retention policy.`,
+      'Query the current Release instead.',
+    );
+  }
   const { version, release, major } = resolveRelease(product, target, fail);
+  const now = new Date();
+  // Release history ages out, but a Release still serving its major line never
+  // expires merely because it is old. A purged Release stays explicitly expired.
+  const current = product.lines.some((line) => line.current_release === release.release);
+  if (purgeRevoked(session.state, 'data_product_release', `${product.data_product_id}#${release.release}`)) {
+    fail(
+      'RETENTION_EXPIRED',
+      `Data Product Release ${release.release} was purged under the retention policy.`,
+      'Query the current Release instead.',
+    );
+  }
+  if (!current
+    && isPastRetention(session.state, product.workspace_id, 'dataset_release_history', release.created_at, now)) {
+    fail(
+      'RETENTION_EXPIRED',
+      retentionExpiredMessage(
+        session.state,
+        product.workspace_id,
+        'dataset_release_history',
+        release.created_at,
+        now,
+        `Data Product Release ${release.release}`,
+      ),
+      'Query the current Release or a Release retained under the retention policy.',
+    );
+  }
   const dataset = session.state.datasets.find((candidate) => candidate.dataset_id === release.dataset_id);
   const datasetRelease: DatasetReleaseRecord | undefined = dataset?.releases.find(
     (candidate) => candidate.release === release.dataset_release,
   );
   if (!dataset || !datasetRelease) {
+    if (purgeRevoked(session.state, 'dataset_release', `${release.dataset_id}#${release.dataset_release}`)) {
+      fail(
+        'RETENTION_EXPIRED',
+        `The Dataset Release this Data Product Release pins was purged under the retention policy.`,
+        'Query the current Release instead.',
+      );
+    }
     fail('DATASET_RELEASE_NOT_FOUND', 'The Dataset Release this Data Product pins is not available.');
   }
   const contract = version.contract;

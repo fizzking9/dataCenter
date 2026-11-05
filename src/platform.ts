@@ -30,6 +30,11 @@ import type {
   WorkspaceModelBindingRecord,
   MetricAggregation,
   MetricValueType,
+  PurgeJobRecord,
+  PurgeLedgerEntry,
+  RetentionHoldRecord,
+  RetentionPolicyArtifact,
+  WorkspaceRetentionOverrideArtifact,
 } from './catalog.js';
 import type { MfaRecord } from './enrollment.js';
 import { readJsonFile, writeJsonFile } from './state.js';
@@ -39,7 +44,7 @@ export type DeploymentRole = 'Deployment Administrator';
 export type WorkspaceRole = 'Workspace Administrator' | 'Consumer';
 
 export const DEPLOYMENT_CONTEXT_ARTIFACT = 'deployment-business-context';
-export const CURRENT_SCHEMA_VERSION = 7;
+export const CURRENT_SCHEMA_VERSION = 8;
 export const USERNAME_PATTERN = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,189}$/;
 
 export interface UserRecord {
@@ -233,6 +238,11 @@ export interface PlatformState {
   reports: ReportRecord[];
   report_candidates: ReportCandidateRecord[];
   report_schedules: ReportScheduleRecord[];
+  retention_policies: RetentionPolicyArtifact[];
+  retention_overrides: WorkspaceRetentionOverrideArtifact[];
+  retention_holds: RetentionHoldRecord[];
+  purge_jobs: PurgeJobRecord[];
+  purge_ledger: PurgeLedgerEntry[];
 }
 
 /** Every human identity is stated as one account identifier of the form name@domain. */
@@ -295,6 +305,11 @@ export function readPlatform(root: string): PlatformState {
         reports: [],
         report_candidates: [],
         report_schedules: [],
+        retention_policies: [],
+        retention_overrides: [],
+        retention_holds: [],
+        purge_jobs: [],
+        purge_ledger: [],
       };
   // A Deployment installed under an earlier schema keeps working: the added
   // Collections start empty rather than failing the read closed.
@@ -342,6 +357,14 @@ export function readPlatform(root: string): PlatformState {
   // candidates and no schedules; both Collections start empty.
   state.report_candidates ??= [];
   state.report_schedules ??= [];
+  // A Deployment written before retention enforcement simply has no policies,
+  // overrides, Holds, or Purge history: every class reads under the settled
+  // defaults, and nothing has ever been purged.
+  state.retention_policies ??= [];
+  state.retention_overrides ??= [];
+  state.retention_holds ??= [];
+  state.purge_jobs ??= [];
+  state.purge_ledger ??= [];
   // A Report or Template Version recorded before Withdrawal existed was never
   // withdrawn, so it keeps serving exactly as it did.
   for (const template of state.report_templates) {

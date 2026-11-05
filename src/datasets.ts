@@ -17,6 +17,7 @@ import {
   type DatasetReleaseRecord,
   type DatasetSchemaField,
   type DocumentParseLimits,
+  type IntegrationBatchRecord,
   type IntegrationConfigurationVersion,
   type ProposalTransformation,
   type RawAcquisitionRecord,
@@ -28,19 +29,16 @@ import { canonicalDigest } from './crypto.js';
 import { parseDocumentBundleIsolated } from './document-isolate.js';
 import { isRecord, valueAtPath } from './documents.js';
 import { openPlatform, type PlatformSession } from './session.js';
+import { isPastRetention, purgeRevoked, retentionExpiredMessage } from './retention.js';
 import { requireAdministeredSource } from './sources.js';
-
-/** One Raw Acquisition together with the Integration Batch that handed it over. */
-interface BatchFragment {
-  batch_id: string;
-  raw: RawAcquisitionRecord;
-}
 
 interface IntegrationOutcome {
   records: DatasetRecordRow[];
   rejections: RecordRejection[];
   /** What each Raw Acquisition contributed, so a guided upload can state it. */
   acquisition_outcomes: Array<{ raw_id: string; accepted: number; rejected: number }>;
+  /** The earliest acquisition instant among the fragments this run re-read. */
+  acquired_at: string | null;
 }
 
 /** One fragment's source records, whichever representation acquired them. */
@@ -179,6 +177,17 @@ export function rawTableOf(
   configuration: FragmentConfiguration,
   raw: RawAcquisitionRecord,
 ): FragmentTable {
+  // A committed Purge revokes access at once, even before the bytes are gone.
+  if (purgeRevoked(session.state, 'raw_acquisition', raw.raw_id)) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      context,
+      'RETENTION_EXPIRED',
+      'A Raw Acquisition this operation needs has expired under the retention policy.',
+      'Acquire the Source again so a new Integration Batch governs the next operation.',
+    );
+  }
   let text: string;
   try {
     text = readFileSync(join(session.root, raw.object_path), 'utf8');
@@ -359,17 +368,28 @@ export function applyIntegrationTable(
  * Applies one Integration Configuration Version to every Raw Acquisition in the
  * Batch. A source record that cannot become a canonical record becomes a Record
  * Rejection, so the rest of the snapshot still governs.
+ *
+ * A Batch whose Raw Acquisitions have expired is not re-read: when an earlier
+ * Release under the same Version already integrated that Batch, its retained
+ * canonical records and Record Rejections are carried forward unchanged. A
+ * Batch that was never integrated refuses explicitly rather than silently
+ * producing a Release that is missing records.
  */
 function integrate(
   session: PlatformSession,
   actor: Actor,
   context: ActionContext,
   version: IntegrationConfigurationVersion,
-  fragments: BatchFragment[],
+  batches: IntegrationBatchRecord[],
+  seed: DatasetReleaseRecord | null,
 ): IntegrationOutcome {
   const records = new Map<string, DatasetRecordRow>();
+  if (seed !== null) {
+    for (const record of seed.records) records.set(record.identity, record);
+  }
   const rejections: RecordRejection[] = [];
   const acquisitionOutcomes: Array<{ raw_id: string; accepted: number; rejected: number }> = [];
+  const acquiredAts: string[] = [];
   const rules: IntegrationRules = {
     identity: version.identity_fields,
     schema: version.schema,
@@ -378,39 +398,66 @@ function integrate(
     version: version.version,
   };
   const mapped = Object.keys(version.mapping);
-  let currentBatch: string | null = null;
-  let seenInBatch = new Set<string>();
+  const seededBatches = new Set(seed?.provenance.batch_ids ?? []);
 
-  for (const fragment of fragments) {
-    if (fragment.batch_id !== currentBatch) {
-      currentBatch = fragment.batch_id;
-      seenInBatch = new Set<string>();
-    }
-    const table = rawTableOf(session, actor, context, version, fragment.raw);
-    const unknown = mapped.filter((column) => !table.header.includes(column));
-    if (unknown.length > 0) {
+  for (const batch of batches) {
+    const raws = batch.raw_acquisition_ids.flatMap((rawId) => {
+      const raw = session.state.raw_acquisitions.find((candidate) => candidate.raw_id === rawId);
+      return raw === undefined || purgeRevoked(session.state, 'raw_acquisition', rawId) ? [] : [raw];
+    });
+    if (raws.length < batch.raw_acquisition_ids.length) {
+      if (seed !== null && seededBatches.has(batch.batch_id)) {
+        // The Batch was already integrated under this exact Version, so its
+        // curated result is retained even though its raw bytes are gone.
+        for (const rejection of seed.record_rejections) {
+          if (batch.raw_acquisition_ids.includes(rejection.raw_id)) rejections.push(rejection);
+        }
+        acquisitionOutcomes.push({
+          raw_id: batch.raw_acquisition_ids[0] ?? batch.batch_id,
+          accepted: 0,
+          rejected: seed.record_rejections.filter((rejection) => batch.raw_acquisition_ids.includes(rejection.raw_id)).length,
+        });
+        continue;
+      }
       reject(
         session,
         actorLabel(actor.user),
         context,
-        'INTEGRATION_MAPPING_UNKNOWN_COLUMN',
-        `The acquired file has no source column named: ${unknown.join(', ')}.`,
+        'RETENTION_EXPIRED',
+        'A Raw Acquisition this Integration Batch still needs has expired under the retention policy.',
+        'Acquire the Source again so a new Integration Batch can govern the next Release; the current Release is unchanged.',
       );
     }
-    const outcome = applyIntegrationTable(rules, table, fragment.raw.raw_id, seenInBatch);
-    for (const record of outcome.records) records.set(record.identity, record);
-    rejections.push(...outcome.rejections);
-    acquisitionOutcomes.push({
-      raw_id: fragment.raw.raw_id,
-      accepted: outcome.records.length,
-      rejected: outcome.rejections.length,
-    });
+    const seenInBatch = new Set<string>();
+    for (const raw of raws) {
+      acquiredAts.push(raw.received_at);
+      const table = rawTableOf(session, actor, context, version, raw);
+      const unknown = mapped.filter((column) => !table.header.includes(column));
+      if (unknown.length > 0) {
+        reject(
+          session,
+          actorLabel(actor.user),
+          context,
+          'INTEGRATION_MAPPING_UNKNOWN_COLUMN',
+          `The acquired file has no source column named: ${unknown.join(', ')}.`,
+        );
+      }
+      const outcome = applyIntegrationTable(rules, table, raw.raw_id, seenInBatch);
+      for (const record of outcome.records) records.set(record.identity, record);
+      rejections.push(...outcome.rejections);
+      acquisitionOutcomes.push({
+        raw_id: raw.raw_id,
+        accepted: outcome.records.length,
+        rejected: outcome.rejections.length,
+      });
+    }
   }
 
   return {
     records: [...records.values()].sort((left, right) => left.identity.localeCompare(right.identity)),
     rejections,
     acquisition_outcomes: acquisitionOutcomes,
+    acquired_at: acquiredAts.sort()[0] ?? seed?.provenance.acquired_at ?? null,
   };
 }
 
@@ -477,19 +524,19 @@ export function releaseDatasetFor(
       && candidate.integration_configuration_version === version.version
       && candidate.quarantined_at === null,
   );
-  const fragments = batches.flatMap((batch) => batch.raw_acquisition_ids.flatMap((rawId) => {
-    const raw = session.state.raw_acquisitions.find((candidate) => candidate.raw_id === rawId);
-    return raw === undefined
-      ? []
-      : [{ batch_id: batch.batch_id, raw }];
-  }));
-  const outcome = integrate(session, actor, scoped, version, fragments);
+  let dataset = findDataset(session.state.datasets, source.source_id);
+  const previous = latestDatasetRelease(dataset);
+  // Only a Release under this exact Version can stand in for its Batch: its
+  // curated snapshot was produced by the same semantics.
+  const seed = previous !== undefined && previous.integration_configuration_version === version.version
+    ? previous
+    : null;
+  const outcome = integrate(session, actor, scoped, version, batches, seed);
   // The hash covers the curated values alone, so a redelivery that reconciles
   // to the same records is the same Release even though its Raw Acquisition — 
   // and so its per-document locator — is a different one.
   const recordsHash = digest(outcome.records.map((record) => ({ identity: record.identity, values: record.values })));
 
-  let dataset = findDataset(session.state.datasets, source.source_id);
   if (!dataset) {
     dataset = {
       dataset_id: randomUUID(),
@@ -528,7 +575,7 @@ export function releaseDatasetFor(
       batch_ids: batches.map((batch) => batch.batch_id),
       acquisition_run_ids: batches.map((batch) => batch.acquisition_run_id),
       raw_acquisition_ids: batches.flatMap((batch) => batch.raw_acquisition_ids),
-      acquired_at: fragments.map((fragment) => fragment.raw.received_at).sort()[0] ?? latestBatch.created_at,
+      acquired_at: outcome.acquired_at ?? latestBatch.created_at,
       integrated_at: new Date().toISOString(),
     },
     records: outcome.records,
@@ -576,11 +623,53 @@ export function showDataset(options: {
   if (!dataset || dataset.releases.length === 0) {
     reject(session, actorLabel(actor.user), scoped, 'DATASET_RELEASE_NOT_FOUND', 'The Source has no Dataset Release.');
   }
+  const latest = latestDatasetRelease(dataset)!;
   const release = options.release === undefined
-    ? latestDatasetRelease(dataset)!
+    ? latest
     : dataset.releases.find((candidate) => candidate.release === options.release);
   if (!release) {
+    if (options.release !== undefined
+      && purgeRevoked(session.state, 'dataset_release', `${dataset.dataset_id}#${options.release}`)) {
+      reject(
+        session,
+        actorLabel(actor.user),
+        scoped,
+        'RETENTION_EXPIRED',
+        retentionExpiredMessage(
+          session.state,
+          dataset.workspace_id,
+          'dataset_release_history',
+          new Date(0).toISOString(),
+          new Date(),
+          `Dataset Release ${options.release}`,
+        ),
+        'Read the current Release or a Release retained under the retention policy.',
+      );
+    }
     reject(session, actorLabel(actor.user), scoped, 'DATASET_RELEASE_NOT_FOUND', 'The requested Dataset Release does not exist.');
+  }
+  // Release history ages out under the settled clock; a current Release never
+  // expires merely because it is old. The refusal is explicit, never a silent
+  // substitution of the current Release for the one the caller named, and a
+  // committed Purge keeps its record expired even after a policy lengthens.
+  if (release.release !== latest.release
+    && (purgeRevoked(session.state, 'dataset_release', `${dataset.dataset_id}#${release.release}`)
+      || isPastRetention(session.state, dataset.workspace_id, 'dataset_release_history', release.created_at, new Date()))) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      scoped,
+      'RETENTION_EXPIRED',
+      retentionExpiredMessage(
+        session.state,
+        dataset.workspace_id,
+        'dataset_release_history',
+        release.created_at,
+        new Date(),
+        `Dataset Release ${release.release}`,
+      ),
+      'Read the current Release or a Release retained under the retention policy.',
+    );
   }
 
   session.audit({ ...scoped, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { dataset_release: release.release } });

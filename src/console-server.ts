@@ -59,6 +59,15 @@ import {
   rejectProposal,
   validateProposal,
 } from './proposal.js';
+import {
+  approveProductProposal,
+  generateProductProposal,
+  listProductProposals,
+  previewProductProposal,
+  publishProductProposal,
+  rejectProductProposal,
+  validateProductProposal,
+} from './product-proposal.js';
 import { createSource, listWorkspaceSources, showWorkspaceSource } from './sources.js';
 import {
   adoptScraperProposal,
@@ -1261,6 +1270,23 @@ async function handleApi(
     return;
   }
 
+  // Data Product Proposal governance: the browser states a Chinese requirement
+  // and reads the Contract the governed engine validated and previewed against
+  // the real Dataset Release, then approves and publishes that exact candidate.
+  // The published Version is served by the existing Data Product API; no
+  // endpoint or handler is ever generated for it.
+  const productProposalListRoute = /^\/api\/workspace\/sources\/([^/]+)\/product-proposals$/u.exec(pathname);
+  if (productProposalListRoute !== null && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listProductProposals({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      sourceId: decodeURIComponent(productProposalListRoute[1]!),
+    }));
+    return;
+  }
+
   if (pathname === '/api/workspace/scraper-runs' && method === 'POST') {
     const token = userSession(request);
     const body = await readJson(request);
@@ -1296,6 +1322,77 @@ async function handleApi(
       diagnosticsId: decodeURIComponent(scraperDiagnosticsRoute[1]!),
       bindingId: text(body, 'binding_id'),
       taskVersion: number(body, 'task_version'),
+    }));
+    return;
+  }
+
+  const productProposalGenerateRoute = /^\/api\/workspace\/sources\/([^/]+)\/product-proposals\/generate$/u.exec(pathname);
+  if (productProposalGenerateRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, await generateProductProposal({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      sourceId: decodeURIComponent(productProposalGenerateRoute[1]!),
+      bindingId: text(body, 'binding_id'),
+      requirement: {
+        name: text(body, 'name'),
+        requirement: text(body, 'requirement'),
+        clarifications: body['clarifications'] ?? [],
+      },
+    }));
+    return;
+  }
+
+  const productProposalActionRoute = /^\/api\/workspace\/product-proposals\/([^/]+)\/(validate|preview|approve|reject|publish)$/u.exec(pathname);
+  if (productProposalActionRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const proposalId = decodeURIComponent(productProposalActionRoute[1]!);
+    const action = productProposalActionRoute[2];
+    if (action === 'validate') {
+      sendJson(response, 200, validateProductProposal({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        proposalId,
+      }));
+      return;
+    }
+    if (action === 'preview') {
+      sendJson(response, 200, await previewProductProposal({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        proposalId,
+      }));
+      return;
+    }
+    if (action === 'approve') {
+      sendJson(response, 200, approveProductProposal({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        proposalId,
+      }));
+      return;
+    }
+    if (action === 'publish') {
+      sendJson(response, 200, publishProductProposal({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        proposalId,
+      }));
+      return;
+    }
+    sendJson(response, 200, rejectProductProposal({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      proposalId,
+      reason: text(body, 'reason'),
     }));
     return;
   }
@@ -1802,6 +1899,29 @@ const STATUS_BY_CODE: Record<string, number> = {
   PROPOSAL_ALREADY_ADOPTED: 409,
   PROPOSAL_NOT_PUBLISHED: 409,
   PROPOSAL_TAMPERED: 409,
+  // A Data Product Proposal failure is a governed refusal, never a server fault.
+  PRODUCT_PROPOSAL_NOT_FOUND: 404,
+  PRODUCT_PROPOSAL_REQUIREMENT_UNREADABLE: 400,
+  PRODUCT_PROPOSAL_REQUIREMENT_INVALID: 400,
+  PRODUCT_PROPOSAL_NAME_INVALID: 400,
+  PRODUCT_PROPOSAL_CLARIFICATION_REQUIRED: 409,
+  PRODUCT_PROPOSAL_BINDING_NOT_FOUND: 404,
+  PRODUCT_PROPOSAL_BINDING_REVOKED: 409,
+  PRODUCT_PROPOSAL_PURPOSE_NOT_BOUND: 422,
+  PRODUCT_PROPOSAL_MODEL_STALE: 409,
+  PRODUCT_PROPOSAL_MODEL_NOT_ACTIVATED: 409,
+  PRODUCT_PROPOSAL_REASON_INVALID: 400,
+  PRODUCT_PROPOSAL_ALREADY_DECIDED: 409,
+  PRODUCT_PROPOSAL_VALIDATION_REQUIRED: 409,
+  PRODUCT_PROPOSAL_PREVIEW_REQUIRED: 409,
+  PRODUCT_PROPOSAL_BASE_STALE: 409,
+  PRODUCT_PROPOSAL_ALREADY_PUBLISHED: 409,
+  PRODUCT_PROPOSAL_NOT_APPROVED: 409,
+  PRODUCT_PROPOSAL_TAMPERED: 409,
+  PRODUCT_PROPOSAL_CANDIDATE_INVALID: 422,
+  PRODUCT_PROPOSAL_METRIC_UNDEFINED: 422,
+  PRODUCT_PROPOSAL_DATASET_UNAVAILABLE: 422,
+  PRODUCT_PROPOSAL_GRAIN_NOT_UNIQUE: 422,
 };
 
 function sendFailure(response: ServerResponse, error: unknown): void {
