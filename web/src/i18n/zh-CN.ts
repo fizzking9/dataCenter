@@ -1243,12 +1243,11 @@ export const catalog = {
   'workspace.agents.status': '状态',
   'workspace.agents.noGrants': '尚无数据产品授权',
   'workspace.agents.noDelegations': '尚无委托同意',
-  'workspace.agents.grantValue': '{product}：{detail}',
+  'workspace.agents.grantValue': '数据产品 {product}：{detail}',
   'workspace.agents.grantAllColumns': '全部已发布字段',
   'workspace.agents.grantColumns': '字段：{columns}',
   'workspace.agents.grantFilters': '行筛选：{filters}',
-  'workspace.agents.grantLabel': '{product}（{detail}）',
-  'workspace.agents.delegationValue': '{username}（{role}）：{status}',
+  'workspace.agents.delegationValue': '委托用户 {username}（{role}）：{status}',
   'workspace.agents.delegationActive': '生效中',
   'workspace.agents.delegationInactive': '已失效',
   'workspace.agents.grant.title': '发布数据产品授权',
@@ -1314,8 +1313,8 @@ export const catalog = {
   'value.identityStatus.revoked': '已撤销',
 
   // MCP scope ceilings stay machine identifiers; only their meaning is Chinese.
-  'value.mcpScope.mcp:read': '读取治理数据',
-  'value.mcpScope.mcp:nlq': '自然语言问答',
+  'value.mcpScope.read': '读取治理数据',
+  'value.mcpScope.nlq': '自然语言问答',
 
   // Every consequential administrative change states its exact target, scope,
   // and consequence before the one confirmation that performs it.
