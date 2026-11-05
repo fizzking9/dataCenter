@@ -35,7 +35,8 @@ type Pending =
   | { kind: 'revokeClient'; client: AgentClientView };
 
 function scopeLabel(scope: string): string {
-  return optional(`value.mcpScope.${scope}`) ?? scope;
+  const key = scope === 'mcp:read' ? 'value.mcpScope.read' : scope === 'mcp:nlq' ? 'value.mcpScope.nlq' : '';
+  return (key === '' ? undefined : optional(key)) ?? scope;
 }
 
 function scopesLabel(scopes: string[]): string {
