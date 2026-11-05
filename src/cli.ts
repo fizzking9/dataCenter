@@ -988,6 +988,11 @@ async function main(): Promise<void> {
       root: required(options, 'root'),
       masterKey: required(options, 'master-key'),
       port,
+      // The recovery surface needs the off-host target it may inspect and the
+      // directory an isolated restoration is materialized into; both are facts
+      // of this host, so the console is started with them rather than guessing.
+      ...(options.has('backup-root') ? { backupRoot: required(options, 'backup-root') } : {}),
+      ...(options.has('restore-root') ? { restoreRoot: required(options, 'restore-root') } : {}),
     });
     emit({ listening: true, url: started.url, port: started.port });
     return;
