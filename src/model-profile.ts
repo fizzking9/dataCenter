@@ -237,7 +237,9 @@ export function publishModelProfile(options: {
   masterKey: string;
   token: string;
   name: string;
-  configPath: string;
+  /** The browser posts its configuration; the CLI reads the same shape from a file. */
+  configPath?: string;
+  configuration?: unknown;
   credential?: string;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
@@ -251,12 +253,17 @@ export function publishModelProfile(options: {
   const actorName = actorLabel(actor.user);
   const name = readName(session, actorName, context, options.name);
 
-  const parsed: unknown = readJsonDocument(
-    options.configPath,
-    (code, message) => reject(session, actorName, context, code, message),
-    'MODEL_PROFILE_CONFIGURATION_UNREADABLE',
-    'The Model Profile configuration file must contain valid JSON.',
-  );
+  if (options.configuration === undefined && options.configPath === undefined) {
+    reject(session, actorName, context, 'MODEL_PROFILE_CONFIGURATION_UNREADABLE', 'A Model Profile needs its configuration.');
+  }
+  const parsed: unknown = options.configuration !== undefined
+    ? options.configuration
+    : readJsonDocument(
+      options.configPath ?? '',
+      (code, message) => reject(session, actorName, context, code, message),
+      'MODEL_PROFILE_CONFIGURATION_UNREADABLE',
+      'The Model Profile configuration file must contain valid JSON.',
+    );
   if (!isRecord(parsed)) {
     reject(session, actorName, context, 'MODEL_PROFILE_CONFIGURATION_INVALID', 'A Model Profile configuration must be a JSON object.');
   }
@@ -597,6 +604,14 @@ export function showModelProfile(options: {
     reject(session, actorLabel(actor.user), context, 'MODEL_PROFILE_NOT_FOUND', 'The requested Model Profile does not exist.');
   }
   session.audit({ ...context, actor: actorLabel(actor.user), outcome: 'succeeded' });
+  return viewModelProfile(profile);
+}
+
+/**
+ * The only shape a Model Profile leaves the platform as: every pinned setting,
+ * and never its endpoint or its credential.
+ */
+export function viewModelProfile(profile: ModelProfileArtifact): Record<string, unknown> {
   return {
     model_profile_id: profile.model_profile_id,
     name: profile.name,
@@ -623,4 +638,21 @@ export function showModelProfile(options: {
       checks: evaluation.checks.map((check) => ({ ...check })),
     })),
   };
+}
+
+/** Lists every Model Profile with its Versions and activation evidence. */
+export function listModelProfiles(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'model_profile_list', scope: 'deployment' };
+  const actor = resolveActor(session, options.token, context);
+  requireDeploymentAdministrator(session, actor, context);
+  const profiles = [...session.state.model_profiles].sort(
+    (left, right) => left.created_at.localeCompare(right.created_at) || left.name.localeCompare(right.name),
+  );
+  session.audit({ ...context, actor: actorLabel(actor.user), outcome: 'succeeded' });
+  return { model_profiles: profiles.map((profile) => viewModelProfile(profile)) };
 }

@@ -15,9 +15,11 @@ import { openPlatform } from './session.js';
  */
 export type NavigationKey =
   | 'deployment.workspaces'
+  | 'deployment.modelProfiles'
   | 'workspace.overview'
   | 'workspace.products'
-  | 'workspace.context';
+  | 'workspace.context'
+  | 'workspace.models';
 
 /**
  * The two trees are separate by construction: a Deployment Administrator holds
@@ -25,11 +27,11 @@ export type NavigationKey =
  * opens Workspace content.
  */
 const WORKSPACE_NAVIGATION: Record<WorkspaceRole, NavigationKey[]> = {
-  'Workspace Administrator': ['workspace.overview', 'workspace.products', 'workspace.context'],
+  'Workspace Administrator': ['workspace.overview', 'workspace.products', 'workspace.context', 'workspace.models'],
   Consumer: ['workspace.overview', 'workspace.products'],
 };
 
-const DEPLOYMENT_NAVIGATION: NavigationKey[] = ['deployment.workspaces'];
+const DEPLOYMENT_NAVIGATION: NavigationKey[] = ['deployment.workspaces', 'deployment.modelProfiles'];
 
 export interface ActivityItem {
   activity_id: string;

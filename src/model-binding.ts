@@ -152,7 +152,9 @@ export async function publishModelBinding(options: {
   token: string;
   workspaceId: string;
   profileId: string;
-  configPath: string;
+  /** The browser posts its configuration; the CLI reads the same shape from a file. */
+  configPath?: string;
+  configuration?: unknown;
 }): Promise<Record<string, unknown>> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = {
@@ -165,12 +167,17 @@ export async function publishModelBinding(options: {
   requireWorkspaceAdministrator(session, actor, context, options.workspaceId);
   const actorName = actorLabel(actor.user);
 
-  const parsed: unknown = readJsonDocument(
-    options.configPath,
-    (code, message) => reject(session, actorName, context, code, message),
-    'MODEL_BINDING_CONFIGURATION_UNREADABLE',
-    'The Workspace Model Binding configuration file must contain valid JSON.',
-  );
+  if (options.configuration === undefined && options.configPath === undefined) {
+    reject(session, actorName, context, 'MODEL_BINDING_CONFIGURATION_UNREADABLE', 'A Binding needs its configuration.');
+  }
+  const parsed: unknown = options.configuration !== undefined
+    ? options.configuration
+    : readJsonDocument(
+      options.configPath ?? '',
+      (code, message) => reject(session, actorName, context, code, message),
+      'MODEL_BINDING_CONFIGURATION_UNREADABLE',
+      'The Workspace Model Binding configuration file must contain valid JSON.',
+    );
   if (!isRecord(parsed)) {
     reject(session, actorName, context, 'MODEL_BINDING_CONFIGURATION_INVALID', 'A Binding configuration must be a JSON object.');
   }
@@ -319,11 +326,95 @@ function viewBinding(binding: WorkspaceModelBindingRecord): Record<string, unkno
     preflight: {
       checked_at: binding.preflight.checked_at,
       passed: binding.preflight.passed,
-      checks: binding.preflight.checks.map((check) => ({ ...check })),
+      // A check detail can name the model identity the probe answered as, so a
+      // Binding discloses only whether each governed check passed.
+      checks: binding.preflight.checks.map((check) => ({ name: check.name, passed: check.passed })),
       evidence_hash: binding.preflight.evidence_hash,
     },
     created_at: binding.created_at,
     created_by: binding.created_by,
     revoked_at: binding.revoked_at,
   };
+}
+
+/**
+ * The Workspace Model Binding surface a Workspace Administrator reads: the
+ * Workspace's own Bindings, plus the activated Profile Versions it may bind.
+ * Neither carries an endpoint, a credential, or a provider model identity.
+ */
+export function showModelBindingWorkspace(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  workspaceId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'model_binding_read',
+    scope: 'workspace',
+    workspace_id: options.workspaceId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  requireWorkspaceAdministrator(session, actor, context, options.workspaceId);
+
+  const bindings = session.state.model_bindings
+    .filter((binding) => binding.workspace_id === options.workspaceId)
+    .sort((left, right) => right.created_at.localeCompare(left.created_at))
+    .map((binding) => ({
+      ...viewBinding(binding),
+      model_profile_name: findModelProfile(session.state.model_profiles, binding.model_profile_id)?.name ?? null,
+    }));
+
+  const modelProfiles: Record<string, unknown>[] = [];
+  for (const profile of session.state.model_profiles) {
+    if (profile.activated_version === null) continue;
+    const version = findModelProfileVersion(profile, profile.activated_version);
+    if (version === undefined) continue;
+    modelProfiles.push({
+      model_profile_id: profile.model_profile_id,
+      name: profile.name,
+      model_profile_version: version.version,
+      content_hash: version.content_hash,
+      purposes: [...version.purposes],
+      data_categories: [...version.data_categories],
+    });
+  }
+
+  session.audit({ ...context, actor: actorLabel(actor.user), outcome: 'succeeded' });
+  return { workspace_id: options.workspaceId, bindings, model_profiles: modelProfiles };
+}
+
+/**
+ * Revokes one Binding so later generation never resolves it again. Revocation
+ * is idempotent: repeating it reports the Binding was already revoked.
+ */
+export function revokeModelBinding(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  bindingId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'model_binding_revocation',
+    scope: 'workspace',
+    target: options.bindingId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  const binding = findModelBinding(session.state.model_bindings, options.bindingId);
+  if (!binding) {
+    reject(session, actorLabel(actor.user), context, 'MODEL_BINDING_NOT_FOUND', 'The requested Workspace Model Binding does not exist.');
+  }
+  requireWorkspaceAdministrator(session, actor, context, binding.workspace_id);
+  const alreadyRevoked = binding.revoked_at !== null;
+  if (!alreadyRevoked) binding.revoked_at = new Date().toISOString();
+  session.audit({
+    ...context,
+    workspace_id: binding.workspace_id,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: { already_revoked: alreadyRevoked },
+  });
+  session.save();
+  return { ...viewBinding(binding), already_revoked: alreadyRevoked };
 }

@@ -8,6 +8,8 @@ import { showContext } from './context.js';
 import { browserIdentity, browserNavigation } from './navigation.js';
 import { listDataProducts } from './products.js';
 import { listWorkspaces } from './workspaces.js';
+import { publishModelBinding, revokeModelBinding, showModelBindingWorkspace } from './model-binding.js';
+import { activateModelProfile, evaluateModelProfile, listModelProfiles, publishModelProfile } from './model-profile.js';
 import {
   exchangeOperatorEnrollment,
   resolveOperatorSession,
@@ -325,6 +327,96 @@ async function handleApi(
   }
 
   // A Publication advertises this path. It answers the very same governed read
+  // Model Profiles are Deployment-scoped: only a Deployment Administrator may
+  // read them, publish a Version, evaluate it, or activate it.
+  if (pathname === '/api/deployment/model-profiles' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listModelProfiles({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/model-profiles' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const credential = text(body, 'credential');
+    sendJson(response, 201, publishModelProfile({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      name: text(body, 'name'),
+      configuration: body,
+      ...(credential === '' ? {} : { credential }),
+    }));
+    return;
+  }
+
+  const modelProfileRoute = /^\/api\/deployment\/model-profiles\/([^/]+)\/(evaluate|activate)$/u.exec(pathname);
+  if (modelProfileRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const profileId = decodeURIComponent(modelProfileRoute[1]!);
+    const version = number(body, 'model_profile_version');
+    if (modelProfileRoute[2] === 'evaluate') {
+      sendJson(response, 200, await evaluateModelProfile({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        profileId,
+        version,
+      }));
+      return;
+    }
+    sendJson(response, 200, activateModelProfile({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      profileId,
+      version,
+    }));
+    return;
+  }
+
+  // A Binding is Workspace-scoped: a Workspace Administrator reads, creates,
+  // and revokes only the Bindings of the active Workspace.
+  if (pathname === '/api/workspace/model-bindings' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, showModelBindingWorkspace({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/model-bindings' && method === 'POST') {
+    const token = userSession(request);
+    const workspaceId = activeWorkspace(request);
+    const body = await readJson(request);
+    sendJson(response, 201, await publishModelBinding({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId,
+      profileId: text(body, 'model_profile_id'),
+      configuration: body,
+    }));
+    return;
+  }
+
+  const bindingRevokeRoute = /^\/api\/workspace\/model-bindings\/([^/]+)\/revoke$/u.exec(pathname);
+  if (bindingRevokeRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, revokeModelBinding({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      bindingId: decodeURIComponent(bindingRevokeRoute[1]!),
+    }));
+    return;
+  }
+
+  // A Publication advertises this path. It answers the very same governed read
   // the MCP direct-query tool answers, with a Consumer's own Bearer credential.
   const queryRoute = /^\/api\/workspaces\/([^/]+)\/data-products\/([^/]+)\/query$/.exec(pathname);
   if (queryRoute !== null && method === 'POST') {
@@ -462,6 +554,12 @@ function text(body: Record<string, unknown>, field: string): string {
   return typeof value === 'string' ? value : '';
 }
 
+/** A whole number the governed module validates, never a browser-side guess. */
+function number(body: Record<string, unknown>, field: string): number {
+  const value = body[field];
+  return typeof value === 'number' ? value : Number.NaN;
+}
+
 async function serveAsset(
   request: IncomingMessage,
   response: ServerResponse,
@@ -532,6 +630,24 @@ const STATUS_BY_CODE: Record<string, number> = {
   DATA_PRODUCT_QUERY_TOO_COMPLEX: 422,
   DATA_PRODUCT_QUERY_RESULT_TOO_LARGE: 422,
   DATA_PRODUCT_QUERY_TIMEOUT: 504,
+  MODEL_PROFILE_NAME_INVALID: 400,
+  MODEL_ADAPTER_UNSUPPORTED: 400,
+  MODEL_PROFILE_CONFIGURATION_INVALID: 400,
+  MODEL_PROFILE_CONFIGURATION_UNREADABLE: 400,
+  MODEL_PROFILE_NOT_FOUND: 404,
+  MODEL_PROFILE_VERSION_NOT_FOUND: 404,
+  MODEL_PROFILE_NOT_ACTIVATED: 409,
+  MODEL_PROFILE_EVALUATION_REQUIRED: 409,
+  MODEL_PROFILE_EVALUATION_FAILED: 409,
+  MODEL_PROMPT_NOT_SIMPLIFIED_CHINESE: 422,
+  MODEL_BINDING_CONFIGURATION_INVALID: 400,
+  MODEL_BINDING_CONFIGURATION_UNREADABLE: 400,
+  MODEL_BINDING_NOT_FOUND: 404,
+  MODEL_BINDING_PURPOSE_UNSUPPORTED: 422,
+  MODEL_BINDING_PURPOSE_NOT_PERMITTED: 422,
+  MODEL_BINDING_DATA_CATEGORY_NOT_PERMITTED: 422,
+  MODEL_BINDING_DATA_CATEGORY_INCOMPLETE: 422,
+  MODEL_BINDING_PREFLIGHT_FAILED: 422,
 };
 
 function sendFailure(response: ServerResponse, error: unknown): void {

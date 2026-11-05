@@ -33,7 +33,7 @@ import { listGrants, publishGrant, revokeGrant } from './grants.js';
 import { initializeDeployment } from './initialize.js';
 import { installDeployment } from './install.js';
 import { adoptIntegrationConfiguration, publishIntegrationConfiguration } from './integration.js';
-import { publishModelBinding, showModelBinding } from './model-binding.js';
+import { publishModelBinding, revokeModelBinding, showModelBinding } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, publishModelProfile, showModelProfile } from './model-profile.js';
 import { importLicense, readLicenseSummary } from './license.js';
 import { queryDataProduct } from './product-query.js';
@@ -599,6 +599,10 @@ async function main(): Promise<void> {
   }
   if (command === 'binding' && subcommand === 'show') {
     emit(showModelBinding({ ...governed(options), bindingId: required(options, 'binding') }));
+    return;
+  }
+  if (command === 'binding' && subcommand === 'revoke') {
+    emit(revokeModelBinding({ ...governed(options), bindingId: required(options, 'binding') }));
     return;
   }
   if (command === 'proposal' && subcommand === 'generate') {
