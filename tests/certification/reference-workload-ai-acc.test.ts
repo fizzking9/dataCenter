@@ -335,7 +335,7 @@ test('the ai-acc reference workload acquires seven-day windows through the gener
     );
   }
 
-  // The forty-second schedule is measured, not assumed: three sampled starts,
+  // The fifteen-minute schedule is measured, not assumed: three sampled starts,
   // all inside the tolerance, and a publication distribution inside its targets.
   const measured = command(fixture, ['acquisition', 'targets', '--source', sourceId], { token });
   assert.equal(measured.status, 0, measured.stderr);
