@@ -1049,6 +1049,16 @@ export interface NlqPartView {
   limitations: string[];
 }
 
+/** One part's own Release and as-of facts, disclosed beside the compound answer. */
+export interface NlqAsOfView {
+  name: string | null;
+  data_product_id: string | null;
+  data_product_release: number | null;
+  executed: boolean;
+  released_at: string | null;
+  data_through: string | null;
+}
+
 /** One governed Natural-Language Query turn, exactly as the server answered it. */
 export interface NaturalLanguageAnswerView {
   outcome: 'answered' | 'clarification' | 'empty' | 'no_evidence' | 'unavailable' | 'refused' | 'partial';
@@ -1084,7 +1094,7 @@ export interface NaturalLanguageAnswerView {
   limitations: string[];
   data_product: Record<string, unknown> | null;
   parts: NlqPartView[];
-  as_of: Array<Record<string, unknown>>;
+  as_of: NlqAsOfView[];
   interpretation: string | null;
   resolved: NlqResolvedView | null;
   clarification: {
