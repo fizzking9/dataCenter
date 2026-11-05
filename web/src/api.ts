@@ -102,6 +102,77 @@ export interface DeploymentWorkspace {
   role: string;
 }
 
+/** One Workspace membership, in the shape the administered Workspace lists it. */
+export interface WorkspaceMemberView {
+  username: string;
+  role: WorkspaceRoleValue;
+  granted_at: string;
+}
+
+export interface WorkspaceMemberList {
+  workspace_id: string;
+  members: WorkspaceMemberView[];
+}
+
+/**
+ * A grant answers with the Role it set and, when it enrolled a new Workspace
+ * Administrator, the one-time enrollment material to hand over in person.
+ */
+export interface WorkspaceMemberGrant {
+  workspace_id: string;
+  username: string;
+  role: WorkspaceRoleValue;
+  previous_role: WorkspaceRoleValue | null;
+  totp_secret?: string;
+  recovery_codes?: string[];
+  enrollment_uri?: string;
+}
+
+/** One Artifact pinned to an exact Workspace Business Context version. */
+export interface ContextArtifactPin {
+  kind: 'integration_configuration' | 'dataset_release';
+  version: number;
+  source_id: string;
+  source_name: string;
+  dataset_id?: string;
+}
+
+/** One immutable Workspace Business Context version, with its Artifact pins. */
+export interface ContextVersionView {
+  version: number;
+  published_at: string;
+  published_by: string | null;
+  content_hash: string;
+  entry_count: number;
+  common_business_context_version: number;
+  previous_workspace_business_context_version: number | null;
+  affected_artifacts: ContextArtifactPin[];
+}
+
+export interface ContextHistoryView {
+  workspace_id: string;
+  versions: ContextVersionView[];
+}
+
+export type AuditOutcomeValue = 'succeeded' | 'denied' | 'failed';
+
+/** The attribution a Workspace Audit Event discloses; payloads stay on the server. */
+export interface WorkspaceAuditEventView {
+  event_id: string;
+  occurred_at: string;
+  actor: string;
+  action: string;
+  scope: string;
+  target: string | null;
+  outcome: AuditOutcomeValue;
+}
+
+export interface WorkspaceAuditView {
+  workspace_id: string;
+  chain_valid: boolean;
+  events: WorkspaceAuditEventView[];
+}
+
 export interface DataProductSummary {
   data_product_id: string;
   name: string;
@@ -199,4 +270,25 @@ export const platformApi = {
     request<DataProductList>(`/api/workspace/data-products${workspaceQuery(workspaceId)}`),
   context: (workspaceId: string) =>
     request<ContextView>(`/api/workspace/context${workspaceQuery(workspaceId)}`),
+  workspaceMembers: (workspaceId: string) =>
+    request<WorkspaceMemberList>(`/api/workspace/memberships${workspaceQuery(workspaceId)}`),
+  grantWorkspaceMember: (workspaceId: string, username: string, role: WorkspaceRoleValue) =>
+    request<WorkspaceMemberGrant>('/api/workspace/memberships', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, username, role }),
+    }),
+  revokeWorkspaceMember: (workspaceId: string, username: string) =>
+    request<{ workspace_id: string; username: string; removed: boolean }>('/api/workspace/memberships/revoke', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, username }),
+    }),
+  contextHistory: (workspaceId: string) =>
+    request<ContextHistoryView>(`/api/workspace/context/history${workspaceQuery(workspaceId)}`),
+  publishWorkspaceContext: (workspaceId: string, entries: unknown[]) =>
+    request<{ business_context_version: number; entry_count: number }>('/api/workspace/context/publish', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, entries }),
+    }),
+  workspaceAudit: (workspaceId: string) =>
+    request<WorkspaceAuditView>(`/api/workspace/audit${workspaceQuery(workspaceId)}`),
 };

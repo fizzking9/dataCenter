@@ -62,15 +62,10 @@ function requireEntry(session: PlatformSession, actor: string, context: ActionCo
   };
 }
 
-function readEntries(session: PlatformSession, actor: string, context: ActionContext, path: string): ContextEntry[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'));
-  } catch {
-    reject(session, actor, context, 'CONTEXT_ENTRIES_UNREADABLE', 'The Business Context entry file must contain valid JSON.');
-  }
+/** One published snapshot: every entry is valid and every key appears once. */
+function parseEntries(session: PlatformSession, actor: string, context: ActionContext, parsed: unknown): ContextEntry[] {
   if (!Array.isArray(parsed)) {
-    reject(session, actor, context, 'CONTEXT_ENTRY_INVALID', 'The Business Context entry file must contain an array of entries.');
+    reject(session, actor, context, 'CONTEXT_ENTRY_INVALID', 'The Business Context entries must be an array of entries.');
   }
   const entries = parsed.map((raw) => requireEntry(session, actor, context, raw));
   const keys = new Set(entries.map((entry) => entry.key));
@@ -78,6 +73,16 @@ function readEntries(session: PlatformSession, actor: string, context: ActionCon
     reject(session, actor, context, 'CONTEXT_ENTRY_DUPLICATE', 'Each Business Context entry key must appear once.');
   }
   return entries;
+}
+
+function readEntries(session: PlatformSession, actor: string, context: ActionContext, path: string): ContextEntry[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    reject(session, actor, context, 'CONTEXT_ENTRIES_UNREADABLE', 'The Business Context entry file must contain valid JSON.');
+  }
+  return parseEntries(session, actor, context, parsed);
 }
 
 /**
@@ -252,7 +257,9 @@ export function publishWorkspaceContext(options: {
   masterKey: string;
   token: string;
   workspaceId: string;
-  entriesPath: string;
+  /** The CLI names a file; a browser workflow posts the entries themselves. */
+  entriesPath?: string;
+  entries?: unknown;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = {
@@ -264,7 +271,9 @@ export function publishWorkspaceContext(options: {
   const actor = resolveActor(session, options.token, context);
   requireWorkspaceAdministrator(session, actor, context, options.workspaceId);
   const common = latestVersion(findContextArtifact(session.state, DEPLOYMENT_CONTEXT_ARTIFACT));
-  const entries = readEntries(session, actorLabel(actor.user), context, options.entriesPath);
+  const entries = options.entries === undefined
+    ? readEntries(session, actorLabel(actor.user), context, options.entriesPath ?? '')
+    : parseEntries(session, actorLabel(actor.user), context, options.entries);
   validateSnapshot(session, actorLabel(actor.user), context, entries, {
     commonKeys: keysOf(common),
     workspaceKeys: new Set(entries.map((entry) => entry.key)),
@@ -348,5 +357,89 @@ export function showContext(options: {
         },
     entries,
   };
+}
+
+/** One Artifact pinned to an exact Workspace Business Context version. */
+function affectedArtifacts(
+  session: PlatformSession,
+  workspaceId: string,
+  version: number,
+): Array<Record<string, string | number>> {
+  const sourceName = (sourceId: string): string =>
+    session.state.sources.find((source) => source.source_id === sourceId)?.name ?? sourceId;
+  const configurations = session.state.integration_configurations
+    .filter((artifact) => artifact.workspace_id === workspaceId)
+    .flatMap((artifact) => artifact.versions
+      .filter((candidate) => candidate.pins.workspace_business_context_version === version)
+      .map((candidate) => ({
+        kind: 'integration_configuration',
+        version: candidate.version,
+        source_id: artifact.source_id,
+        source_name: sourceName(artifact.source_id),
+      })));
+  const releases = session.state.datasets
+    .filter((dataset) => dataset.workspace_id === workspaceId)
+    .flatMap((dataset) => dataset.releases
+      .filter((release) => release.pins.workspace_business_context_version === version)
+      .map((release) => ({
+        kind: 'dataset_release',
+        version: release.release,
+        dataset_id: release.dataset_id,
+        source_id: release.source_id,
+        source_name: sourceName(release.source_id),
+      })));
+  return [...configurations, ...releases];
+}
+
+/**
+ * Reads this Workspace's own Business Context version history, newest first,
+ * with the Artifacts each exact version is pinned to. Another Workspace's
+ * configuration is a different Artifact, so it is never part of the answer.
+ */
+export function showContextHistory(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  workspaceId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const artifactId = workspaceContextArtifact(options.workspaceId);
+  const context: ActionContext = {
+    action: 'business_context_history_read',
+    scope: 'workspace',
+    workspace_id: options.workspaceId,
+    target: artifactId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  requireWorkspaceAdministrator(session, actor, context, options.workspaceId);
+  const artifact = findContextArtifact(session.state, artifactId);
+  if (!artifact || artifact.versions.length === 0) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      context,
+      'CONTEXT_NOT_PUBLISHED',
+      'No Business Context version has been published for this Workspace.',
+    );
+  }
+  const versions = [...artifact.versions]
+    .sort((left, right) => right.version - left.version)
+    .map((version) => ({
+      version: version.version,
+      published_at: version.published_at,
+      published_by: findUserById(session.state, version.published_by)?.username ?? null,
+      content_hash: version.content_hash,
+      entry_count: version.entries.length,
+      common_business_context_version: version.pins.common_version,
+      previous_workspace_business_context_version: version.pins.previous_version,
+      affected_artifacts: affectedArtifacts(session, options.workspaceId, version.version),
+    }));
+  session.audit({
+    ...context,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: { versions_returned: versions.length },
+  });
+  return { workspace_id: options.workspaceId, versions };
 }
 

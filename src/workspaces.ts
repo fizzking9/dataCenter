@@ -10,6 +10,7 @@ import {
 } from './authz.js';
 import { enrolMfa } from './enrollment.js';
 import {
+  findUserById,
   isDeploymentAdministrator,
   isWorkspaceRole,
   otherActiveWorkspaceAdministrators,
@@ -198,4 +199,43 @@ export function revokeMembership(options: {
 
 function isSoleAdministrator(session: PlatformSession, workspaceId: string, userId: string): boolean {
   return otherActiveWorkspaceAdministrators(session.state, workspaceId, userId).length === 0;
+}
+
+/**
+ * Lists the memberships of one administered Workspace. Another Workspace's
+ * memberships, and a Workspace the actor does not administer, are absent rather
+ * than redacted, so the listing never confirms an existence the actor may not see.
+ */
+export function listMemberships(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  workspaceId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'membership_listing',
+    scope: 'workspace',
+    workspace_id: options.workspaceId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  requireWorkspaceAdministrator(session, actor, context, options.workspaceId);
+  const members = session.state.memberships
+    .filter((membership) => membership.workspace_id === options.workspaceId)
+    .flatMap((membership) => {
+      const user = findUserById(session.state, membership.user_id);
+      // A membership whose User no longer exists grants nothing, and lists as nothing.
+      return user === undefined
+        ? []
+        : [{ username: user.username, role: membership.role, granted_at: membership.granted_at }];
+    })
+    .sort((left, right) => left.username.localeCompare(right.username));
+  session.audit({
+    ...context,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    target: options.workspaceId,
+    detail: { members_returned: members.length },
+  });
+  return { workspace_id: options.workspaceId, members };
 }

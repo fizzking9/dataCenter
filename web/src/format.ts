@@ -1,4 +1,4 @@
-import { t, type MessageKey } from './i18n/zh-CN.js';
+import { optional, t, type MessageKey } from './i18n/zh-CN.js';
 
 /** Locale-correct rendering of the instants the deployment reports. */
 export function formatInstant(value: string | undefined): string {
@@ -29,4 +29,12 @@ export function roleLabel(role: string | null | undefined): string {
   if (!role) return '—';
   const key = ROLE_KEYS[role];
   return key === undefined ? role : t(key);
+}
+
+/**
+ * One Chinese sentence for a governed API failure. The ASCII code stays beside
+ * it, so an administrator can quote the code without reading English prose.
+ */
+export function apiFailureText(code: string): string {
+  return optional(`error.api.${code}`) ?? t('error.unknown');
 }
