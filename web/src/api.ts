@@ -47,6 +47,200 @@ export interface LicenseView {
   state: string;
 }
 
+/** The settled recovery objectives every recovery view states as numbers. */
+export interface RecoveryObjectivesView {
+  rpo_limit_seconds: number;
+  rto_limit_seconds: number;
+  checkpoint_seconds: number;
+  object_replication_seconds: number;
+  base_backup_hours: number;
+  retention_days: number;
+}
+
+export interface BackupHealthView {
+  health: 'healthy' | 'degraded' | 'not_established';
+  rpo_limit_seconds: number;
+  last_checkpoint_id: string | null;
+  last_checkpoint_at: string | null;
+  checkpoint_age_seconds: number | null;
+  last_rpo_seconds: number | null;
+  rpo_met: boolean | null;
+  reasons: string[];
+  verification_health: 'healthy' | 'degraded';
+  verification_reasons: string[];
+}
+
+export interface CheckpointSummaryView {
+  checkpoint_id: string;
+  sequence: number;
+  created_at: string;
+  coordinated: boolean;
+  database_position: string;
+  objects_position: string;
+  objects_count: number;
+  rpo_interval_seconds: number | null;
+  rpo_limit_seconds: number;
+  rpo_met: boolean | null;
+  wal_continuous: boolean;
+}
+
+export interface RecoverySetSummaryView {
+  backup_id: string;
+  kind: string;
+  created_at: string;
+  deployment_id: string;
+  checkpoint_id: string;
+  components: number;
+  retain_until: string;
+  within_retention: boolean;
+  age_seconds: number | null;
+  purge_ledger_through_sequence: number;
+}
+
+export interface RecoveryComponentView {
+  role: string;
+  name: string;
+  path: string;
+  sha256: string;
+  bytes: number;
+  restores_to: string;
+}
+
+export interface RecoveryManifestView {
+  schema_version: number;
+  backup_id: string;
+  kind: string;
+  created_at: string;
+  deployment_id: string;
+  release: string;
+  payloads_encrypted: boolean;
+  secrets_included: boolean;
+  cadence: Record<string, string | number>;
+  retention: { days: number; retain_until: string };
+  checkpoint_id: string;
+  purge_ledger: { through_sequence: number; entries: number; digest: string };
+  components: RecoveryComponentView[];
+  excluded: Array<{ name: string; rebuildable: boolean }>;
+  escrowed_separately: { master_key: boolean };
+}
+
+export interface RecoverySetDetailView {
+  manifest: RecoveryManifestView;
+  integrity: { verified: boolean; checked: number };
+  within_retention: boolean;
+  age_seconds: number;
+}
+
+/** The verification evidence one drill or restoration reports, category by category. */
+export interface RecoveryVerificationView {
+  integrity: { passed: boolean; components: number; database_position: string };
+  objects: { passed: boolean; count: number; verified: number; bytes: number };
+  keys: { passed: boolean; data_key_unwrapped: boolean; sealed_credentials: number; decrypted: number };
+  manifests: { passed: boolean; release: string; signature_verified: boolean };
+  provenance: { passed: boolean; dataset_releases: number; batches: number; dangling: number };
+  governed_reads: {
+    passed: boolean;
+    products: number;
+    reads: Array<Record<string, unknown>>;
+    purged_refusals: { confirmed: number; failed: number };
+  };
+  purge_ledger: {
+    passed: boolean;
+    applied_through_sequence: number;
+    entries: number;
+    purged_records: number;
+    removed: number;
+    already_absent: number;
+  };
+}
+
+export interface RecoveryVerificationViewRow {
+  verification_id: string;
+  backup_id: string;
+  verified: boolean;
+  verification: RecoveryVerificationView;
+  rto: { started_at: string; finished_at: string; seconds: number; limit_seconds: number; met: boolean };
+  evidence: string;
+  evidence_id: string;
+}
+
+export interface RestorationStepView {
+  step: string;
+  outcome: string;
+  at: string;
+}
+
+/** The restored copy's own state, read from the restored Deployment itself. */
+export interface RestorationTargetView {
+  root: string;
+  present: boolean;
+  state: string | null;
+  service_open: boolean;
+  workers_enabled: boolean;
+  connectivity_enabled: boolean;
+}
+
+export interface RestorationView {
+  restoration_id: string;
+  backup_id: string;
+  deployment_id: string | null;
+  release: string | null;
+  state: 'running' | 'verified_open' | 'failed';
+  requested_at: string;
+  requested_by: string;
+  step_up_verified_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  progress: RestorationStepView[];
+  verification: RecoveryVerificationView | null;
+  purge_ledger: {
+    applied_through_sequence: number;
+    entries: number;
+    purged_records: number;
+    removed: number;
+    already_absent: number;
+  } | null;
+  rto: { started_at: string; finished_at: string; seconds: number; limit_seconds: number; met: boolean } | null;
+  workers_enabled: boolean;
+  connectivity_enabled: boolean;
+  service_open: boolean;
+  error: { code: string; message: string; next_step?: string } | null;
+  evidence_id: string | null;
+  target: RestorationTargetView;
+  changed?: boolean;
+}
+
+export interface RecoveryOverviewView {
+  deployment_id: string;
+  release: string;
+  state: string;
+  service_open: boolean;
+  workers_enabled: boolean;
+  connectivity_enabled: boolean;
+  backup_root: string;
+  restore_root: string;
+  objectives: RecoveryObjectivesView;
+  backup: BackupHealthView;
+  checkpoints: CheckpointSummaryView[];
+  recovery_sets: RecoverySetSummaryView[];
+  ledger: { head_sequence: number; updated_at: string | null; entries: number };
+  restorations: RestorationView[];
+  checked_at: string;
+}
+
+export interface RecoveryRestorationList {
+  restorations: RestorationView[];
+}
+
+export interface StepUpGrantView {
+  step_up_grant: string;
+  purpose: string;
+  target: string;
+  method: 'totp' | 'recovery_code';
+  verified_at: string;
+  expires_at: string;
+}
+
 /** A platform User session, which is a different channel from the Operator one. */
 export interface PlatformSessionView {
   username: string;
@@ -368,19 +562,197 @@ export interface WorkspaceAuditView {
   events: WorkspaceAuditEventView[];
 }
 
+export interface DataProductMetricView {
+  name: string;
+  aggregation: string;
+  value_type: string;
+  field?: string;
+  unit: string | null;
+  currency: string | null;
+  definition?: string;
+  favorable_direction?: string | null;
+  dimensions: string[];
+}
+
+/** The search capability a Contract publishes to one reader, or null when a Grant hides it. */
+export interface DataProductSearchView {
+  text_field: string;
+  title_field?: string;
+  suggest_fields: string[];
+  ranking: { kind: string; title_weight: number; text_weight: number };
+  max_terms: number;
+  min_term_length: number;
+}
+
+export interface DataProductRelationshipView {
+  name: string;
+  description: string | null;
+  cardinality: 'one' | 'many';
+  on: Record<string, string>;
+  fields: Array<{ name: string; description?: string }>;
+  grain: string[];
+  filters: string[];
+  limit: number;
+}
+
+/** One authorized published Data Product and the Contract metadata a Consumer may see. */
 export interface DataProductSummary {
   data_product_id: string;
   name: string;
   api_path: string;
   title: string;
+  fields: string[];
+  dimensions: string[];
+  metrics: DataProductMetricView[];
+  grain: string[];
+  time: { field: string; precision: 'date' | 'timestamp'; time_zone: string } | null;
+  filters: string[];
+  field_types: Record<string, string>;
+  search: DataProductSearchView | null;
+  limits: { max_scanned_records: number; max_groups: number; max_execution_ms: number };
+  default_limit: number;
+  max_limit: number;
+  relationships: DataProductRelationshipView[];
   data_product_version: number;
-  data_product_release: string;
+  data_product_release: number;
+  dataset_release: number;
   contract_version: { major: number; minor: number };
 }
 
 export interface DataProductList {
   workspace_id: string;
   data_products: DataProductSummary[];
+}
+
+/** One exact Release a Consumer may read, and the Contract line it served. */
+export interface ProductReleaseView {
+  release: number;
+  data_product_version: number;
+  contract_version: { major: number; minor: number } | null;
+  withdrawn: boolean;
+  dataset_release: number;
+  relationships: Array<{ name: string; dataset_id: string; dataset_release: number }>;
+  created_at: string;
+  current: boolean;
+  retention_expired: boolean;
+}
+
+export interface ProductReleaseList {
+  data_product_id: string;
+  name: string;
+  api_path: string;
+  lines: Array<{
+    major: number;
+    current_version: number;
+    current_release: number;
+    opened_at: string;
+    withdrawn_at: string | null;
+  }>;
+  releases: ProductReleaseView[];
+}
+
+/** One scalar value exactly as the governed answer states it; missing values are null. */
+export type ProductScalar = string | number | null;
+
+/** One window the answer evaluated, with the coverage the pinned Release holds. */
+export interface ProductQueryWindowView {
+  field: string;
+  precision: 'date' | 'timestamp';
+  time_zone: string;
+  start: string;
+  end: string;
+  coverage: { start: string; end: string } | null;
+  partial: boolean;
+  period?: 'day' | 'week';
+  complete?: boolean;
+  same_elapsed_interval?: boolean;
+}
+
+/** One metric compared beside the window it was read against. */
+export interface ProductComparedMetric {
+  value: ProductScalar;
+  change: string | number | null;
+  change_percent: string | null;
+  change_percent_reason?: string;
+  direction?: 'up' | 'down' | 'flat';
+  judgment?: 'favorable' | 'adverse' | 'neutral';
+}
+
+export interface ProductQueryGroup {
+  group: Record<string, ProductScalar>;
+  null_dimensions: string[];
+  metrics: Record<string, ProductScalar>;
+  comparison?: Record<string, ProductComparedMetric>;
+}
+
+export interface ProductQueryProvenance {
+  source: { source_id: string; name: string | null };
+  dataset_release: number;
+  integration_configuration_version: number;
+  business_context: Record<string, number>;
+  record_count: number | null;
+  permitted_record_count?: number;
+  acquired_at: string;
+  integrated_at: string;
+  released_at: string;
+  relationships: Array<{
+    name: string;
+    cardinality: 'one' | 'many';
+    source: { source_id: string; name: string | null };
+    dataset_id: string;
+    dataset_release: number;
+    integration_configuration_version: number;
+    business_context: Record<string, number>;
+    record_count: number;
+    acquired_at: string;
+    integrated_at: string;
+    released_at: string;
+  }>;
+}
+
+/** One governed Data Product Query answer, whichever Contract kind it read. */
+export interface ProductQueryAnswer {
+  data_product_id: string;
+  name: string;
+  api_path: string;
+  data_product_version: number;
+  data_product_release: number;
+  contract_version: { major: number; minor: number };
+  contract_hash: string;
+  kind: 'records' | 'search' | 'suggest' | 'aggregate';
+  columns?: string[];
+  records?: Array<Record<string, unknown>>;
+  linked?: string[];
+  matched_count?: number;
+  suggestions?: Array<{ value: string; count: number }>;
+  grouped_by?: string[];
+  metrics?: DataProductMetricView[];
+  groups?: ProductQueryGroup[];
+  totals?: { metrics: Record<string, ProductScalar>; comparison?: Record<string, ProductComparedMetric> } | null;
+  groups_total?: number;
+  returned: number;
+  truncated?: boolean;
+  next_cursor: string | null;
+  limit: number;
+  scanned_records: number;
+  window: ProductQueryWindowView | null;
+  comparison_window?: ProductQueryWindowView | null;
+  provenance: ProductQueryProvenance;
+  cache?: { reused: boolean };
+}
+
+export interface ProductExportCreated {
+  export_id: string;
+  workspace_id: string;
+  data_product_id: string;
+  data_product_release: number;
+  content_type: string;
+  columns: string[];
+  row_count: number;
+  content_hash: string;
+  object_path: string;
+  created_at: string;
+  expires_at: string;
 }
 
 /** One Data Product Grant in force, narrowed to a member or an Agent Identity. */
@@ -2394,6 +2766,34 @@ export const consoleApi = {
     request<Credentials>('/api/operator/enrollment', { method: 'POST', body: JSON.stringify(body) }),
   health: () => request<HealthView>('/api/operator/health'),
   license: () => request<LicenseView>('/api/operator/license'),
+  stepUp: (body: { purpose: string; target: string; password: string; totp?: string; recovery_code?: string }) =>
+    request<StepUpGrantView>('/api/operator/step-up', { method: 'POST', body: JSON.stringify(body) }),
+  recovery: () => request<RecoveryOverviewView>('/api/operator/recovery'),
+  recoverySet: (backupId: string) =>
+    request<RecoverySetDetailView>(`/api/operator/recovery/backups/${encodeURIComponent(backupId)}`),
+  verifyRecoverySet: (backupId: string) =>
+    request<RecoveryVerificationViewRow>(
+      `/api/operator/recovery/backups/${encodeURIComponent(backupId)}/verify`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+  restorations: () => request<RecoveryRestorationList>('/api/operator/recovery/restorations'),
+  restoration: (restorationId: string) =>
+    request<RestorationView>(`/api/operator/recovery/restorations/${encodeURIComponent(restorationId)}`),
+  startRestoration: (backupId: string, stepUpGrant: string) =>
+    request<RestorationView>('/api/operator/recovery/restorations', {
+      method: 'POST',
+      body: JSON.stringify({ backup_id: backupId, step_up_grant: stepUpGrant }),
+    }),
+  enableRestoredWorkers: (restorationId: string, stepUpGrant: string) =>
+    request<RestorationView>(
+      `/api/operator/recovery/restorations/${encodeURIComponent(restorationId)}/enable-workers`,
+      { method: 'POST', body: JSON.stringify({ step_up_grant: stepUpGrant }) },
+    ),
+  enableRestoredConnectivity: (restorationId: string, stepUpGrant: string) =>
+    request<RestorationView>(
+      `/api/operator/recovery/restorations/${encodeURIComponent(restorationId)}/enable-connectivity`,
+      { method: 'POST', body: JSON.stringify({ step_up_grant: stepUpGrant }) },
+    ),
 };
 
 /**
@@ -2470,6 +2870,26 @@ export const platformApi = {
     ),
   dataProducts: (workspaceId: string) =>
     request<DataProductList>(`/api/workspace/data-products${workspaceQuery(workspaceId)}`),
+  productReleases: (dataProductId: string, workspaceId: string) =>
+    request<ProductReleaseList>(
+      `/api/workspace/products/${encodeURIComponent(dataProductId)}/releases${workspaceQuery(workspaceId)}`,
+    ),
+  queryProduct: (dataProductId: string, workspaceId: string, query: unknown) =>
+    request<ProductQueryAnswer>(
+      `/api/workspace/products/${encodeURIComponent(dataProductId)}/query${workspaceQuery(workspaceId)}`,
+      { method: 'POST', body: JSON.stringify({ request: query }) },
+    ),
+  createProductExport: (dataProductId: string, workspaceId: string, query: unknown) =>
+    request<ProductExportCreated>(
+      `/api/workspace/products/${encodeURIComponent(dataProductId)}/exports${workspaceQuery(workspaceId)}`,
+      { method: 'POST', body: JSON.stringify({ request: query }) },
+    ),
+  myExports: (workspaceId: string, dataProductId?: string) =>
+    request<WorkspaceExportList>(
+      `/api/workspace/my-exports${workspaceQuery(workspaceId)}${
+        dataProductId === undefined ? '' : `&data_product_id=${encodeURIComponent(dataProductId)}`
+      }`,
+    ),
   productGovernance: (dataProductId: string) =>
     request<ProductGovernanceView>(`/api/workspace/products/${encodeURIComponent(dataProductId)}/governance`),
   previewProductEvolution: (dataProductId: string, contract: unknown) =>

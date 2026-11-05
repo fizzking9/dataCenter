@@ -8,7 +8,8 @@ import { PlatformFrame } from './screens/PlatformFrame.js';
 import { PlatformPicker } from './screens/PlatformPicker.js';
 import { PlatformSignInScreen } from './screens/PlatformSignInScreen.js';
 import { WorkspaceAudit, WorkspaceMembers } from './screens/PlatformWorkspaceAdminScreen.js';
-import { WorkspaceContext, WorkspaceOverview, WorkspaceProducts } from './screens/PlatformWorkspaceScreen.js';
+import { WorkspaceContext, WorkspaceOverview } from './screens/PlatformWorkspaceScreen.js';
+import { WorkspaceExplore } from './screens/PlatformExploreScreen.js';
 import { WorkspaceProductGovernance } from './screens/PlatformProductGovernanceScreen.js';
 import { WorkspaceProductProposals } from './screens/PlatformProductProposalScreen.js';
 import { WorkspaceProposals } from './screens/PlatformProposalScreen.js';
@@ -332,7 +333,7 @@ export function PlatformApp() {
   ) : route.view === 'scrapers' ? (
     <WorkspaceScrapers workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'products' ? (
-    <WorkspaceProducts workspaceId={activeId} onSessionLost={sessionLost} />
+    <WorkspaceExplore workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'productGovernance' ? (
     <WorkspaceProductGovernance workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'productProposals' ? (

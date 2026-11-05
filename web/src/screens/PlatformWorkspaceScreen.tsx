@@ -3,7 +3,6 @@ import {
   platformApi,
   type ContextHistoryView,
   type ContextView,
-  type DataProductList,
   type WorkspaceRoleValue,
 } from '../api.js';
 import { apiFailureText, formatInstant, roleLabel } from '../format.js';
@@ -39,69 +38,6 @@ export function WorkspaceOverview({ workspaceName, role, sessionExpiresAt }: Wor
           { term: t('session.expires'), value: formatInstant(sessionExpiresAt) },
         ]}
       />
-    </Panel>
-  );
-}
-
-/** The Data Products published in the active Workspace. */
-export function WorkspaceProducts({ workspaceId, onSessionLost }: WorkspaceViewProps) {
-  const [list, setList] = useState<DataProductList | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    setList(null);
-    setFailed(false);
-    void platformApi.dataProducts(workspaceId).then((result) => {
-      if (!active) return;
-      if (!result.ok) {
-        if (result.status === 401) {
-          onSessionLost();
-          return;
-        }
-        setFailed(true);
-        return;
-      }
-      setList(result.data);
-    });
-    return () => {
-      active = false;
-    };
-  }, [workspaceId, onSessionLost]);
-
-  return (
-    <Panel level={1} title={t('workspace.products.title')} description={t('workspace.products.description')}>
-      {failed ? <Alert tone="error">{t('platform.unavailable')}</Alert> : null}
-      {list === null ? (
-        failed ? null : (
-          <p className="empty" role="status">
-            {t('platform.loading')}
-          </p>
-        )
-      ) : list.data_products.length === 0 ? (
-        <p className="empty">{t('workspace.products.empty')}</p>
-      ) : (
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th scope="col">{t('workspace.products.name')}</th>
-              <th scope="col">{t('workspace.products.apiPath')}</th>
-              <th scope="col">{t('workspace.products.version')}</th>
-              <th scope="col">{t('workspace.products.release')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {list.data_products.map((product) => (
-              <tr key={product.data_product_id}>
-                <td>{product.name}</td>
-                <td className="data-table__mono">{product.api_path}</td>
-                <td>{product.data_product_version}</td>
-                <td>{product.data_product_release}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
     </Panel>
   );
 }

@@ -38,11 +38,27 @@ export interface OperatorSessionRecord {
   revoked_at: string | null;
 }
 
+/**
+ * One fresh authentication challenge beside a live session, bound to the exact
+ * consequential purpose and target it unlocks. Only the hash is stored, and a
+ * grant is single-use, so a browser cannot reuse or fabricate one.
+ */
+export interface OperatorStepUpRecord {
+  grant_hash: string;
+  operator_id: string;
+  purpose: string;
+  target: string;
+  verified_at: string;
+  expires_at: string;
+  method: 'totp' | 'recovery_code';
+}
+
 export interface OperatorConsoleState {
   schema_version: number;
   accounts: OperatorRecord[];
   enrollments: OperatorEnrollment[];
   sessions: OperatorSessionRecord[];
+  step_ups: OperatorStepUpRecord[];
 }
 
 export const CONSOLE_SCHEMA_VERSION = 1;
@@ -53,9 +69,13 @@ function consolePath(root: string): string {
 
 export function readOperatorConsole(root: string): OperatorConsoleState {
   const path = consolePath(root);
-  return existsSync(path)
-    ? readJsonFile<OperatorConsoleState>(path)
-    : { schema_version: CONSOLE_SCHEMA_VERSION, accounts: [], enrollments: [], sessions: [] };
+  if (!existsSync(path)) {
+    return { schema_version: CONSOLE_SCHEMA_VERSION, accounts: [], enrollments: [], sessions: [], step_ups: [] };
+  }
+  const stored = readJsonFile<OperatorConsoleState>(path);
+  // A console written before step-up grants existed reads as holding none, so
+  // an upgrade never grants a consequential action by omission.
+  return { ...stored, step_ups: stored.step_ups ?? [] };
 }
 
 export function writeOperatorConsole(root: string, state: OperatorConsoleState): void {

@@ -148,6 +148,8 @@ export function createExport(options: {
   masterKey: string;
   token: string;
   dataProductId: string;
+  /** The active Workspace a browser names, so a foreign Product is never exported. */
+  workspaceId?: string;
   /** A query document on disk, which the CLI reads. */
   requestPath?: string;
   /** The same query a browser form already parsed on the server. */
@@ -157,6 +159,15 @@ export function createExport(options: {
   const context: ActionContext = { action: 'data_product_export', scope: 'workspace' };
   const actor = resolveActor(authorizer, options.token, context);
   const product = requireReadableProduct(authorizer, actor, context, options.dataProductId);
+  if (options.workspaceId !== undefined && product.workspace_id !== options.workspaceId) {
+    deny(
+      authorizer,
+      actorLabel(actor.user),
+      { ...context, workspace_id: options.workspaceId, target: product.data_product_id },
+      'DATA_PRODUCT_NOT_AVAILABLE',
+      'The Data Product is not available to this actor.',
+    );
+  }
   const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
   const fail: Fail = (code, message, nextStep) => reject(authorizer, actorLabel(actor.user), scoped, code, message, nextStep);
   const request = options.request !== undefined
@@ -403,6 +414,34 @@ function exportStatus(record: ExportRecord, now: number): 'active' | 'expired' |
   return 'active';
 }
 
+/** One export as an authorized reader may see it, never another producer's content. */
+function exportView(
+  session: PlatformSession,
+  record: ExportRecord,
+  now: number,
+  viewerUserId: string,
+): Record<string, unknown> {
+  const product = findDataProduct(session.state.data_products, record.data_product_id);
+  const status = exportStatus(record, now);
+  return {
+    export_id: record.export_id,
+    data_product_id: record.data_product_id,
+    data_product_name: product?.name ?? null,
+    data_product_release: record.data_product_release,
+    producer: findUserById(session.state, record.actor_user_id)?.username ?? null,
+    created_at: record.created_at,
+    expires_at: record.expires_at,
+    status,
+    revoked_at: record.revoked_at ?? null,
+    row_count: record.row_count,
+    columns: [...record.columns],
+    row_filters: record.row_filters.map((filter) => ({ ...filter })),
+    content_hash: record.content_hash,
+    downloaded_at: record.downloaded_at,
+    can_download: record.actor_user_id === viewerUserId && status === 'active',
+  };
+}
+
 /**
  * Lists the governed exports of one Workspace, for its administrators. A
  * Consumer never reaches this surface; the export a Consumer may download is
@@ -428,28 +467,46 @@ export function listExports(options: {
     .filter((record) => record.workspace_id === options.workspaceId)
     .filter((record) => options.dataProductId === undefined || record.data_product_id === options.dataProductId)
     .sort((left, right) => right.created_at.localeCompare(left.created_at))
-    .map((record) => {
-      const product = findDataProduct(session.state.data_products, record.data_product_id);
-      const status = exportStatus(record, now);
-      return {
-        export_id: record.export_id,
-        data_product_id: record.data_product_id,
-        data_product_name: product?.name ?? null,
-        data_product_release: record.data_product_release,
-        producer: findUserById(session.state, record.actor_user_id)?.username ?? null,
-        created_at: record.created_at,
-        expires_at: record.expires_at,
-        status,
-        revoked_at: record.revoked_at ?? null,
-        row_count: record.row_count,
-        columns: [...record.columns],
-        row_filters: record.row_filters.map((filter) => ({ ...filter })),
-        content_hash: record.content_hash,
-        downloaded_at: record.downloaded_at,
-        can_download: record.actor_user_id === actor.user.user_id && status === 'active',
-      };
-    });
+    .map((record) => exportView(session, record, now, actor.user.user_id));
   session.audit({ ...context, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { exports_returned: exports.length } });
+  return { workspace_id: options.workspaceId, exports };
+}
+
+/**
+ * Lists only the exports one Consumer produced in the active Workspace. Another
+ * Consumer's export is absent rather than redacted, so no producer or content
+ * is disclosed to an actor who may not download it.
+ */
+export function listOwnExports(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  workspaceId: string;
+  dataProductId?: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'data_product_export_listing',
+    scope: 'workspace',
+    workspace_id: options.workspaceId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  if (workspaceRoleOf(session.state, actor.user.user_id, options.workspaceId) === null) {
+    deny(session, actorLabel(actor.user), context, 'WORKSPACE_ACCESS_DENIED', 'The Workspace is not available to this actor.');
+  }
+  const now = Date.now();
+  const exports = session.state.exports
+    .filter((record) => record.workspace_id === options.workspaceId)
+    .filter((record) => record.actor_user_id === actor.user.user_id)
+    .filter((record) => options.dataProductId === undefined || record.data_product_id === options.dataProductId)
+    .sort((left, right) => right.created_at.localeCompare(left.created_at))
+    .map((record) => exportView(session, record, now, actor.user.user_id));
+  session.audit({
+    ...context,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: { exports_returned: exports.length, own: true },
+  });
   return { workspace_id: options.workspaceId, exports };
 }
 
