@@ -39,6 +39,8 @@ interface BatchFragment {
 interface IntegrationOutcome {
   records: DatasetRecordRow[];
   rejections: RecordRejection[];
+  /** What each Raw Acquisition contributed, so a guided upload can state it. */
+  acquisition_outcomes: Array<{ raw_id: string; accepted: number; rejected: number }>;
 }
 
 /** One fragment's source records, whichever representation acquired them. */
@@ -367,6 +369,7 @@ function integrate(
 ): IntegrationOutcome {
   const records = new Map<string, DatasetRecordRow>();
   const rejections: RecordRejection[] = [];
+  const acquisitionOutcomes: Array<{ raw_id: string; accepted: number; rejected: number }> = [];
   const rules: IntegrationRules = {
     identity: version.identity_fields,
     schema: version.schema,
@@ -397,11 +400,17 @@ function integrate(
     const outcome = applyIntegrationTable(rules, table, fragment.raw.raw_id, seenInBatch);
     for (const record of outcome.records) records.set(record.identity, record);
     rejections.push(...outcome.rejections);
+    acquisitionOutcomes.push({
+      raw_id: fragment.raw.raw_id,
+      accepted: outcome.records.length,
+      rejected: outcome.rejections.length,
+    });
   }
 
   return {
     records: [...records.values()].sort((left, right) => left.identity.localeCompare(right.identity)),
     rejections,
+    acquisition_outcomes: acquisitionOutcomes,
   };
 }
 
@@ -498,7 +507,7 @@ export function releaseDatasetFor(
     && latest.records_hash === recordsHash
     && latest.integration_configuration_version === version.version) {
     session.audit({ ...scoped, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { reused_release: latest.release } });
-    return { ...view(dataset, latest), reused: true };
+    return { ...view(dataset, latest), reused: true, acquisition_outcomes: outcome.acquisition_outcomes };
   }
 
   const release: DatasetReleaseRecord = {
@@ -546,7 +555,7 @@ export function releaseDatasetFor(
       integration_configuration_version: release.integration_configuration_version,
     },
   });
-  return { ...view(dataset, release), reused: false };
+  return { ...view(dataset, release), reused: false, acquisition_outcomes: outcome.acquisition_outcomes };
 }
 
 /** Reads one exact Dataset Release, including the canonical records it governs. */

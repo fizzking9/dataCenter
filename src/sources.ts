@@ -8,7 +8,17 @@ import {
   type ActionContext,
   type Actor,
 } from './authz.js';
-import { findSource, type SourceRecord, type SourceType } from './catalog.js';
+import {
+  DEFAULT_DOCUMENT_PARSE_LIMITS,
+  findDataset,
+  findIntegrationConfiguration,
+  findSource,
+  latestDatasetRelease,
+  type DatasetReleaseRecord,
+  type SourceRecord,
+  type SourceType,
+} from './catalog.js';
+import { OperatorError } from './errors.js';
 import { workspaceRoleOf } from './platform.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
@@ -39,6 +49,174 @@ export function requireAdministeredSource(
     deny(session, actorLabel(actor.user), scoped, 'SOURCE_NOT_AVAILABLE', 'The Source is not available to this actor.');
   }
   return source;
+}
+
+/**
+ * The refusal a browser upload sees. A Workspace member who lacks administration
+ * is explicitly forbidden, while a non-member reads the very same answer as an
+ * identifier that names nothing, so no foreign identifier confirms existence.
+ */
+export function requireAdministrableSource(
+  session: PlatformSession,
+  actor: Actor,
+  context: ActionContext,
+  sourceId: string,
+): SourceRecord {
+  const source = findSource(session.state.sources, sourceId);
+  if (source !== undefined) {
+    const role = workspaceRoleOf(session.state, actor.user.user_id, source.workspace_id);
+    if (role === 'Workspace Administrator') return source;
+    if (role !== null) {
+      session.audit({
+        ...context,
+        workspace_id: source.workspace_id,
+        target: source.source_id,
+        actor: actorLabel(actor.user),
+        outcome: 'denied',
+        detail: { error_code: 'SOURCE_NOT_AVAILABLE' },
+      });
+      throw new OperatorError(
+        'SOURCE_NOT_AVAILABLE',
+        'The Source is not available to this actor.',
+        undefined,
+        403,
+      );
+    }
+  }
+  deny(session, actorLabel(actor.user), context, 'SOURCE_NOT_AVAILABLE', 'The Source is not available to this actor.');
+}
+
+/** The Sources of one administered Workspace, named without any raw content. */
+export function listWorkspaceSources(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  workspaceId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'source_listing',
+    scope: 'workspace',
+    workspace_id: options.workspaceId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  requireWorkspaceAdministrator(session, actor, context, options.workspaceId);
+  return {
+    workspace_id: options.workspaceId,
+    sources: session.state.sources
+      .filter((source) => source.workspace_id === options.workspaceId)
+      .map((source) => ({
+        source_id: source.source_id,
+        name: source.name,
+        type: source.type,
+        created_at: source.created_at,
+      })),
+  };
+}
+
+function releaseSummary(release: DatasetReleaseRecord): Record<string, unknown> {
+  return {
+    release: release.release,
+    created_at: release.created_at,
+    record_count: release.record_count,
+    record_rejection_count: release.record_rejections.length,
+    records_hash: release.records_hash,
+    integration_configuration_version: release.integration_configuration_version,
+    provenance: {
+      batch_ids: [...release.provenance.batch_ids],
+      acquisition_run_ids: [...release.provenance.acquisition_run_ids],
+      raw_acquisition_ids: [...release.provenance.raw_acquisition_ids],
+      acquired_at: release.provenance.acquired_at,
+      integrated_at: release.provenance.integrated_at,
+    },
+    ...(release.document_processing === undefined
+      ? {}
+      : {
+        document_processing: {
+          parser: { ...release.document_processing.parser },
+          limits: { ...release.document_processing.limits },
+        },
+      }),
+  };
+}
+
+/**
+ * The one administered Source as the browser configures it: the immutable
+ * Configuration Versions, the exact Releases they produced, the Runs that
+ * acquired the bits, and the most recent acquisition Provenance. Raw object
+ * locators and bytes never enter this view.
+ */
+export function showWorkspaceSource(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  sourceId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'source_read', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const source = requireAdministeredSource(session, actor, context, options.sourceId);
+  const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
+
+  const artifact = findIntegrationConfiguration(session.state.integration_configurations, source.source_id);
+  const dataset = findDataset(session.state.datasets, source.source_id);
+  const latest = latestDatasetRelease(dataset);
+  const batches = session.state.integration_batches.filter((batch) => batch.source_id === source.source_id);
+  const lastBatch = batches[batches.length - 1];
+
+  session.audit({ ...scoped, actor: actorLabel(actor.user), outcome: 'succeeded' });
+  return {
+    source: {
+      source_id: source.source_id,
+      workspace_id: source.workspace_id,
+      name: source.name,
+      type: source.type,
+      created_at: source.created_at,
+    },
+    configuration: {
+      adopted_version: artifact?.adopted_version ?? null,
+      versions: (artifact?.versions ?? []).map((version) => ({
+        version: version.version,
+        published_at: version.published_at,
+        content_hash: version.content_hash,
+        schema: version.schema.map((field) => ({ ...field })),
+        identity_fields: [...version.identity_fields],
+        cleaning: version.cleaning.map((rule) => ({ ...rule })),
+        mapping: { ...version.mapping },
+        document_limits: { ...(version.document_limits ?? DEFAULT_DOCUMENT_PARSE_LIMITS) },
+      })),
+    },
+    dataset: {
+      releases: (dataset?.releases ?? []).map((release) => releaseSummary(release)),
+      ...(latest === undefined
+        ? {}
+        : {
+          latest: {
+            ...releaseSummary(latest),
+            record_rejections: latest.record_rejections.map((rejection) => ({ ...rejection })),
+          },
+        }),
+    },
+    runs: session.state.acquisition_runs
+      .filter((run) => run.source_id === source.source_id)
+      .map((run) => ({
+        acquisition_run_id: run.acquisition_run_id,
+        status: run.status,
+        queued_at: run.queued_at,
+        started_at: run.started_at,
+        completed_at: run.completed_at,
+        integration_configuration_version: run.integration_configuration_version,
+      })),
+    latest_acquisition: lastBatch === undefined
+      ? null
+      : {
+        batch_id: lastBatch.batch_id,
+        acquisition_run_id: lastBatch.acquisition_run_id,
+        raw_acquisition_ids: [...lastBatch.raw_acquisition_ids],
+        created_at: lastBatch.created_at,
+        quarantined: lastBatch.quarantined_at !== null,
+      },
+  };
 }
 
 /** Registers a Workspace-owned Source that later acquisitions read from. */
