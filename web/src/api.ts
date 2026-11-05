@@ -1550,6 +1550,204 @@ export interface ProposalAdoptionResult {
   previous_adopted_version: number | null;
 }
 
+/** One metric a candidate Contract publishes for Consumers to request. */
+export interface ProductContractMetricView {
+  name: string;
+  description?: string;
+  aggregation: 'count' | 'sum' | 'min' | 'max' | 'avg';
+  field?: string;
+  value_type: 'integer' | 'decimal' | 'money' | 'date' | 'timestamp';
+  unit?: string;
+  currency?: string;
+  definition?: string;
+  dimensions?: string[];
+}
+
+/** The Consumer-facing Contract a reviewed candidate would publish. */
+export interface ProductContractView {
+  title: string;
+  description?: string;
+  fields: Array<{ name: string; description?: string }>;
+  dimensions: string[];
+  metrics: ProductContractMetricView[];
+  grain: string[];
+  time?: { field: string; precision: 'date' | 'timestamp'; time_zone: string };
+  filters: string[];
+  default_limit: number;
+  max_limit: number;
+}
+
+/** The exact inputs a Data Product Proposal named. */
+export interface ProductProposalBaseView {
+  dataset_id: string;
+  dataset_release: number;
+  dataset_records_hash: string;
+  dataset_schema_hash: string;
+  common_business_context_version: number;
+  common_business_context_content_hash: string;
+  workspace_business_context_version: number;
+  workspace_business_context_content_hash: string;
+  data_product_id: string | null;
+  data_product_version: number | null;
+  data_product_contract_hash: string | null;
+}
+
+/** The lineage every Data Product Approval and Publication restates. */
+export interface ProductProposalProvenanceView {
+  model_profile_id: string;
+  model_profile_version: number;
+  model_profile_content_hash: string;
+  adapter: string;
+  model_id: string;
+  binding_id: string;
+  prompt_id: string;
+  prompt_hash: string;
+  requirement_hash: string;
+  validation_hash: string;
+  preview_hash: string;
+  candidate_content_hash: string;
+  proposal_hash: string;
+}
+
+/** The evidence one deterministic validation run produced. */
+export interface ProductProposalValidationView {
+  validated_at: string;
+  validated_by: string;
+  dataset_release: number;
+  contract_hash: string;
+  metric_definition_keys: string[];
+  checks: string[];
+  evidence_hash: string;
+}
+
+/** The API shape, queries, results, freshness, and Provenance a preview exposed. */
+export interface ProductProposalPreviewView {
+  previewed_at: string;
+  previewed_by: string;
+  dataset_release: number;
+  contract_hash: string;
+  api_shape: {
+    method: string;
+    route: string;
+    api_path: string | null;
+    contract_version: { major: number; minor: number };
+    request: Record<string, unknown>;
+  };
+  example_queries: Array<Record<string, unknown>>;
+  representative_results: Array<Record<string, unknown>>;
+  freshness: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  narrative: { text?: string; evidence_refs?: unknown };
+  evidence_hash: string;
+}
+
+export interface ProductProposalDecisionView {
+  decided_at: string;
+  decided_by: string;
+  outcome: 'approved' | 'rejected';
+  reason: string | null;
+  evidence_hash: string;
+  provenance: ProductProposalProvenanceView;
+}
+
+export interface ProductProposalPublicationView {
+  published_at: string;
+  published_by: string;
+  data_product_id: string;
+  api_path: string;
+  data_product_version: number;
+  data_product_release: number;
+  dataset_release: number;
+  contract_hash: string;
+  evidence_hash: string;
+  provenance: ProductProposalProvenanceView;
+}
+
+/** One Data Product Proposal as the browser inspects and decides it. */
+export interface ProductProposalView {
+  proposal_id: string;
+  kind: 'data_product';
+  status: 'pending' | 'approved' | 'rejected' | 'published';
+  workspace_id: string;
+  source_id: string;
+  dataset_id: string;
+  binding_id: string;
+  created_at: string;
+  created_by: string;
+  requirement: {
+    text: string;
+    clarifications: Array<{ question: string; answer: string }>;
+    hash: string;
+  };
+  base: ProductProposalBaseView;
+  model: {
+    model_profile_id: string;
+    model_profile_version: number;
+    model_profile_content_hash: string;
+    adapter: string;
+    model_id: string;
+    prompt_id: string;
+    prompt_hash: string;
+  };
+  evidence: {
+    requirement_hash: string;
+    dataset_release_hash: string;
+    schema_fields: string[];
+    field_count: number;
+    metric_definition_keys: string[];
+    business_context_hash: string;
+  };
+  candidates: {
+    name: string;
+    contract: ProductContractView;
+    contract_hash: string;
+    content_hash: string;
+  };
+  proposal_hash: string;
+  validations: ProductProposalValidationView[];
+  previews: ProductProposalPreviewView[];
+  decisions: ProductProposalDecisionView[];
+  publications: ProductProposalPublicationView[];
+  freshness?: { fresh: boolean; current: ProductProposalBaseView | null };
+}
+
+export interface ProductProposalList {
+  source_id: string;
+  proposals: ProductProposalView[];
+}
+
+export interface ProductProposalValidationResult {
+  proposal_id: string;
+  status: ProductProposalView['status'];
+  validation: ProductProposalValidationView;
+}
+
+export interface ProductProposalPreviewResult {
+  proposal_id: string;
+  status: ProductProposalView['status'];
+  preview: ProductProposalPreviewView;
+}
+
+export interface ProductProposalDecisionResult {
+  proposal_id: string;
+  status: ProductProposalView['status'];
+  reason?: string;
+  decided_at?: string;
+  provenance?: ProductProposalProvenanceView;
+}
+
+export interface ProductProposalPublicationResult {
+  proposal_id: string;
+  status: ProductProposalView['status'];
+  data_product_id: string;
+  api_path: string;
+  data_product_version: number;
+  data_product_release: number;
+  dataset_release: number;
+  contract_version: { major: number; minor: number };
+  contract_hash: string;
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<ApiResult<T>> {
   let response: Response;
   try {
@@ -1965,6 +2163,46 @@ export const platformApi = {
     request<ProposalAdoptionResult>(`/api/workspace/proposals/${encodeURIComponent(proposalId)}/adopt`, {
       method: 'POST',
     }),
+  productProposals: (sourceId: string) =>
+    request<ProductProposalList>(`/api/workspace/sources/${encodeURIComponent(sourceId)}/product-proposals`),
+  generateProductProposal: (
+    sourceId: string,
+    body: {
+      binding_id: string;
+      name: string;
+      requirement: string;
+      clarifications: Array<{ question: string; answer: string }>;
+    },
+  ) =>
+    request<ProductProposalView>(
+      `/api/workspace/sources/${encodeURIComponent(sourceId)}/product-proposals/generate`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  validateProductProposal: (proposalId: string) =>
+    request<ProductProposalValidationResult>(
+      `/api/workspace/product-proposals/${encodeURIComponent(proposalId)}/validate`,
+      { method: 'POST' },
+    ),
+  previewProductProposal: (proposalId: string) =>
+    request<ProductProposalPreviewResult>(
+      `/api/workspace/product-proposals/${encodeURIComponent(proposalId)}/preview`,
+      { method: 'POST' },
+    ),
+  approveProductProposal: (proposalId: string) =>
+    request<ProductProposalDecisionResult>(
+      `/api/workspace/product-proposals/${encodeURIComponent(proposalId)}/approve`,
+      { method: 'POST' },
+    ),
+  rejectProductProposal: (proposalId: string, reason: string) =>
+    request<ProductProposalDecisionResult>(
+      `/api/workspace/product-proposals/${encodeURIComponent(proposalId)}/reject`,
+      { method: 'POST', body: JSON.stringify({ reason }) },
+    ),
+  publishProductProposal: (proposalId: string) =>
+    request<ProductProposalPublicationResult>(
+      `/api/workspace/product-proposals/${encodeURIComponent(proposalId)}/publish`,
+      { method: 'POST' },
+    ),
 };
 
 /**

@@ -549,7 +549,7 @@ test('real browser substitution, denial, inheritance, Chinese validation and aud
 
     // Inheritance never widens access: a Workspace Administrator keeps the
     // Consumer surfaces, while deployment authority opens no Workspace content.
-    assert.equal(await admin.getByRole('link', { name: '数据产品' }).count(), 1);
+    assert.equal(await admin.getByRole('link', { name: '数据产品', exact: true }).count(), 1);
     assert.equal(await admin.getByRole('navigation', { name: '部署导航' }).count(), 0);
 
     const deploymentPage = await open(browser, consoleServer.url, '/app');
