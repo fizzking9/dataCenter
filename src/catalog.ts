@@ -1976,6 +1976,28 @@ export interface ScraperVerificationRecord {
   evidence_hash: string;
 }
 
+/** What one versioned fixture page produced during an isolated preview. */
+export interface ScraperPreviewFixture {
+  name: string;
+  path: string;
+  record_count: number;
+  expected_record_count: number;
+  /** Whether the extracted records are exactly the ones the fixture pins. */
+  matches: boolean;
+  /** The extracted records, bounded for display; `record_count` stays exact. */
+  records: Array<Record<string, string>>;
+  records_hash: string;
+}
+
+/** The evidence one isolated fixture preview produced before Approval. */
+export interface ScraperPreviewRecord {
+  previewed_at: string;
+  previewed_by: string;
+  fixtures: ScraperPreviewFixture[];
+  passed: boolean;
+  evidence_hash: string;
+}
+
 /** The lineage every Approval, Publication, verification, and Adoption restates. */
 export interface ScraperProposalProvenance {
   engine: { name: 'declarative-scraper'; version: 1 };
@@ -1984,6 +2006,7 @@ export interface ScraperProposalProvenance {
   scraper_task_content_hash: string;
   fixtures_hash: string;
   validation_hash: string;
+  preview_hash: string;
   verification_hash: string;
   candidate_content_hash: string;
   proposal_hash: string;
@@ -2043,6 +2066,8 @@ export interface ScraperProposalRecord {
   repair: ScraperRepairRecord | null;
   proposal_hash: string;
   validations: ScraperValidationRecord[];
+  /** The isolated fixture previews Approval may cover. */
+  previews: ScraperPreviewRecord[];
   verifications: ScraperVerificationRecord[];
   decisions: ScraperDecisionRecord[];
   publications: ScraperPublicationRecord[];

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { resolveActor } from './auth.js';
-import { actorLabel, reject, requireWorkspaceAdministrator, type ActionContext } from './authz.js';
+import { actorLabel, reject, requireWorkspaceAdministrator, type ActionContext, type Actor } from './authz.js';
 import {
   latestScraperTaskVersion,
   type ScraperConstraints,
@@ -19,7 +19,7 @@ import { canonicalDigest } from './crypto.js';
 import { isRecord, readJsonDocument } from './documents.js';
 import type { Fail } from './errors.js';
 import { encryptSecret } from './keys.js';
-import { openPlatform } from './session.js';
+import { openPlatform, type PlatformSession } from './session.js';
 import { isValidSelector, parseSelector, pathAllows, staticPathPrefix } from './scraper-engine.js';
 
 const NAME_MINIMUM = 2;
@@ -356,26 +356,69 @@ export function publishScraperTask(options: {
   const actor = resolveActor(session, options.token, context);
   requireWorkspaceAdministrator(session, actor, context, options.workspaceId);
   const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), context, code, message, nextStep);
-
-  const name = options.name.trim();
-  if (name.length < NAME_MINIMUM || name.length > NAME_MAXIMUM) {
-    fail('SCRAPER_TASK_NAME_INVALID', 'A Scraper Task name must contain 2 to 128 characters.');
-  }
+  const name = validTaskName(options.name, fail);
   const parsed = readJsonDocument(
     options.configPath,
     fail,
     'SCRAPER_TASK_UNREADABLE',
     'The Scraper Task document must contain valid JSON.',
   );
+  return publishParsedTask(session, actor, context, options.workspaceId, name, parsed);
+}
+
+/**
+ * Publishes one Scraper Task Version from a declaration a guided form already
+ * parsed. The same parser, authorization, and Audit Event govern both entry
+ * points, so the browser never invents a second Task model.
+ */
+export function publishScraperTaskDeclaration(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  workspaceId: string;
+  name: string;
+  declaration: unknown;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'scraper_task_publication',
+    scope: 'workspace',
+    workspace_id: options.workspaceId,
+    target: options.name,
+  };
+  const actor = resolveActor(session, options.token, context);
+  requireWorkspaceAdministrator(session, actor, context, options.workspaceId);
+  const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), context, code, message, nextStep);
+  const name = validTaskName(options.name, fail);
+  return publishParsedTask(session, actor, context, options.workspaceId, name, options.declaration);
+}
+
+function validTaskName(raw: string, fail: Fail): string {
+  const name = raw.trim();
+  if (name.length < NAME_MINIMUM || name.length > NAME_MAXIMUM) {
+    fail('SCRAPER_TASK_NAME_INVALID', 'A Scraper Task name must contain 2 to 128 characters.');
+  }
+  return name;
+}
+
+function publishParsedTask(
+  session: PlatformSession,
+  actor: Actor,
+  context: ActionContext,
+  workspaceId: string,
+  name: string,
+  parsed: unknown,
+): Record<string, unknown> {
+  const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), context, code, message, nextStep);
   const input = parseScraperTask(parsed, fail);
 
   let task = session.state.scraper_tasks.find(
-    (candidate) => candidate.workspace_id === options.workspaceId && candidate.name.toLowerCase() === name.toLowerCase(),
+    (candidate) => candidate.workspace_id === workspaceId && candidate.name.toLowerCase() === name.toLowerCase(),
   );
   if (!task) {
     task = {
       scraper_task_id: randomUUID(),
-      workspace_id: options.workspaceId,
+      workspace_id: workspaceId,
       name,
       owner_user_id: actor.user.user_id,
       created_at: new Date().toISOString(),

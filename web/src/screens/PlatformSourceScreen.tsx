@@ -56,10 +56,14 @@ function rowKey(): string {
 
 const FIELD_TYPES: SourceSchemaField['type'][] = ['string', 'integer', 'number', 'date', 'timestamp'];
 const CLEANING_RULES: CleaningRow['rule'][] = ['trim', 'uppercase', 'lowercase', 'default', 'require_non_empty'];
-const SOURCE_TYPES: Array<{ value: SourceSummary['type']; labelKey: 'value.sourceType.file' | 'value.sourceType.document' | 'value.sourceType.http_json' }> = [
+const SOURCE_TYPES: Array<{
+  value: SourceSummary['type'];
+  labelKey: 'value.sourceType.file' | 'value.sourceType.document' | 'value.sourceType.http_json' | 'value.sourceType.scraper';
+}> = [
   { value: 'file', labelKey: 'value.sourceType.file' },
   { value: 'document', labelKey: 'value.sourceType.document' },
   { value: 'http_json', labelKey: 'value.sourceType.http_json' },
+  { value: 'scraper', labelKey: 'value.sourceType.scraper' },
 ];
 
 /**
@@ -147,7 +151,9 @@ export function WorkspaceSources({ workspaceId, onSessionLost }: WorkspaceSource
             value={type}
             onChange={(event) => {
               const chosen = event.target.value;
-              if (chosen === 'file' || chosen === 'document' || chosen === 'http_json') setType(chosen);
+              if (chosen === 'file' || chosen === 'document' || chosen === 'http_json' || chosen === 'scraper') {
+                setType(chosen);
+              }
             }}
           >
             {SOURCE_TYPES.map((option) => (

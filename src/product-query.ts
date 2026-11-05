@@ -809,7 +809,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
       ...scoped,
       actor: reader.label,
       outcome: 'succeeded',
-      detail: { data_product_release: release.release, cache: 'reused' },
+      detail: { data_product_release: release.release, cache: 'reused', ...reader.auditDetail },
     });
     return { ...cached, cache: { reused: true } };
   }
@@ -841,7 +841,12 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
       ...scoped,
       actor: reader.label,
       outcome: 'succeeded',
-      detail: { data_product_release: release.release, matched_count: hits.length, returned: records.length },
+      detail: {
+        data_product_release: release.release,
+        matched_count: hits.length,
+        returned: records.length,
+        ...reader.auditDetail,
+      },
     });
     return remember({
       ...identity,
@@ -874,7 +879,11 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
       ...scoped,
       actor: reader.label,
       outcome: 'succeeded',
-      detail: { data_product_release: release.release, suggestion_count: suggestions.length },
+      detail: {
+        data_product_release: release.release,
+        suggestion_count: suggestions.length,
+        ...reader.auditDetail,
+      },
     });
     return remember({
       ...identity,
@@ -918,7 +927,12 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
       ...scoped,
       actor: reader.label,
       outcome: 'succeeded',
-      detail: { data_product_release: release.release, matched_count: selected.length, returned: projected.length },
+      detail: {
+        data_product_release: release.release,
+        matched_count: selected.length,
+        returned: projected.length,
+        ...reader.auditDetail,
+      },
     });
     return remember({
       ...identity,
@@ -991,6 +1005,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
       data_product_release: release.release,
       group_count: merged.length,
       returned: returned.length,
+      ...reader.auditDetail,
     },
   });
   return remember({

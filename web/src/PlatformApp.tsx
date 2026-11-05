@@ -10,12 +10,13 @@ import { PlatformSignInScreen } from './screens/PlatformSignInScreen.js';
 import { WorkspaceAudit, WorkspaceMembers } from './screens/PlatformWorkspaceAdminScreen.js';
 import { WorkspaceContext, WorkspaceOverview, WorkspaceProducts } from './screens/PlatformWorkspaceScreen.js';
 import { WorkspaceProposals } from './screens/PlatformProposalScreen.js';
+import { WorkspaceScrapers } from './screens/PlatformScraperScreen.js';
 import { WorkspaceSources } from './screens/PlatformSourceScreen.js';
 import { Alert, Panel } from './ui/Panel.js';
 import { Shell } from './ui/Shell.js';
 
 const VIEWS = [
-  'overview', 'sources', 'products', 'context', 'members', 'audit', 'models', 'proposals',
+  'overview', 'sources', 'scrapers', 'products', 'context', 'members', 'audit', 'models', 'proposals',
   'modelProfiles', 'users',
 ] as const;
 type View = (typeof VIEWS)[number];
@@ -41,6 +42,7 @@ const DEPLOYMENT_KEYS: Partial<Record<View, string>> = {
 function viewOf(value: string | undefined): View {
   switch (value) {
     case 'sources':
+    case 'scrapers':
     case 'products':
     case 'context':
     case 'members':
@@ -312,6 +314,8 @@ export function PlatformApp() {
 
   const content = route.view === 'sources' ? (
     <WorkspaceSources workspaceId={activeId} onSessionLost={sessionLost} />
+  ) : route.view === 'scrapers' ? (
+    <WorkspaceScrapers workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'products' ? (
     <WorkspaceProducts workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'context' ? (

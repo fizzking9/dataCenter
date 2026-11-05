@@ -28,7 +28,14 @@ import {
   showRetentionPolicy,
   tickRetention,
 } from './retention.js';
-import { createAgentIdentity, registerOAuthClient, revokeAgentIdentity, revokeOAuthClient } from './agents.js';
+import {
+  createAgentDelegation,
+  createAgentIdentity,
+  registerOAuthClient,
+  revokeAgentDelegation,
+  revokeAgentIdentity,
+  revokeOAuthClient,
+} from './agents.js';
 import { login, logout } from './auth.js';
 import { issueOperatorEnrollment, revokeOperator, revokeOperatorEnrollment } from './operators.js';
 import { startConsoleServer } from './console-server.js';
@@ -782,6 +789,19 @@ async function main(): Promise<void> {
   }
   if (command === 'agent' && subcommand === 'revoke') {
     emit(revokeAgentIdentity({ ...governed(options), agentIdentityId: required(options, 'agent') }));
+    return;
+  }
+  if (command === 'agent' && subcommand === 'delegate') {
+    // The consenting User runs this: it records their own consent, never another's.
+    emit(createAgentDelegation({
+      ...governed(options),
+      agentIdentityId: required(options, 'agent'),
+      workspaceId: required(options, 'workspace'),
+    }));
+    return;
+  }
+  if (command === 'agent' && subcommand === 'delegate-revoke') {
+    emit(revokeAgentDelegation({ ...governed(options), delegationId: required(options, 'delegation') }));
     return;
   }
   if (command === 'agent' && subcommand === 'client-register') {
