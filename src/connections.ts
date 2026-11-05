@@ -13,7 +13,9 @@ import {
   type ConnectionAuth,
   type ConnectionPacingPolicy,
   type ConnectionPagination,
+  type ConnectionPublicationTargets,
   type ConnectionRetryPolicy,
+  type ConnectionSchedule,
 } from './catalog.js';
 import { describePacing, describeSession, resetSessions } from './connection-session.js';
 import { canonicalDigest } from './crypto.js';
@@ -118,13 +120,45 @@ function readPagination(session: PlatformSession, actor: string, context: Action
   };
 }
 
-function readSchedule(session: PlatformSession, actor: string, context: ActionContext, raw: unknown): { every_minutes: number } | null {
+function readSchedule(session: PlatformSession, actor: string, context: ActionContext, raw: unknown): ConnectionSchedule | null {
   if (raw === undefined || raw === null) return null;
   const every = isRecord(raw) ? raw['every_minutes'] : undefined;
+  const tolerance = isRecord(raw) ? raw['start_tolerance_seconds'] ?? 0 : undefined;
   if (!Number.isInteger(every) || (every as number) < 1 || (every as number) > 10_080) {
     reject(session, actor, context, 'CONNECTION_CONFIGURATION_INVALID', 'A schedule interval must be a whole number of minutes from 1 to 10080.');
   }
-  return { every_minutes: every as number };
+  if (!Number.isInteger(tolerance) || (tolerance as number) < 0 || (tolerance as number) > 3600) {
+    reject(session, actor, context, 'CONNECTION_CONFIGURATION_INVALID', 'A schedule start tolerance must be a whole number of seconds from 0 to 3600.');
+  }
+  return { every_minutes: every as number, start_tolerance_seconds: tolerance as number };
+}
+
+/**
+ * Reads how quickly a Source's result must become current. The two measurement
+ * points are ordered, so a declaration that cannot be met by construction is
+ * refused instead of honoured as a target it never expressed.
+ */
+function readPublicationTargets(
+  session: PlatformSession,
+  actor: string,
+  context: ActionContext,
+  raw: unknown,
+): ConnectionPublicationTargets | null {
+  if (raw === undefined || raw === null) return null;
+  if (!isRecord(raw)) {
+    reject(session, actor, context, 'CONNECTION_CONFIGURATION_INVALID', 'Publication targets must be a JSON object.');
+  }
+  const p95 = raw['p95_seconds'];
+  const p99 = raw['p99_seconds'];
+  for (const [label, value] of [['p95', p95], ['p99', p99]] as const) {
+    if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > 86_400) {
+      reject(session, actor, context, 'CONNECTION_CONFIGURATION_INVALID', `A publication ${label} target must be a whole number of seconds from 1 to 86400.`);
+    }
+  }
+  if ((p99 as number) < (p95 as number)) {
+    reject(session, actor, context, 'CONNECTION_CONFIGURATION_INVALID', 'A publication p99 target is never shorter than its p95 target.');
+  }
+  return { p95_seconds: p95 as number, p99_seconds: p99 as number };
 }
 
 function readAuth(session: PlatformSession, actor: string, context: ActionContext, raw: unknown): ConnectionAuth {
@@ -308,6 +342,7 @@ export function publishConnection(options: {
   const baseUrl = readBaseUrl(session, actorName, context, config['base_url']);
   const pagination = readPagination(session, actorName, context, config['pagination']);
   const schedule = readSchedule(session, actorName, context, config['schedule']);
+  const publicationTargets = readPublicationTargets(session, actorName, context, config['publication_targets']);
   const auth = readAuth(session, actorName, context, config['auth']);
   const retry = readRetry(session, actorName, context, config['retry']);
   const pacing = readPacing(session, actorName, context, config['pacing']);
@@ -355,6 +390,7 @@ export function publishConnection(options: {
     pacing,
     pagination,
     schedule,
+    publication_targets: publicationTargets,
   };
   const version: AcquisitionConnectionVersion = {
     ...content,
@@ -388,6 +424,7 @@ export function publishConnection(options: {
     pacing: { ...version.pacing },
     pagination: { ...version.pagination },
     schedule: version.schedule === null ? null : { ...version.schedule },
+    publication_targets: version.publication_targets === null ? null : { ...version.publication_targets },
     content_hash: version.content_hash,
     published_at: version.published_at,
   };
@@ -460,6 +497,7 @@ export function listConnections(options: {
         retry: { ...version.retry },
         pacing: { ...version.pacing },
         schedule: version.schedule === null ? null : { ...version.schedule },
+        publication_targets: version.publication_targets === null ? null : { ...version.publication_targets },
         content_hash: version.content_hash,
       })),
     }));
