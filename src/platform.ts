@@ -13,6 +13,8 @@ import type {
   IntegrationBatchRecord,
   IntegrationConfigurationArtifact,
   RawAcquisitionRecord,
+  ReportRecord,
+  ReportTemplateArtifact,
   SourceAcquisitionArtifact,
   SourceRecord,
   ArtifactProposalRecord,
@@ -32,7 +34,7 @@ export type DeploymentRole = 'Deployment Administrator';
 export type WorkspaceRole = 'Workspace Administrator' | 'Consumer';
 
 export const DEPLOYMENT_CONTEXT_ARTIFACT = 'deployment-business-context';
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 export const USERNAME_PATTERN = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,189}$/;
 
 export interface UserRecord {
@@ -196,6 +198,8 @@ export interface PlatformState {
   source_scraper_services: SourceScraperServiceRecord[];
   scraper_credentials: ScraperCredentialRecord[];
   scraper_runs: ScraperRunManifest[];
+  report_templates: ReportTemplateArtifact[];
+  reports: ReportRecord[];
 }
 
 /** Every human identity is stated as one account identifier of the form name@domain. */
@@ -252,6 +256,8 @@ export function readPlatform(root: string): PlatformState {
         source_scraper_services: [],
         scraper_credentials: [],
         scraper_runs: [],
+        report_templates: [],
+        reports: [],
       };
   // A Deployment installed under an earlier schema keeps working: the added
   // Collections start empty rather than failing the read closed.
@@ -288,6 +294,10 @@ export function readPlatform(root: string): PlatformState {
   state.source_scraper_services ??= [];
   state.scraper_credentials ??= [];
   state.scraper_runs ??= [];
+  // A Deployment written before Reports existed simply holds no stock; the
+  // Templates and Reports Collections start empty rather than failing the read.
+  state.report_templates ??= [];
+  state.reports ??= [];
   // A Run recorded before acquisition was queued still reads as a completed
   // manual attempt rather than a Run that never started.
   for (const run of state.acquisition_runs) {
