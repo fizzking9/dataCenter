@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { platformApi, type NavigationView, type PlatformSessionView } from './api.js';
 import { t } from './i18n/zh-CN.js';
 import { PlatformDeploymentScreen } from './screens/PlatformDeploymentScreen.js';
+import { DeploymentModelProfiles, WorkspaceModelBindings } from './screens/PlatformModelScreen.js';
 import { PlatformFrame } from './screens/PlatformFrame.js';
 import { PlatformPicker } from './screens/PlatformPicker.js';
 import { PlatformSignInScreen } from './screens/PlatformSignInScreen.js';
@@ -10,7 +11,7 @@ import { WorkspaceContext, WorkspaceOverview, WorkspaceProducts } from './screen
 import { Alert, Panel } from './ui/Panel.js';
 import { Shell } from './ui/Shell.js';
 
-const VIEWS = ['overview', 'products', 'context', 'members', 'audit'] as const;
+const VIEWS = ['overview', 'products', 'context', 'members', 'audit', 'models', 'modelProfiles'] as const;
 type View = (typeof VIEWS)[number];
 
 interface Route {
@@ -22,6 +23,7 @@ interface Route {
 
 const HOME: Route = { workspaceId: null, view: 'overview', deployment: false };
 const DEPLOYMENT: Route = { workspaceId: null, view: 'overview', deployment: true };
+const DEPLOYMENT_PROFILES: Route = { workspaceId: null, view: 'modelProfiles', deployment: true };
 
 function viewOf(value: string | undefined): View {
   switch (value) {
@@ -29,6 +31,7 @@ function viewOf(value: string | undefined): View {
     case 'context':
     case 'members':
     case 'audit':
+    case 'models':
       return value;
     default:
       return 'overview';
@@ -50,6 +53,7 @@ function decode(value: string): string {
 function parseRoute(pathname: string): Route {
   const normalized = pathname.replace(/\/+$/u, '');
   if (normalized === '/app/deployment') return DEPLOYMENT;
+  if (normalized === '/app/deployment/model-profiles') return DEPLOYMENT_PROFILES;
   const match = /^\/app\/w\/([^/]+)\/([^/]+)$/u.exec(normalized);
   if (match === null) return HOME;
   const id = match[1];
@@ -246,6 +250,12 @@ export function PlatformApp() {
   // the Workspace picker.
   if (route.deployment) {
     if (navigation.deployment.length === 0) return frame(null, <Unavailable />);
+    if (route.view === 'modelProfiles') {
+      if (!navigation.deployment.some((entry) => entry.key === 'deployment.modelProfiles')) {
+        return frame(null, <Unavailable />);
+      }
+      return frame('deployment.modelProfiles', <DeploymentModelProfiles onSessionLost={sessionLost} />);
+    }
     return frame('deployment.workspaces', <PlatformDeploymentScreen onSessionLost={sessionLost} />);
   }
 
@@ -288,6 +298,8 @@ export function PlatformApp() {
     <WorkspaceMembers workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'audit' ? (
     <WorkspaceAudit workspaceId={activeId} onSessionLost={sessionLost} />
+  ) : route.view === 'models' ? (
+    <WorkspaceModelBindings workspaceId={activeId} onSessionLost={sessionLost} />
   ) : (
     <WorkspaceOverview
       workspaceName={activeName}
