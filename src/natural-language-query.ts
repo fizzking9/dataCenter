@@ -678,7 +678,8 @@ export async function askDataProduct(options: {
     const code = planFailure ?? 'QUERY_PLAN_NOT_SIMPLIFIED_CHINESE';
     response['outcome'] = 'refused';
     response['reason_code'] = code;
-    response['interpretation'] = interpretation.length === 0 ? null : interpretation;
+    // A refused plan's prose is never published: it failed the language gate.
+    response['interpretation'] = null;
     response['limitations'] = [planLimitation(code)];
     return finish();
   }

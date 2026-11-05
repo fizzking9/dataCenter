@@ -25,7 +25,8 @@ export type MockBehaviour =
   | 'clarify_metric'
   | 'clarify_dimension'
   | 'omitted_metrics_plan'
-  | 'unpublished_metric_plan';
+  | 'unpublished_metric_plan'
+  | 'english_plan';
 
 export interface MockModelEndpoint {
   url: string;
@@ -122,6 +123,14 @@ function outputFor(purpose: string, body: Record<string, unknown>, behaviour: Mo
  * deliberately do, so certification can prove the platform refuses them.
  */
 function queryPlan(body: Record<string, unknown>, behaviour: MockBehaviour): Record<string, unknown> {
+  if (behaviour === 'english_plan') {
+    return {
+      action: 'query',
+      interpretation: 'Summarise the handled total for the selected period.',
+      query: { kind: 'aggregate', metrics: ['handled_total'], window: { start: '2026-01-01', end: '2026-01-31' } },
+    };
+  }
+
   if (behaviour === 'sql_plan') {
     return {
       action: 'query',

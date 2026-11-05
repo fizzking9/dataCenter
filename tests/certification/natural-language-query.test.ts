@@ -140,6 +140,12 @@ function dataProductAudits(fixture: PlatformFixture): number {
 }
 
 
+/** The only Latin tokens new copy may cite: governed identifiers and acronyms. */
+const LATIN_TOKENS = [
+  'include_totals', 'settled_average', 'handled_total', 'settled_total', 'device_count',
+  'limit', 'metrics', 'window', 'SQL', 'SN', 'CNY',
+];
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -458,6 +464,63 @@ test('NLQ discloses the resolved interpretation, filters, window, Release, Prove
   assert.equal(complete.partial_period, false, 'a window inside coverage is not partial');
   assert.equal(asRecord(complete.resolved)['partial_period'], false);
   assert.equal((complete.limitations as string[]).some((line) => line.includes('部分期间')), false);
+});
+
+/** Counts the Han characters in a string, so copy checks need no locale data. */
+function hanCount(text: string): number {
+  let count = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code >= 0x4e00 && code <= 0x9fff) count += 1;
+  }
+  return count;
+}
+
+/** Copy is Chinese when no English word survives once governed identifiers are set aside. */
+function assertChineseCopy(text: string, label: string): void {
+  assert.equal(typeof text, 'string', `${label} is a string`);
+  let rest = text;
+  for (const token of LATIN_TOKENS) rest = rest.split(token).join(' ');
+  assert.ok(hanCount(rest) >= 4, `${label} is written in Chinese: ${text}`);
+  assert.equal(/[A-Za-z]/u.test(rest), false, `${label} carries no English prose: ${text}`);
+}
+
+test('NLQ writes every new piece of user-facing copy in Simplified Chinese', async (t) => {
+  const s = await readySurface({ contract: EXTENDED_LEDGER_CONTRACT });
+  t.after(() => s.endpoint.close());
+
+  const answered = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-01-31 各城市的处理量合计是多少？']));
+  assert.equal(answered.outcome, 'answered', JSON.stringify(answered));
+  assertChineseCopy(answered.summary, 'the answered summary');
+  assertChineseCopy(String(answered.interpretation), 'the resolved interpretation');
+  assertChineseCopy(String(asRecord(answered.answer)['narrative']), 'the grounded narrative');
+
+  const clarified = asOutput(await ask(s, ['--question', '杭州的处理量合计是多少？']));
+  assert.equal(clarified.outcome, 'clarification', JSON.stringify(clarified));
+  assertChineseCopy(String(asRecord(clarified.clarification)['question']), 'the clarification question');
+  assertChineseCopy(clarified.summary, 'the clarification summary');
+
+  const empty = asOutput(await ask(s, ['--question', '2024-01-01 至 2024-01-31 杭州的处理量合计是多少？']));
+  assert.equal(empty.outcome, 'empty', JSON.stringify(empty));
+  assertChineseCopy(empty.summary, 'the empty summary');
+
+  // An English plan is refused, and its English prose never reaches the consumer.
+  s.endpoint.behaviour = 'english_plan';
+  const english = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-01-31 杭州的处理量合计是多少？']));
+  assert.equal(english.outcome, 'refused', JSON.stringify(english));
+  assert.equal(english.reason_code, 'QUERY_PLAN_NOT_SIMPLIFIED_CHINESE');
+  assert.equal(english.interpretation, null, 'an English interpretation is not echoed back');
+  assert.equal(JSON.stringify(english).includes('Summarise'), false, 'no English model prose reaches the consumer');
+  assertChineseCopy(english.summary, 'the refused summary');
+
+  // Every structured limitation of every turn is Chinese too.
+  for (const turn of [answered, clarified, empty, english]) {
+    const limitations = turn.limitations as string[];
+    assert.ok(limitations.length > 0, `${turn.outcome} states a limitation`);
+    for (const line of limitations) {
+      assertChineseCopy(line, `the ${turn.outcome} limitation`);
+    }
+  }
 });
 
 // The remaining acceptance criteria are added one at a time, each red before green.
