@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { platformApi, type DeploymentUserCreated, type DeploymentUserList } from '../api.js';
-import { roleLabel } from '../format.js';
+import {
+  platformApi,
+  type DeploymentUserCreated,
+  type DeploymentUserList,
+  type ServiceIdentityList,
+  type ServiceIdentityView,
+} from '../api.js';
+import { formatInstant, roleLabel } from '../format.js';
 import { message, optional, t } from '../i18n/zh-CN.js';
 import { Button } from '../ui/Button.js';
 import { Confirmation } from '../ui/Confirm.js';
@@ -295,6 +301,354 @@ export function DeploymentUsers({ onSessionLost }: DeploymentAdminProps) {
           />
         </Panel>
       )}
+
+      <OwnershipTransfer onSessionLost={onSessionLost} />
+      <ServiceIdentities onSessionLost={onSessionLost} />
+    </Panel>
+  );
+}
+
+/**
+ * Moves accountability for every Artifact one User owns to another eligible User
+ * in the same scope, so deactivation can never leave an Artifact unowned.
+ */
+export function OwnershipTransfer({ onSessionLost }: DeploymentAdminProps) {
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [pending, setPending] = useState<{ from: string; to: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
+
+  const confirm = (): void => {
+    if (pending === null) return;
+    setBusy(true);
+    setNotice(null);
+    void platformApi.transferOwnership(pending.from, pending.to).then((result) => {
+      setBusy(false);
+      setPending(null);
+      if (!result.ok) {
+        if (result.status === 401) {
+          onSessionLost();
+          return;
+        }
+        setNotice({
+          tone: 'error',
+          text: optional(`error.api.${result.error.code}`) ?? t('deployment.ownership.failed'),
+          code: result.error.code,
+        });
+        return;
+      }
+      setFrom('');
+      setTo('');
+      setNotice({
+        tone: 'info',
+        text: result.data.transferred === 0
+          ? t('deployment.ownership.none')
+          : message('deployment.ownership.transferred', {
+              count: String(result.data.transferred),
+              owner: result.data.owner,
+            }),
+      });
+    });
+  };
+
+  return (
+    <Panel
+      level={2}
+      title={t('deployment.ownership.title')}
+      description={t('deployment.ownership.description')}
+    >
+      {notice === null ? null : (
+        <Alert tone={notice.tone} {...(notice.code === undefined ? {} : { code: notice.code })}>
+          {notice.text}
+        </Alert>
+      )}
+      <div className="form__grid">
+        <Field
+          id="ownership-from"
+          label={t('deployment.ownership.from')}
+          value={from}
+          onChange={setFrom}
+          mono
+        />
+        <Field
+          id="ownership-to"
+          label={t('deployment.ownership.to')}
+          value={to}
+          onChange={setTo}
+          mono
+        />
+      </div>
+      <div className="form__actions">
+        <Button
+          busy={busy}
+          onClick={() => {
+            setNotice(null);
+            setPending({ from: from.trim(), to: to.trim() });
+          }}
+        >
+          {t('deployment.ownership.submit')}
+        </Button>
+      </div>
+      {pending === null ? null : (
+        <Confirmation
+          title={t('deployment.ownership.confirmTitle')}
+          target={`${pending.from} → ${pending.to}`}
+          scope={t('value.auditScope.deployment')}
+          consequence={t('deployment.ownership.consequence')}
+          confirmLabel={t('deployment.ownership.confirm')}
+          busy={busy}
+          onConfirm={confirm}
+          onCancel={() => setPending(null)}
+        />
+      )}
+    </Panel>
+  );
+}
+
+type IdentityPending =
+  | { kind: 'create'; name: string; workspaceIds: string[] }
+  | { kind: 'revoke'; identity: ServiceIdentityView };
+
+/**
+ * Internal executors: each Service Identity is bound to explicit Workspaces and
+ * carries execution only. It is named apart from an Agent Identity, which is the
+ * external Consumer principal, and it can never be granted consumption here.
+ */
+export function ServiceIdentities({ onSessionLost }: DeploymentAdminProps) {
+  const [list, setList] = useState<ServiceIdentityList | null>(null);
+  const [workspaces, setWorkspaces] = useState<Array<{ workspace_id: string; name: string }>>([]);
+  const [failed, setFailed] = useState(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [pending, setPending] = useState<IdentityPending | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [name, setName] = useState('');
+  const [bound, setBound] = useState<string[]>([]);
+
+  const load = useCallback(async (): Promise<void> => {
+    const [identities, deploymentWorkspaces] = await Promise.all([
+      platformApi.serviceIdentities(),
+      platformApi.deploymentWorkspaces(),
+    ]);
+    if (!identities.ok) {
+      if (identities.status === 401) {
+        onSessionLost();
+        return;
+      }
+      setFailed(true);
+      return;
+    }
+    setFailed(false);
+    setList(identities.data);
+    if (deploymentWorkspaces.ok) {
+      setWorkspaces(deploymentWorkspaces.data.workspaces.map((entry) => ({
+        workspace_id: entry.workspace_id,
+        name: entry.name,
+      })));
+    }
+  }, [onSessionLost]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const confirmed = (result: { status: number; error: { code: string } }, fallback: string): void => {
+    setBusy(false);
+    setPending(null);
+    if (result.status === 401) {
+      onSessionLost();
+      return;
+    }
+    setNotice({
+      tone: 'error',
+      text: optional(`error.api.${result.error.code}`) ?? fallback,
+      code: result.error.code,
+    });
+  };
+
+  const confirm = (): void => {
+    if (pending === null) return;
+    setBusy(true);
+    setNotice(null);
+    if (pending.kind === 'create') {
+      void platformApi.createServiceIdentity(pending.name, pending.workspaceIds).then(async (result) => {
+        if (!result.ok) {
+          confirmed(result, t('deployment.serviceIdentities.createFailed'));
+          return;
+        }
+        await load();
+        setBusy(false);
+        setPending(null);
+        setName('');
+        setBound([]);
+        setNotice({
+          tone: 'info',
+          text: message('deployment.serviceIdentities.created', { name: result.data.name }),
+        });
+      });
+      return;
+    }
+    void platformApi.revokeServiceIdentity(pending.identity.service_identity_id).then(async (result) => {
+      if (!result.ok) {
+        confirmed(result, t('deployment.serviceIdentities.revokeFailed'));
+        return;
+      }
+      await load();
+      setBusy(false);
+      setPending(null);
+      setNotice({
+        tone: 'info',
+        text: message('deployment.serviceIdentities.revoked', { name: pending.identity.name }),
+      });
+    });
+  };
+
+  return (
+    <Panel
+      level={2}
+      title={t('deployment.serviceIdentities.title')}
+      description={t('deployment.serviceIdentities.description')}
+    >
+      {failed ? <Alert tone="error">{t('platform.unavailable')}</Alert> : null}
+      {notice === null ? null : (
+        <Alert tone={notice.tone} {...(notice.code === undefined ? {} : { code: notice.code })}>
+          {notice.text}
+        </Alert>
+      )}
+      {list === null ? (
+        failed ? null : (
+          <p className="empty" role="status">
+            {t('platform.loading')}
+          </p>
+        )
+      ) : list.service_identities.length === 0 ? (
+        <p className="empty">{t('deployment.serviceIdentities.empty')}</p>
+      ) : (
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th scope="col">{t('deployment.serviceIdentities.name')}</th>
+              <th scope="col">{t('deployment.serviceIdentities.workspaces')}</th>
+              <th scope="col">{t('deployment.serviceIdentities.authority')}</th>
+              <th scope="col">{t('deployment.serviceIdentities.status')}</th>
+              <th scope="col">{t('deployment.serviceIdentities.createdAt')}</th>
+              <th scope="col">{t('deployment.serviceIdentities.actions')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.service_identities.map((identity) => (
+              <tr key={identity.service_identity_id}>
+                <td className="data-table__mono">{identity.name}</td>
+                <td>{identity.workspaces.map((entry) => entry.name).join('、')}</td>
+                <td>{t('deployment.serviceIdentities.authorityValue')}</td>
+                <td>
+                  {identity.status === 'active'
+                    ? t('value.identityStatus.active')
+                    : t('deployment.serviceIdentities.revokedStatus')}
+                </td>
+                <td>{formatInstant(identity.created_at)}</td>
+                <td>
+                  {identity.status === 'active' ? (
+                    <Button
+                      variant="quiet"
+                      busy={busy}
+                      onClick={() => {
+                        setNotice(null);
+                        setPending({ kind: 'revoke', identity });
+                      }}
+                    >
+                      {message('deployment.serviceIdentities.revoke', { name: identity.name })}
+                    </Button>
+                  ) : (
+                    t('deployment.users.none')
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <Panel
+        level={2}
+        title={t('deployment.serviceIdentities.create.title')}
+        description={t('deployment.serviceIdentities.create.description')}
+      >
+        <div className="form__grid">
+          <Field
+            id="service-identity-name"
+            label={t('deployment.serviceIdentities.create.name')}
+            value={name}
+            onChange={setName}
+            hint={t('deployment.serviceIdentities.create.nameHint')}
+            mono
+          />
+        </div>
+        <fieldset className="fieldset">
+          <legend className="field__label">{t('deployment.serviceIdentities.workspaces')}</legend>
+          {workspaces.length === 0 ? (
+            <p className="empty">{t('deployment.serviceIdentities.noWorkspace')}</p>
+          ) : (
+            <div className="choices">
+              {workspaces.map((workspace) => (
+                <label className="choice" key={workspace.workspace_id} htmlFor={`service-workspace-${workspace.workspace_id}`}>
+                  <input
+                    id={`service-workspace-${workspace.workspace_id}`}
+                    name="service-identity-workspaces"
+                    type="checkbox"
+                    value={workspace.workspace_id}
+                    checked={bound.includes(workspace.workspace_id)}
+                    onChange={(event) => {
+                      setBound((current) => event.target.checked
+                        ? [...current, workspace.workspace_id]
+                        : current.filter((id) => id !== workspace.workspace_id));
+                    }}
+                  />
+                  {workspace.name}
+                </label>
+              ))}
+            </div>
+          )}
+          <p className="field__hint">{t('deployment.serviceIdentities.create.workspacesHint')}</p>
+        </fieldset>
+        <div className="form__actions">
+          <Button
+            busy={busy}
+            onClick={() => {
+              setNotice(null);
+              setPending({ kind: 'create', name: name.trim(), workspaceIds: bound });
+            }}
+          >
+            {t('deployment.serviceIdentities.create.submit')}
+          </Button>
+        </div>
+      </Panel>
+
+      {pending?.kind === 'create' ? (
+        <Confirmation
+          title={t('deployment.serviceIdentities.create.confirmTitle')}
+          target={pending.name}
+          scope={t('value.auditScope.deployment')}
+          consequence={t('deployment.serviceIdentities.create.consequence')}
+          confirmLabel={t('deployment.serviceIdentities.create.confirm')}
+          busy={busy}
+          onConfirm={confirm}
+          onCancel={() => setPending(null)}
+        />
+      ) : null}
+
+      {pending?.kind === 'revoke' ? (
+        <Confirmation
+          title={t('deployment.serviceIdentities.revokeConfirmTitle')}
+          target={pending.identity.name}
+          scope={t('value.auditScope.deployment')}
+          consequence={t('deployment.serviceIdentities.revokeConsequence')}
+          confirmLabel={t('deployment.serviceIdentities.revokeConfirm')}
+          busy={busy}
+          onConfirm={confirm}
+          onCancel={() => setPending(null)}
+        />
+      ) : null}
     </Panel>
   );
 }

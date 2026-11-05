@@ -27,7 +27,7 @@ export type DeploymentRole = 'Deployment Administrator';
 export type WorkspaceRole = 'Workspace Administrator' | 'Consumer';
 
 export const DEPLOYMENT_CONTEXT_ARTIFACT = 'deployment-business-context';
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 export const USERNAME_PATTERN = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,189}$/;
 
 export interface UserRecord {
@@ -77,6 +77,21 @@ export interface AgentIdentityRecord {
   workspace_ids: string[];
   scopes: string[];
   status: AgentIdentityStatus;
+  created_at: string;
+  created_by: string;
+  revoked_at: string | null;
+}
+
+/**
+ * A deployment-owned non-human principal for internal platform jobs, bound to
+ * the Workspaces where it executes. It is not an Agent Identity: it never holds
+ * Consumer grants, MCP scopes, or OAuth clients, and it owns no Artifact.
+ */
+export interface ServiceIdentityRecord {
+  service_identity_id: string;
+  name: string;
+  workspace_ids: string[];
+  status: 'active' | 'revoked';
   created_at: string;
   created_by: string;
   revoked_at: string | null;
@@ -147,6 +162,7 @@ export interface PlatformState {
   schema_version: number;
   users: UserRecord[];
   agent_identities: AgentIdentityRecord[];
+  service_identities: ServiceIdentityRecord[];
   oauth_clients: OAuthClientRecord[];
   access_tokens: AccessTokenRecord[];
   workspaces: WorkspaceRecord[];
@@ -197,6 +213,7 @@ export function readPlatform(root: string): PlatformState {
         schema_version: CURRENT_SCHEMA_VERSION,
         users: [],
         agent_identities: [],
+        service_identities: [],
         oauth_clients: [],
         access_tokens: [],
         workspaces: [],
@@ -225,6 +242,9 @@ export function readPlatform(root: string): PlatformState {
   // Collections start empty rather than failing the read closed.
   state.schema_version = CURRENT_SCHEMA_VERSION;
   state.agent_identities ??= [];
+  // A Deployment written before Service Identities existed has none, and every
+  // one it does have keeps exactly the bindings it was created with.
+  state.service_identities ??= [];
   state.oauth_clients ??= [];
   state.access_tokens ??= [];
   state.sources ??= [];
@@ -343,6 +363,10 @@ export function findUserById(state: PlatformState, userId: string): UserRecord |
 
 export function findAgentIdentity(state: PlatformState, agentIdentityId: string): AgentIdentityRecord | undefined {
   return state.agent_identities.find((agent) => agent.agent_identity_id === agentIdentityId);
+}
+
+export function findServiceIdentity(state: PlatformState, serviceIdentityId: string): ServiceIdentityRecord | undefined {
+  return state.service_identities.find((identity) => identity.service_identity_id === serviceIdentityId);
 }
 
 export function findOAuthClient(state: PlatformState, clientId: string): OAuthClientRecord | undefined {

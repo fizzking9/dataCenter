@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 import { callApi, startConsole } from '../support/console.js';
-import { command, createUser, initializePlatform, sessionFor, type PlatformFixture } from '../support/platform.js';
+import { command, createUser, initializePlatform, jsonFile, sessionFor, type PlatformFixture } from '../support/platform.js';
 import { totpCode } from '../support/totp.js';
 
 const OPERATIONS = 'operations@example.invalid';
@@ -198,6 +198,161 @@ test('Deployment Administrator accounts create, refuse the last administrator, a
     });
     assert.equal(permitted.status, 200, permitted.text);
     assert.equal((permitted.text.includes(SECOND_ADMIN_PASSWORD)), false);
+  } finally {
+    await browser?.close();
+    await consoleServer.stop();
+  }
+});
+
+/** AC1, AC4: accountable ownership moves between eligible Users before deactivation. */
+test('ownership transfer keeps every Artifact accountable and unblocks deactivation', async () => {
+  const world = deployment();
+  const second = createUser(world.fixture, world.administratorToken, SECOND_ADMIN, SECOND_ADMIN_PASSWORD, true);
+  const secondTotp = String(second.output.totp_secret);
+  const published = command(world.fixture, ['context', 'publish-common', '--entries', jsonFile(world.fixture, 'common', [
+    { key: 'refund_window_days', kind: 'metric', value: '30' },
+  ])], { token: world.administratorToken });
+  assert.equal(published.status, 0, published.stderr);
+
+  const consoleServer = await startConsole(world.fixture);
+  let browser: Browser | undefined;
+  try {
+    browser = await chromium.launch({ channel: 'msedge', headless: true });
+    const page = await open(browser, consoleServer.url, '/app');
+    await signIn(page, world.deploymentAdministrator);
+    await page.getByRole('heading', { name: '工作区' }).waitFor();
+    await page.getByRole('link', { name: '用户与身份' }).click();
+    const users = page.getByRole('region', { name: '用户' });
+    await users.getByRole('cell', { name: world.deploymentAdministrator.username, exact: true }).waitFor();
+
+    // The Deployment's common Business Context is owned by the administrator,
+    // so deactivation is refused until that accountability moves.
+    await users.getByRole('button', { name: `停用 ${world.deploymentAdministrator.username}` }).click();
+    await confirmAction(page, '停用平台账号', '确认停用');
+    await users.getByText(OWNER_TRANSFER_REQUIRED).waitFor();
+    assert.match(await users.innerText(), /OWNER_TRANSFER_REQUIRED/u);
+
+    // An ineligible recipient would leave the Artifact without an administrator.
+    const ownership = page.getByRole('region', { name: '对象归属转移' });
+    await ownership.getByLabel('原负责人', { exact: true }).fill(world.deploymentAdministrator.username);
+    await ownership.getByLabel('新负责人', { exact: true }).fill(ANALYST);
+    await ownership.getByRole('button', { name: '转移归属' }).click();
+    const confirmation = page.getByRole('region', { name: '确认转移对象归属' });
+    const stated = await confirmation.innerText();
+    assert.match(stated, /影响/u);
+    assert.match(stated, new RegExp(ANALYST.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+    await confirmation.getByRole('button', { name: '确认转移' }).click();
+    await ownership.getByText('新负责人不具备该对象的授权范围。').waitFor();
+
+    // An eligible recipient takes accountability, and the roster reports it.
+    await ownership.getByLabel('新负责人', { exact: true }).fill(SECOND_ADMIN);
+    await ownership.getByRole('button', { name: '转移归属' }).click();
+    await page.getByRole('region', { name: '确认转移对象归属' }).getByRole('button', { name: '确认转移' }).click();
+    await ownership.getByText(`已转移 1 个对象的归属：${SECOND_ADMIN}。`).waitFor();
+
+    // Deactivation now succeeds, while the recipient keeps the Artifact governed.
+    // The second administrator performs it, so the acting session stays open.
+    const secondPage = await open(browser, consoleServer.url, '/app');
+    await signIn(secondPage, { username: SECOND_ADMIN, password: SECOND_ADMIN_PASSWORD, totp: secondTotp });
+    await secondPage.getByRole('link', { name: '用户与身份' }).click();
+    const secondUsers = secondPage.getByRole('region', { name: '用户' });
+    await secondUsers.getByRole('cell', { name: world.deploymentAdministrator.username, exact: true }).waitFor();
+    await secondUsers.getByRole('button', { name: `停用 ${world.deploymentAdministrator.username}` }).click();
+    await confirmAction(secondPage, '停用平台账号', '确认停用');
+    await secondUsers.getByText(`账号已停用：${world.deploymentAdministrator.username}，其会话已立即失效。`).waitFor();
+
+    await page.getByRole('button', { name: '刷新活动' }).click();
+    await page.getByText('会话已失效，请重新登录。').waitFor();
+
+    // A deactivated account can never receive accountability again.
+    const secondOwnership = secondPage.getByRole('region', { name: '对象归属转移' });
+    await secondOwnership.getByLabel('原负责人', { exact: true }).fill(SECOND_ADMIN);
+    await secondOwnership.getByLabel('新负责人', { exact: true }).fill(world.deploymentAdministrator.username);
+    await secondOwnership.getByRole('button', { name: '转移归属' }).click();
+    await secondPage.getByRole('region', { name: '确认转移对象归属' }).getByRole('button', { name: '确认转移' }).click();
+    await secondOwnership.getByText('该账号已停用。').waitFor();
+  } finally {
+    await browser?.close();
+    await consoleServer.stop();
+  }
+});
+
+/** AC1, AC3, AC4: Service Identities are internal executors, never consumers. */
+test('Service Identities execute internal jobs but never consume, and revoke at once', async () => {
+  const world = deployment();
+  const agent = command(world.fixture, [
+    'agent', 'create', '--name', 'agent-consumer', '--workspaces', world.operations, '--scopes', 'mcp:read',
+  ], { token: world.administratorToken });
+  assert.equal(agent.status, 0, agent.stderr);
+
+  const consoleServer = await startConsole(world.fixture);
+  let browser: Browser | undefined;
+  try {
+    browser = await chromium.launch({ channel: 'msedge', headless: true });
+    const page = await open(browser, consoleServer.url, '/app');
+    await signIn(page, world.deploymentAdministrator);
+    await page.getByRole('heading', { name: '工作区' }).waitFor();
+    await page.getByRole('link', { name: '用户与身份' }).click();
+    await page.getByRole('heading', { name: '服务身份', exact: true }).waitFor();
+    const identities = page.getByRole('region', { name: '服务身份', exact: true });
+
+    // Nothing is conflated: an Agent Identity is not a Service Identity.
+    await identities.getByText('本部署尚未创建服务身份。').waitFor();
+    assert.equal((await identities.innerText()).includes('agent-consumer'), false);
+
+    // The form names the one Workspace the identity executes in.
+    await identities.getByLabel('名称', { exact: true }).fill('ingest-job');
+    await identities.getByLabel('Operations', { exact: true }).check();
+    await identities.getByRole('button', { name: '创建服务身份' }).click();
+    const confirmation = page.getByRole('region', { name: '确认创建服务身份', exact: true });
+    const stated = await confirmation.innerText();
+    assert.match(stated, /对象/u);
+    assert.match(stated, /ingest-job/u);
+    assert.match(stated, /不能消费数据产品/u);
+    await confirmation.getByRole('button', { name: '确认创建' }).click();
+    await identities.getByText('服务身份已创建：ingest-job。').waitFor();
+    const row = identities.getByRole('row', { name: /ingest-job/u });
+    await row.waitFor();
+    assert.match(await row.innerText(), /生效中/u);
+    assert.match(await row.innerText(), /执行作业，不读取数据产品/u);
+    assert.match(await row.innerText(), /Operations/u);
+
+    // The same name is refused, and an Agent Identity's name is refused too.
+    await identities.getByLabel('名称', { exact: true }).fill('ingest-job');
+    await identities.getByRole('button', { name: '创建服务身份' }).click();
+    await page.getByRole('region', { name: '确认创建服务身份' }).getByRole('button', { name: '确认创建' }).click();
+    await identities.getByText('该服务身份名称已存在。').waitFor();
+
+    await identities.getByLabel('名称', { exact: true }).fill('agent-consumer');
+    await identities.getByRole('button', { name: '创建服务身份' }).click();
+    await page.getByRole('region', { name: '确认创建服务身份' }).getByRole('button', { name: '确认创建' }).click();
+    await identities.getByText('服务身份不能与外部代理身份重名。').waitFor();
+
+    // Revocation is immediate, idempotent, and keeps the record's history.
+    await identities.getByRole('button', { name: '撤销 ingest-job' }).click();
+    const revocation = page.getByRole('region', { name: '确认撤销服务身份' });
+    assert.match(await revocation.innerText(), /立即不能执行任何作业/u);
+    await revocation.getByRole('button', { name: '确认撤销' }).click();
+    await identities.getByText('服务身份已撤销：ingest-job。').waitFor();
+    assert.match(await row.innerText(), /已撤销/u);
+    assert.equal(await identities.getByRole('button', { name: '撤销 ingest-job' }).count(), 0);
+
+    const cookie = await cookieHeader(page.context());
+    const granted = await callApi(consoleServer.url, '/api/deployment/service-identities', { cookie });
+    assert.equal(granted.status, 200, granted.text);
+    const listed = (granted.body.service_identities as Array<Record<string, unknown>>)[0];
+    assert.deepEqual(listed?.['capabilities'], {
+      executes_jobs: true,
+      consumes_data_products: false,
+      owns_artifacts: false,
+    });
+    const identityId = String(listed?.['service_identity_id']);
+    const repeated = await callApi(consoleServer.url, `/api/deployment/service-identities/${identityId}/revoke`, {
+      cookie,
+      body: {},
+    });
+    assert.equal(repeated.status, 200, repeated.text);
+    assert.equal(repeated.body.already_revoked, true);
   } finally {
     await browser?.close();
     await consoleServer.stop();

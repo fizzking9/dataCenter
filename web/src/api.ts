@@ -146,6 +146,30 @@ export interface OwnershipTransferResult {
   artifact_ids: string[];
 }
 
+/** What a Service Identity may do; it never consumes governed data. */
+export interface ServiceIdentityCapabilities {
+  executes_jobs: boolean;
+  consumes_data_products: boolean;
+  owns_artifacts: boolean;
+}
+
+export interface ServiceIdentityView {
+  service_identity_id: string;
+  name: string;
+  workspace_ids: string[];
+  workspaces: Array<{ workspace_id: string; name: string }>;
+  status: 'active' | 'revoked';
+  created_at: string;
+  created_by: string | null;
+  revoked_at: string | null;
+  capabilities: ServiceIdentityCapabilities;
+  already_revoked?: boolean;
+}
+
+export interface ServiceIdentityList {
+  service_identities: ServiceIdentityView[];
+}
+
 /** One Workspace membership, in the shape the administered Workspace lists it. */
 export interface WorkspaceMemberView {
   username: string;
@@ -436,6 +460,17 @@ export const platformApi = {
       method: 'POST',
       body: JSON.stringify({ from, to }),
     }),
+  serviceIdentities: () => request<ServiceIdentityList>('/api/deployment/service-identities'),
+  createServiceIdentity: (name: string, workspaceIds: string[]) =>
+    request<ServiceIdentityView>('/api/deployment/service-identities', {
+      method: 'POST',
+      body: JSON.stringify({ name, workspace_ids: workspaceIds }),
+    }),
+  revokeServiceIdentity: (serviceIdentityId: string) =>
+    request<ServiceIdentityView>(
+      `/api/deployment/service-identities/${encodeURIComponent(serviceIdentityId)}/revoke`,
+      { method: 'POST' },
+    ),
   dataProducts: (workspaceId: string) =>
     request<DataProductList>(`/api/workspace/data-products${workspaceQuery(workspaceId)}`),
   context: (workspaceId: string) =>

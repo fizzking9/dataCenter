@@ -12,6 +12,7 @@ import { publishModelBinding, revokeModelBinding, showModelBindingWorkspace } fr
 import { activateModelProfile, evaluateModelProfile, listModelProfiles, publishModelProfile } from './model-profile.js';
 import { grantMembership, listMemberships, listWorkspaces, revokeMembership } from './workspaces.js';
 import { createUser, deactivateUser, listUsers, transferOwnership } from './users.js';
+import { createServiceIdentity, listServiceIdentities, revokeServiceIdentity } from './service-identities.js';
 import {
   exchangeOperatorEnrollment,
   resolveOperatorSession,
@@ -350,6 +351,37 @@ async function handleApi(
       token,
       from: text(body, 'from'),
       to: text(body, 'to'),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/service-identities' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listServiceIdentities({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/service-identities' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, createServiceIdentity({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      name: text(body, 'name'),
+      workspaceIds: identifiers(body, 'workspace_ids'),
+    }));
+    return;
+  }
+
+  const serviceIdentityRoute = /^\/api\/deployment\/service-identities\/([^/]+)\/revoke$/u.exec(pathname);
+  if (serviceIdentityRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, revokeServiceIdentity({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      serviceIdentityId: decodeURIComponent(serviceIdentityRoute[1]!),
     }));
     return;
   }
@@ -697,6 +729,13 @@ function flag(body: Record<string, unknown>, field: string): boolean {
   return body[field] === true;
 }
 
+/** A non-empty list of governed identifiers, in the order the browser sent them. */
+function identifiers(body: Record<string, unknown>, field: string): string[] {
+  const value = body[field];
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === 'string' && entry !== '');
+}
+
 async function serveAsset(
   request: IncomingMessage,
   response: ServerResponse,
@@ -771,6 +810,11 @@ const STATUS_BY_CODE: Record<string, number> = {
   WORKSPACE_NOT_FOUND: 404,
   EMERGENCY_ADMINISTRATOR_NOT_PERMITTED: 403,
   EMERGENCY_ADMINISTRATOR_NOT_REQUIRED: 409,
+  SERVICE_IDENTITY_NAME_INVALID: 400,
+  SERVICE_IDENTITY_EXISTS: 409,
+  SERVICE_IDENTITY_NAME_CONFLICT: 409,
+  SERVICE_IDENTITY_WORKSPACE_INVALID: 400,
+  SERVICE_IDENTITY_NOT_FOUND: 404,
   CONTEXT_NOT_PUBLISHED: 404,
   CONTEXT_SHADOWS_COMMON: 409,
   CROSS_WORKSPACE_REFERENCE: 409,
