@@ -51,7 +51,21 @@ import {
 import { browserIdentity, browserNavigation } from './navigation.js';
 import { askWorkspaceQuery } from './natural-language-query.js';
 import { listDataProductReleases, listDataProducts, previewDataProductEvolution, publishDataProductEvolution, rollbackDataProductVersion, withdrawDataProductVersion } from './products.js';
-import { generateTemplateReport, listReportTemplates, listReports, publishReportTemplate, showReport, showReportTemplate } from './reports.js';
+import { generateTemplateReport, listReportTemplates, listReports, publishReportTemplate, showReport, showReportTemplate, withdrawReport, withdrawReportTemplate } from './reports.js';
+import {
+  approveReportCandidate,
+  listReportCandidates,
+  rejectReportCandidate,
+  reopenReportCandidate,
+  showReportCandidate,
+} from './report-review.js';
+import {
+  createReportSchedule,
+  listReportSchedules,
+  pauseReportSchedule,
+  resumeReportSchedule,
+  tickReportSchedules,
+} from './report-schedule.js';
 import { publishModelBinding, revokeModelBinding, showModelBindingWorkspace } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, listModelProfiles, publishModelProfile } from './model-profile.js';
 import {
@@ -1043,6 +1057,160 @@ async function handleApi(
       token,
       reportTemplateId: decodeURIComponent(reportTemplateGenerateRoute[1]!),
       workspaceId: workspaceFromBody(body),
+    }));
+    return;
+  }
+
+  // Withdrawal is a lifecycle fact, not a deletion: the governed module stops
+  // ordinary reuse and future generation while keeping the exact content,
+  // Provenance, and Approval history readable to administrators.
+  const reportWithdrawRoute = /^\/api\/workspace\/reports\/([^/]+)\/withdraw$/u.exec(pathname);
+  if (reportWithdrawRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, withdrawReport({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      reportId: decodeURIComponent(reportWithdrawRoute[1]!),
+    }));
+    return;
+  }
+
+  const reportTemplateWithdrawRoute = /^\/api\/workspace\/report-templates\/([^/]+)\/withdraw$/u.exec(pathname);
+  if (reportTemplateWithdrawRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const version = number(body, 'version');
+    if (!Number.isInteger(version)) {
+      throw new HttpError(400, 'INVALID_REQUEST', 'The Report Template Version must be a whole number.');
+    }
+    sendJson(response, 200, withdrawReportTemplate({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      reportTemplateId: decodeURIComponent(reportTemplateWithdrawRoute[1]!),
+      version,
+    }));
+    return;
+  }
+
+  // Deduplicated candidate review. The list is administrator-scoped, and
+  // Approval publishes the exact reviewed Template Version and Report the
+  // reviewer saw: the routes never ask the engine to regenerate anything.
+  if (pathname === '/api/workspace/report-candidates' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listReportCandidates({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  const reportCandidateRoute = /^\/api\/workspace\/report-candidates\/([^/]+)(?:\/(approve|reject|reopen))?$/u.exec(pathname);
+  if (reportCandidateRoute !== null) {
+    const candidateId = decodeURIComponent(reportCandidateRoute[1]!);
+    const decision = reportCandidateRoute[2];
+    if (decision === undefined && method === 'GET') {
+      const token = userSession(request);
+      sendJson(response, 200, showReportCandidate({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        candidateId,
+      }));
+      return;
+    }
+    if (decision !== undefined && method === 'POST') {
+      const token = userSession(request);
+      if (decision === 'approve') {
+        sendJson(response, 200, approveReportCandidate({
+          root: options.root,
+          masterKey: options.masterKey,
+          token,
+          candidateId,
+        }));
+        return;
+      }
+      if (decision === 'reject') {
+        const body = await readJson(request);
+        const reason = text(body, 'reason');
+        sendJson(response, 200, rejectReportCandidate({
+          root: options.root,
+          masterKey: options.masterKey,
+          token,
+          candidateId,
+          ...(reason.trim() === '' ? {} : { reason }),
+        }));
+        return;
+      }
+      sendJson(response, 200, reopenReportCandidate({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        candidateId,
+      }));
+      return;
+    }
+  }
+
+  // Report schedules are durable facts evaluated only by an explicit tick. The
+  // browser states the designated Consumer and interval; the engine revalidates
+  // that Consumer and its Grants on every run rather than trusting the form.
+  if (pathname === '/api/workspace/report-schedules' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listReportSchedules({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/report-schedules' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const startAt = text(body, 'start_at');
+    sendJson(response, 201, createReportSchedule({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      reportTemplateId: requiredText(body, 'report_template_id'),
+      consumerUsername: requiredText(body, 'consumer_username'),
+      intervalMinutes: number(body, 'interval_minutes'),
+      ...(startAt.trim() === '' ? {} : { startAt }),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/report-schedules/tick' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const at = text(body, 'at');
+    const scheduleId = text(body, 'schedule_id');
+    sendJson(response, 200, await tickReportSchedules({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: workspaceFromBody(body),
+      ...(scheduleId.trim() === '' ? {} : { scheduleId }),
+      ...(at.trim() === '' ? {} : { at }),
+    }));
+    return;
+  }
+
+  const reportScheduleRoute = /^\/api\/workspace\/report-schedules\/([^/]+)\/(pause|resume)$/u.exec(pathname);
+  if (reportScheduleRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const scheduleId = decodeURIComponent(reportScheduleRoute[1]!);
+    const action = reportScheduleRoute[2] === 'pause' ? pauseReportSchedule : resumeReportSchedule;
+    sendJson(response, 200, action({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      scheduleId,
     }));
     return;
   }
@@ -2932,6 +3100,23 @@ const STATUS_BY_CODE: Record<string, number> = {
   REPORT_TEMPLATE_RELEASE_PIN_REFUSED: 400,
   REPORT_TEMPLATE_CONFIGURATION_UNREADABLE: 400,
   REPORT_TEMPLATE_CONFIGURATION_INVALID: 400,
+  // Candidate review refusals keep an unreviewed answer off the stock.
+  REPORT_CANDIDATE_NOT_AVAILABLE: 404,
+  REPORT_CANDIDATE_NOT_FOUND: 404,
+  REPORT_CANDIDATE_EVIDENCE_MISSING: 404,
+  REPORT_CANDIDATE_REJECTED: 409,
+  REPORT_CANDIDATE_APPROVED: 409,
+  REPORT_CANDIDATE_NOT_PUBLISHABLE: 409,
+  REPORT_CANDIDATE_CONTENT_CHANGED: 409,
+  // Schedule entry facts a governed tick validates before any data or model work.
+  REPORT_SCHEDULE_NOT_AVAILABLE: 404,
+  REPORT_SCHEDULE_WITHDRAWN: 409,
+  REPORT_SCHEDULE_INTERVAL_INVALID: 400,
+  REPORT_SCHEDULE_CONSUMER_NOT_FOUND: 404,
+  REPORT_SCHEDULE_CONSUMER_NOT_MEMBER: 409,
+  REPORT_SCHEDULE_CONSUMER_INACTIVE: 409,
+  REPORT_SCHEDULE_START_INVALID: 400,
+  REPORT_SCHEDULE_AT_INVALID: 400,
   DATA_PRODUCT_RELEASE_NOT_FOUND: 404,
   DATASET_RELEASE_NOT_FOUND: 409,
   DATA_PRODUCT_QUERY_TOO_COMPLEX: 422,

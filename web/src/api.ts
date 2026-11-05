@@ -1300,6 +1300,151 @@ export interface ReportTemplateListResponse {
   report_templates: ReportTemplateSummaryView[];
 }
 
+/** The settled local embedding configuration one nomination was scored under. */
+export interface ReviewEmbeddingConfigurationView {
+  model_id: string;
+  revision: string;
+  dimensions: number;
+  normalization: string;
+  metric: string;
+}
+
+/** One similar Chinese QA pair a review item nominates; never an equivalence. */
+export interface ReviewSimilarityNominationView {
+  kind: 'report_template' | 'review_candidate';
+  target_id: string;
+  question: string;
+  score: number;
+}
+
+/** One decision a reviewer recorded on a review item. */
+export interface ReportCandidateDecisionView {
+  decided_at: string;
+  decided_by: string;
+  reason: string | null;
+}
+
+/** The one durable notification an open review item sent its reviewer. */
+export interface ReportCandidateNotificationView {
+  notified_at: string;
+  reason: 'created' | 'reopened';
+}
+
+/** One deduplicated review item, exactly as the server preserved it. */
+export interface ReportCandidateView {
+  candidate_id: string;
+  workspace_id: string;
+  status: 'open' | 'approved' | 'rejected';
+  question: string;
+  normalized_question: string;
+  semantic_hash: string;
+  data_product_id: string;
+  report_template_id: string;
+  template_version: number;
+  report_id: string;
+  occurrences: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  requested_by: Array<{ user_id: string; username: string | null }>;
+  similarity: {
+    configuration: ReviewEmbeddingConfigurationView;
+    threshold: number;
+    nominations: ReviewSimilarityNominationView[];
+  };
+  notification: ReportCandidateNotificationView | null;
+  approval: ReportCandidateDecisionView | null;
+  rejection: ReportCandidateDecisionView | null;
+}
+
+export interface ReportCandidateListResponse {
+  workspace_id: string;
+  summary: string;
+  candidates: ReportCandidateView[];
+}
+
+/** The exact reviewed Template Version and Report one candidate names. */
+export interface ReportCandidateEvidenceResponse {
+  summary: string;
+  candidate: ReportCandidateView;
+  template: ReportTemplateView;
+  report: ReportView;
+}
+
+export interface ReportCandidateDecisionResponse {
+  summary: string;
+  candidate: ReportCandidateView;
+  template?: ReportTemplateView;
+  report?: ReportView;
+}
+
+/** One evaluation of one due Report schedule, coalescing every due instant. */
+export interface ReportScheduleRunView {
+  run_id: string;
+  schedule_id: string;
+  template_version: number;
+  triggered_at: string;
+  due_from: string;
+  due_count: number;
+  catch_up: boolean;
+  designated_user_id: string;
+  outcome: 'generated' | 'reused' | 'failed';
+  report_id: string | null;
+  reason_code: string | null;
+  limitation: string | null;
+  scope_fingerprint: string | null;
+}
+
+/** One durable Report schedule naming its designated Consumer and interval. */
+export interface ReportScheduleView {
+  schedule_id: string;
+  workspace_id: string;
+  report_template_id: string;
+  template_version: number;
+  designated_user_id: string;
+  designated_username: string | null;
+  interval_minutes: number;
+  next_due_at: string;
+  created_at: string;
+  created_by: string;
+  state: 'active' | 'paused' | 'withdrawn';
+  paused_at: string | null;
+  paused_by: string | null;
+  resumed_at: string | null;
+  resumed_by: string | null;
+  withdrawn_at: string | null;
+  runs: ReportScheduleRunView[];
+}
+
+export interface ReportScheduleListResponse {
+  workspace_id: string;
+  summary: string;
+  schedules: ReportScheduleView[];
+}
+
+export interface ReportScheduleResponse {
+  summary: string;
+  already_paused?: boolean;
+  already_running?: boolean;
+  schedule: ReportScheduleView;
+}
+
+export interface ReportScheduleTickResponse {
+  at: string;
+  summary: string;
+  paused_skipped: number;
+  runs: ReportScheduleRunView[];
+}
+
+/** One withdrawal: a lifecycle fact that preserves the governed history. */
+export interface ReportWithdrawalResponse {
+  summary: string;
+  report_id?: string;
+  report_template_id?: string;
+  template_version?: number;
+  withdrawn_at: string;
+  already_withdrawn: boolean;
+}
+
 export interface ProductExportCreated {
   export_id: string;
   workspace_id: string;
@@ -3496,6 +3641,66 @@ export const platformApi = {
       `/api/workspace/report-templates/${encodeURIComponent(reportTemplateId)}/generate`,
       { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) },
     ),
+  withdrawReport: (reportId: string) =>
+    request<ReportWithdrawalResponse>(
+      `/api/workspace/reports/${encodeURIComponent(reportId)}/withdraw`,
+      { method: 'POST' },
+    ),
+  withdrawReportTemplate: (reportTemplateId: string, version: number) =>
+    request<ReportWithdrawalResponse>(
+      `/api/workspace/report-templates/${encodeURIComponent(reportTemplateId)}/withdraw`,
+      { method: 'POST', body: JSON.stringify({ version }) },
+    ),
+  reportCandidates: (workspaceId: string) =>
+    request<ReportCandidateListResponse>(
+      `/api/workspace/report-candidates${workspaceQuery(workspaceId)}`,
+    ),
+  reportCandidate: (candidateId: string) =>
+    request<ReportCandidateEvidenceResponse>(
+      `/api/workspace/report-candidates/${encodeURIComponent(candidateId)}`,
+    ),
+  approveReportCandidate: (candidateId: string) =>
+    request<ReportCandidateDecisionResponse>(
+      `/api/workspace/report-candidates/${encodeURIComponent(candidateId)}/approve`,
+      { method: 'POST' },
+    ),
+  rejectReportCandidate: (candidateId: string, reason: string) =>
+    request<ReportCandidateDecisionResponse>(
+      `/api/workspace/report-candidates/${encodeURIComponent(candidateId)}/reject`,
+      { method: 'POST', body: JSON.stringify({ reason }) },
+    ),
+  reopenReportCandidate: (candidateId: string) =>
+    request<ReportCandidateDecisionResponse>(
+      `/api/workspace/report-candidates/${encodeURIComponent(candidateId)}/reopen`,
+      { method: 'POST' },
+    ),
+  reportSchedules: (workspaceId: string) =>
+    request<ReportScheduleListResponse>(
+      `/api/workspace/report-schedules${workspaceQuery(workspaceId)}`,
+    ),
+  createReportSchedule: (
+    workspaceId: string,
+    body: { report_template_id: string; consumer_username: string; interval_minutes: number; start_at: string },
+  ) =>
+    request<ReportScheduleResponse>('/api/workspace/report-schedules', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, ...body }),
+    }),
+  pauseReportSchedule: (scheduleId: string) =>
+    request<ReportScheduleResponse>(
+      `/api/workspace/report-schedules/${encodeURIComponent(scheduleId)}/pause`,
+      { method: 'POST' },
+    ),
+  resumeReportSchedule: (scheduleId: string) =>
+    request<ReportScheduleResponse>(
+      `/api/workspace/report-schedules/${encodeURIComponent(scheduleId)}/resume`,
+      { method: 'POST' },
+    ),
+  tickReportSchedules: (workspaceId: string) =>
+    request<ReportScheduleTickResponse>('/api/workspace/report-schedules/tick', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId }),
+    }),
   createProductExport: (dataProductId: string, workspaceId: string, query: unknown) =>
     request<ProductExportCreated>(
       `/api/workspace/products/${encodeURIComponent(dataProductId)}/exports${workspaceQuery(workspaceId)}`,

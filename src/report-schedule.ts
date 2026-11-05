@@ -69,6 +69,16 @@ function scheduleView(
     next_due_at: schedule.next_due_at,
     created_at: schedule.created_at,
     created_by: schedule.created_by,
+    /** Durable state: a paused or withdrawn schedule is never evaluated. */
+    state: schedule.withdrawn_at !== null
+      ? 'withdrawn'
+      : schedule.paused_at !== null
+        ? 'paused'
+        : 'active',
+    paused_at: schedule.paused_at,
+    paused_by: schedule.paused_by,
+    resumed_at: schedule.resumed_at,
+    resumed_by: schedule.resumed_by,
     withdrawn_at: schedule.withdrawn_at,
     runs: schedule.runs.map((run) => ({ ...run })),
   };
@@ -146,6 +156,10 @@ export function createReportSchedule(options: {
     next_due_at: start.toISOString(),
     created_at: new Date().toISOString(),
     created_by: actor.user.user_id,
+    paused_at: null,
+    paused_by: null,
+    resumed_at: null,
+    resumed_by: null,
     withdrawn_at: null,
     runs: [],
   };
@@ -164,6 +178,119 @@ export function createReportSchedule(options: {
   session.save();
   return {
     summary: '已按指定消费者创建报告计划：每次到期都会重新校验该消费者与授权后再生成。',
+    schedule: scheduleView(session, schedule),
+  };
+}
+
+/**
+ * Pauses one durable schedule. Pausing is a lifecycle fact, not a deletion: the
+ * schedule keeps its interval, its next due instant, and its run history, and
+ * an explicit tick skips it until a later resumption. Already generated Reports
+ * are untouched stock.
+ */
+export function pauseReportSchedule(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  scheduleId: string;
+  now?: Date;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'report_schedule_pause',
+    scope: 'workspace',
+    target: options.scheduleId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  const schedule = session.state.report_schedules.find((entry) => entry.schedule_id === options.scheduleId);
+  if (!schedule) {
+    deny(session, actorLabel(actor.user), context, 'REPORT_SCHEDULE_NOT_AVAILABLE', 'The Report schedule is not available to this actor.');
+  }
+  const scoped: ActionContext = { ...context, workspace_id: schedule.workspace_id };
+  requireWorkspaceAdministrator(session, actor, scoped, schedule.workspace_id);
+  if (schedule.withdrawn_at !== null) {
+    reject(session, actorLabel(actor.user), scoped, 'REPORT_SCHEDULE_WITHDRAWN', 'A withdrawn Report schedule cannot be paused.');
+  }
+  if (schedule.paused_at !== null) {
+    return {
+      summary: '该报告计划此前已暂停，状态与运行历史保持不变。',
+      already_paused: true,
+      schedule: scheduleView(session, schedule),
+    };
+  }
+  schedule.paused_at = (options.now ?? new Date()).toISOString();
+  schedule.paused_by = actor.user.user_id;
+  schedule.resumed_at = null;
+  schedule.resumed_by = null;
+  session.audit({
+    ...scoped,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: {
+      paused_at: schedule.paused_at,
+      next_due_at: schedule.next_due_at,
+      runs_retained: schedule.runs.length,
+    },
+  });
+  session.save();
+  return {
+    summary: '已暂停该报告计划：到期检查将跳过它，已生成的报告与运行历史完整保留。',
+    already_paused: false,
+    schedule: scheduleView(session, schedule),
+  };
+}
+
+/**
+ * Resumes one paused schedule. Its next due instant is whatever the pause left
+ * behind, so any number of missed instants still produces at most one catch-up.
+ */
+export function resumeReportSchedule(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  scheduleId: string;
+  now?: Date;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'report_schedule_resume',
+    scope: 'workspace',
+    target: options.scheduleId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  const schedule = session.state.report_schedules.find((entry) => entry.schedule_id === options.scheduleId);
+  if (!schedule) {
+    deny(session, actorLabel(actor.user), context, 'REPORT_SCHEDULE_NOT_AVAILABLE', 'The Report schedule is not available to this actor.');
+  }
+  const scoped: ActionContext = { ...context, workspace_id: schedule.workspace_id };
+  requireWorkspaceAdministrator(session, actor, scoped, schedule.workspace_id);
+  if (schedule.withdrawn_at !== null) {
+    reject(session, actorLabel(actor.user), scoped, 'REPORT_SCHEDULE_WITHDRAWN', 'A withdrawn Report schedule cannot be resumed.');
+  }
+  if (schedule.paused_at === null) {
+    return {
+      summary: '该报告计划正在运行，无需恢复。',
+      already_running: true,
+      schedule: scheduleView(session, schedule),
+    };
+  }
+  schedule.resumed_at = (options.now ?? new Date()).toISOString();
+  schedule.resumed_by = actor.user.user_id;
+  schedule.paused_at = null;
+  schedule.paused_by = null;
+  session.audit({
+    ...scoped,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: {
+      resumed_at: schedule.resumed_at,
+      next_due_at: schedule.next_due_at,
+    },
+  });
+  session.save();
+  return {
+    summary: '已恢复该报告计划：下一次到期检查会重新校验指定消费者，错过的到期最多补跑一次。',
+    already_running: false,
     schedule: scheduleView(session, schedule),
   };
 }
@@ -321,9 +448,16 @@ export async function tickReportSchedules(options: {
   }
   const dueAt = new Date(atMs);
   const runs: ReportScheduleRunRecord[] = [];
+  let pausedSkipped = 0;
   for (const schedule of session.state.report_schedules) {
     if (schedule.workspace_id !== options.workspaceId || schedule.withdrawn_at !== null) continue;
     if (options.scheduleId !== undefined && schedule.schedule_id !== options.scheduleId) continue;
+    // A paused schedule is never evaluated, and its due instant is not consumed,
+    // so resuming later still produces at most one catch-up.
+    if (schedule.paused_at !== null) {
+      pausedSkipped += 1;
+      continue;
+    }
     const due = dueRunOf(schedule, atMs);
     if (due === null) continue;
 
@@ -420,14 +554,19 @@ export async function tickReportSchedules(options: {
     ...context,
     actor: actorLabel(actor.user),
     outcome: 'succeeded',
-    detail: { at, runs: runs.length },
+    detail: { at, runs: runs.length, paused_skipped: pausedSkipped },
   });
   session.save();
   return {
     at,
     summary: runs.length === 0
-      ? '本次调度检查没有到期的报告计划。'
-      : `本次调度检查执行了 ${runs.length} 个到期计划；同一计划的多段到期已合并为一次运行。`,
+      ? pausedSkipped === 0
+        ? '本次调度检查没有到期的报告计划。'
+        : `本次调度检查跳过了 ${pausedSkipped} 个已暂停的报告计划。`
+      : `本次调度检查执行了 ${runs.length} 个到期计划；同一计划的多段到期已合并为一次运行。${
+        pausedSkipped === 0 ? '' : `另有 ${pausedSkipped} 个已暂停的计划未被评估。`
+      }`,
+    paused_skipped: pausedSkipped,
     runs: runs.map(runView),
   };
 }

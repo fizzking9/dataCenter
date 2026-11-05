@@ -90,6 +90,8 @@ import {
 import {
   createReportSchedule,
   listReportSchedules,
+  pauseReportSchedule,
+  resumeReportSchedule,
   tickReportSchedules,
 } from './report-schedule.js';
 import { listDataProductReleases, listDataProducts, publishDataProduct, rollbackDataProductVersion, withdrawDataProductVersion } from './products.js';
@@ -886,6 +888,14 @@ async function main(): Promise<void> {
   }
   if (command === 'report' && subcommand === 'schedule-list') {
     emit(listReportSchedules({ ...governed(options), workspaceId: required(options, 'workspace') }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'schedule-pause') {
+    emit(pauseReportSchedule({ ...governed(options), scheduleId: required(options, 'schedule') }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'schedule-resume') {
+    emit(resumeReportSchedule({ ...governed(options), scheduleId: required(options, 'schedule') }));
     return;
   }
   if (command === 'report' && subcommand === 'schedule-tick') {

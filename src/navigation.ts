@@ -24,6 +24,7 @@ export type NavigationKey =
   | 'workspace.products'
   | 'workspace.nlq'
   | 'workspace.reports'
+  | 'workspace.reportGovernance'
   | 'workspace.productGovernance'
   | 'workspace.context'
   | 'workspace.members'
@@ -47,6 +48,7 @@ const WORKSPACE_NAVIGATION: Record<WorkspaceRole, NavigationKey[]> = {
     'workspace.products',
     'workspace.nlq',
     'workspace.reports',
+    'workspace.reportGovernance',
     'workspace.productGovernance',
     'workspace.context',
     'workspace.members',
@@ -69,7 +71,7 @@ const DEPLOYMENT_NAVIGATION: NavigationKey[] = [
 
 export interface ActivityItem {
   activity_id: string;
-  kind: 'acquisition_run';
+  kind: 'acquisition_run' | 'report_schedule_run' | 'report_schedule' | 'report_candidate';
   state: string;
   since: string;
 }
@@ -101,14 +103,21 @@ function authorizedWorkspaces(state: PlatformState, userId: string): AuthorizedW
 }
 
 /**
- * Background work and required attention for the active Workspace. Acquisition
- * Runs are the only long-running governed work the first release records today,
- * so later surfaces extend this feed rather than re-deriving it in the browser.
+ * Background work and required attention for the active Workspace.
+ *
+ * Acquisition Runs, scheduled Report runs, paused schedules, and open review
+ * candidates are all durable facts the server already sees, so the feed names
+ * them instead of the browser re-deriving progress. Candidate and schedule
+ * governance stays administrator-only: a Consumer's feed never names them.
  */
-function activityCentre(state: PlatformState, workspaceId: string | null): ActivityCentre {
+function activityCentre(
+  state: PlatformState,
+  workspaceId: string | null,
+  role: WorkspaceRole | null,
+): ActivityCentre {
   if (workspaceId === null) return { background: [], attention: [] };
   const runs = state.acquisition_runs.filter((run) => run.workspace_id === workspaceId);
-  const background = runs
+  const background: ActivityItem[] = runs
     .filter((run) => run.status === 'queued' || run.status === 'running')
     .sort((left, right) => left.queued_at.localeCompare(right.queued_at))
     .slice(0, 5)
@@ -118,7 +127,7 @@ function activityCentre(state: PlatformState, workspaceId: string | null): Activ
       state: run.status,
       since: run.started_at ?? run.queued_at,
     }));
-  const attention = runs
+  const attention: ActivityItem[] = runs
     .filter((run) => run.status === 'failed')
     .sort((left, right) => (right.completed_at ?? right.queued_at).localeCompare(left.completed_at ?? left.queued_at))
     .slice(0, 5)
@@ -128,6 +137,52 @@ function activityCentre(state: PlatformState, workspaceId: string | null): Activ
       state: run.status,
       since: run.completed_at ?? run.queued_at,
     }));
+  if (role !== 'Workspace Administrator') return { background, attention };
+
+  const schedules = state.report_schedules.filter((schedule) => schedule.workspace_id === workspaceId);
+  const scheduleRuns = schedules
+    .flatMap((schedule) => schedule.runs.map((run) => ({ schedule, run })))
+    .sort((left, right) => right.run.triggered_at.localeCompare(left.run.triggered_at));
+  background.push(
+    ...scheduleRuns
+      .filter(({ run }) => run.outcome === 'generated' || run.outcome === 'reused')
+      .slice(0, 5)
+      .map(({ run }) => ({
+        activity_id: run.run_id,
+        kind: 'report_schedule_run' as const,
+        state: run.outcome,
+        since: run.triggered_at,
+      })),
+  );
+  attention.push(
+    ...scheduleRuns
+      .filter(({ run }) => run.outcome === 'failed')
+      .slice(0, 5)
+      .map(({ run }) => ({
+        activity_id: run.run_id,
+        kind: 'report_schedule_run' as const,
+        state: run.outcome,
+        since: run.triggered_at,
+      })),
+    ...schedules
+      .filter((schedule) => schedule.paused_at !== null && schedule.withdrawn_at === null)
+      .map((schedule) => ({
+        activity_id: schedule.schedule_id,
+        kind: 'report_schedule' as const,
+        state: 'paused',
+        since: schedule.paused_at ?? schedule.created_at,
+      })),
+    ...state.report_candidates
+      .filter((candidate) => candidate.workspace_id === workspaceId && candidate.status === 'open')
+      .sort((left, right) => right.last_seen_at.localeCompare(left.last_seen_at))
+      .slice(0, 5)
+      .map((candidate) => ({
+        activity_id: candidate.candidate_id,
+        kind: 'report_candidate' as const,
+        state: 'pending_review',
+        since: candidate.first_seen_at,
+      })),
+  );
   return { background, attention };
 }
 
@@ -206,6 +261,6 @@ export function browserNavigation(options: NavigationOptions): Record<string, un
       name: entry.workspace.name,
       role: entry.role,
     })),
-    activity: activityCentre(session.state, active?.workspace.workspace_id ?? null),
+    activity: activityCentre(session.state, active?.workspace.workspace_id ?? null, active?.role ?? null),
   };
 }

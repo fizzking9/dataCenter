@@ -1120,6 +1120,12 @@ export interface ReportScheduleRecord {
   next_due_at: string;
   created_at: string;
   created_by: string;
+  /** The lifecycle fact pausing every future evaluation; null while it runs. */
+  paused_at: string | null;
+  paused_by: string | null;
+  /** The last resumption, so the pause history stays readable on the schedule. */
+  resumed_at: string | null;
+  resumed_by: string | null;
   withdrawn_at: string | null;
   runs: ReportScheduleRunRecord[];
 }

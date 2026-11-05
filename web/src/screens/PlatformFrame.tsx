@@ -47,12 +47,16 @@ function hrefOf(key: string, workspaceId: string | null): string | undefined {
   const view = key.slice('workspace.'.length);
   if (view !== 'overview' && view !== 'sources' && view !== 'scrapers' && view !== 'products' && view !== 'nlq'
     && view !== 'reports' && view !== 'context' && view !== 'members' && view !== 'audit' && view !== 'models' && view !== 'proposals'
-    && view !== 'productProposals' && view !== 'productGovernance' && view !== 'agents' && view !== 'retention') return undefined;
+    && view !== 'productProposals' && view !== 'productGovernance' && view !== 'reportGovernance'
+    && view !== 'agents' && view !== 'retention') return undefined;
   if (view === 'productProposals') {
     return `/app/w/${encodeURIComponent(workspaceId)}/product-proposals`;
   }
   if (view === 'productGovernance') {
     return `/app/w/${encodeURIComponent(workspaceId)}/product-governance`;
+  }
+  if (view === 'reportGovernance') {
+    return `/app/w/${encodeURIComponent(workspaceId)}/report-governance`;
   }
   return `/app/w/${encodeURIComponent(workspaceId)}/${view}`;
 }
