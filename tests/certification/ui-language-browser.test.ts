@@ -149,8 +149,12 @@ async function copyLeaks(page: Page): Promise<CopyLeak[]> {
       || /^[a-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)+\.?$/u.test(text)
       || /^[A-Z0-9][A-Z0-9 .%+\-–—/]*$/u.test(text);
 
+    // Product brand names are governed identifiers written in Latin letters in
+    // Chinese prose; naming any number of them never turns a sentence English.
+    const BRANDS = new Set(['MinIO', 'PostgreSQL']);
     const englishWords = (text: string): string[] =>
-      (text.match(/[A-Za-z][A-Za-z'-]*/gu) ?? []).filter((word) => word.length >= 3 && /[a-z]/u.test(word));
+      (text.match(/[A-Za-z][A-Za-z'-]*/gu) ?? [])
+        .filter((word) => !BRANDS.has(word) && word.length >= 3 && /[a-z]/u.test(word));
 
     const leaks = (text: string, strict: boolean): boolean => {
       const value = text.replace(/\s+/gu, ' ').trim();
@@ -362,11 +366,16 @@ for (const browserCase of CERTIFIED_BROWSERS) {
       const operator = await open(browser, consoleServer.url, '/');
       await operator.getByRole('heading', { name: '登录运维控制台' }).waitFor();
       await enrolOperator(operator, deployment.fixture, consoleServer.url);
+      // Health and license load after the page heading; certify the loaded
+      // panels rather than whichever asynchronous frame the scan happens to see.
+      await operator.getByRole('heading', { name: '部署健康', exact: true }).waitFor();
       await assertChineseSurface(operator, '运行状态');
       assert.deepEqual(await copyLeaks(operator), []);
       await operator.getByRole('link', { name: '许可证与续期' }).click();
+      await operator.getByRole('heading', { name: '许可证', exact: true }).waitFor();
       await assertChineseSurface(operator, '许可证与续期');
       await operator.getByRole('link', { name: '升级与应用回滚' }).click();
+      await operator.getByRole('heading', { name: '当前部署', exact: true }).waitFor();
       await assertChineseSurface(operator, '升级与应用回滚');
       await assertKeyboardFocus(operator, 6);
       await operator.close();
