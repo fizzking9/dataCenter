@@ -466,6 +466,92 @@ export function signOutOperator(options: {
   return { revoked: true, operator: resolved.operator.username };
 }
 
+/** One live console session, stated without the token or its hash. */
+export interface OperatorSessionSummary {
+  current: boolean;
+  issued_at: string;
+  expires_at: string;
+}
+
+function requireOperatorSession(
+  root: string,
+  token: string,
+): { operator: OperatorRecord; session: OperatorSessionRecord } {
+  const resolved = resolveOperatorSession(root, token);
+  if (resolved === undefined) {
+    throw new OperatorError('OPERATOR_SESSION_INVALID', 'The Operator Console session is not valid.', undefined, 401);
+  }
+  return resolved;
+}
+
+function liveOperatorSessions(
+  console: OperatorConsoleState,
+  operatorId: string,
+  now: number,
+): OperatorSessionRecord[] {
+  return console.sessions.filter(
+    (record) => record.operator_id === operatorId
+      && record.revoked_at === null
+      && Date.parse(record.expires_at) > now,
+  );
+}
+
+/**
+ * The sessions one Operator currently holds. It states instants only: a session
+ * token or its hash never leaves the module that minted it.
+ */
+export function listOperatorSessions(options: {
+  root: string;
+  token: string;
+}): { operator: string; sessions: OperatorSessionSummary[] } {
+  const resolved = requireOperatorSession(options.root, options.token);
+  const console = readOperatorConsole(options.root);
+  const sessions = liveOperatorSessions(console, resolved.operator.operator_id, Date.now())
+    .map((record) => ({
+      current: constantTimeEquals(record.token_hash, resolved.session.token_hash),
+      issued_at: record.issued_at,
+      expires_at: record.expires_at,
+    }))
+    .sort((left, right) => Date.parse(left.issued_at) - Date.parse(right.issued_at));
+  return { operator: resolved.operator.username, sessions };
+}
+
+/**
+ * Ends every other live session of the Operator who asked, which is how a
+ * console user withdraws a session left open elsewhere. The asking session keeps
+ * working, and each ended session is refused on its very next request.
+ */
+export function revokeOtherOperatorSessions(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+}): Record<string, unknown> {
+  const resolved = requireOperatorSession(options.root, options.token);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
+  const console = readOperatorConsole(options.root);
+  const revokedAt = new Date().toISOString();
+  const others = liveOperatorSessions(console, resolved.operator.operator_id, Date.now())
+    .filter((record) => !constantTimeEquals(record.token_hash, resolved.session.token_hash));
+  for (const record of others) record.revoked_at = revokedAt;
+  writeOperatorConsole(options.root, console);
+  session.audit({
+    actor: operatorActor(resolved.operator.username),
+    action: 'operator_session_revocation',
+    scope: 'deployment',
+    target: resolved.operator.username,
+    outcome: 'succeeded',
+    detail: { sessions_revoked: others.length, sessions: 'other' },
+  });
+  const evidenceId = recordEvidence(options.root, 'operator-session-revoke', 'revoked', resolved.operator.username, {
+    sessions_revoked: others.length,
+  });
+  return {
+    operator: resolved.operator.username,
+    sessions_revoked: others.length,
+    evidence_id: evidenceId,
+  };
+}
+
 export interface OperatorStepUp {
   step_up_grant: string;
   purpose: string;

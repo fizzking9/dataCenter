@@ -67,7 +67,7 @@ import { installDeployment } from './install.js';
 import { adoptIntegrationConfiguration, publishIntegrationConfiguration } from './integration.js';
 import { publishModelBinding, revokeModelBinding, showModelBinding } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, publishModelProfile, showModelProfile } from './model-profile.js';
-import { importLicense, readLicenseView } from './license.js';
+import { importLicense, licenseAccess, readLicenseHistoryEntries, readLicenseView } from './license.js';
 import { askDataProduct, askWorkspaceQuery } from './natural-language-query.js';
 import { queryDataProduct } from './product-query.js';
 import {
@@ -129,7 +129,7 @@ import { publishScraperCredential, publishScraperTask, showScraperTask } from '.
 import { runScraperService } from './scraper-run.js';
 import { showScraperDiagnostics } from './scraper-diagnostics.js';
 import { deploymentStatus } from './status.js';
-import { readDeployment } from './state.js';
+import { readDeployment, recentEvidence } from './state.js';
 import {
   finalizeUpgrade,
   preflightUpgrade,
@@ -1002,11 +1002,17 @@ async function main(): Promise<void> {
   if (command === 'console' && subcommand === 'license') {
     const root = required(options, 'root');
     const deployment = readDeployment(root);
+    const license = readLicenseView(root, join(root, 'license.json'));
     emit({
-      ...readLicenseView(root, join(root, 'license.json')),
+      ...license,
+      // The CLI states exactly what the Operator Console states, so a recovery
+      // path and the browser never disagree about the entitlement.
+      access: licenseAccess(license),
       release: deployment.release,
       deployment_id: deployment.deployment_id,
       state: deployment.state,
+      license_history: readLicenseHistoryEntries(root),
+      evidence: recentEvidence(root, ['import-license'], 5),
     });
     return;
   }

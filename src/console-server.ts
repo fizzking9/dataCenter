@@ -102,7 +102,9 @@ import { createServiceIdentity, listServiceIdentities, revokeServiceIdentity } f
 import {
   exchangeOperatorEnrollment,
   consumeOperatorStepUp,
+  listOperatorSessions,
   resolveOperatorSession,
+  revokeOtherOperatorSessions,
   signInOperator,
   signOutOperator,
   verifyOperatorStepUp,
@@ -124,7 +126,12 @@ import {
   tickRetention,
 } from './retention.js';
 import { OperatorError } from './errors.js';
-import { readLicenseView } from './license.js';
+import {
+  importLicense,
+  licenseAccess,
+  readLicenseHistoryEntries,
+  readLicenseView,
+} from './license.js';
 import { handleMcpSurface, type McpServerIdentity } from './mcp.js';
 import {
   RECOVERY_PURPOSES,
@@ -277,6 +284,9 @@ interface LifecycleJob {
 /** The durable operations the Operator Console states as lifecycle evidence. */
 const LIFECYCLE_EVIDENCE_OPERATIONS = ['preflight', 'checkpoint', 'upgrade', 'verify', 'finalize', 'rollback'] as const;
 
+/** The durable evidence a licensing view states beside the entitlement itself. */
+const LICENSE_EVIDENCE_OPERATIONS = ['import-license'] as const;
+
 function publicJob(job: LifecycleJob | undefined): Record<string, unknown> | null {
   if (job === undefined) return null;
   return {
@@ -384,17 +394,47 @@ async function handleApi(
     return;
   }
 
+  // Licensing is stated and driven by the same governed module the CLI calls:
+  // the current entitlement, every imported entitlement before it, the durable
+  // import evidence, and the operation classes an unusable license leaves open.
   if (pathname === '/api/operator/license' && method === 'GET') {
-    const resolved = authorize(options, request, 'operator_console_license');
-    const deployment = readDeployment(options.root);
-    const summary = readLicenseView(options.root, join(options.root, 'license.json'));
-    sendJson(response, 200, {
-      ...summary,
-      release: deployment.release,
-      deployment_id: deployment.deployment_id,
-      state: deployment.state,
-      checked_at: new Date().toISOString(),
+    authorize(options, request, 'operator_console_license');
+    sendJson(response, 200, licenseSurface(options));
+    return;
+  }
+
+  // An offline renewal or replacement validates before anything is written, so a
+  // refused import leaves the current entitlement exactly as it was.
+  if (pathname === '/api/operator/license' && method === 'POST') {
+    const resolved = authorize(options, request, 'operator_console_license_import');
+    const body = await readJson(request);
+    const imported = importLicense({
+      root: options.root,
+      license: requiredText(body, 'license'),
+      operator: resolved.operator.username,
     });
+    sendJson(response, 200, { ...imported, ...licenseSurface(options) });
+    return;
+  }
+
+  // The sessions this Operator holds, and the way the one in front of them ends
+  // another left open elsewhere. Both re-resolve the session on every request.
+  if (pathname === '/api/operator/sessions' && method === 'GET') {
+    authorize(options, request, 'operator_console_sessions');
+    sendJson(response, 200, listOperatorSessions({
+      root: options.root,
+      token: cookieValue(request) ?? '',
+    }));
+    return;
+  }
+
+  if (pathname === '/api/operator/sessions/revoke' && method === 'POST') {
+    authorize(options, request, 'operator_session_revocation');
+    sendJson(response, 200, revokeOtherOperatorSessions({
+      root: options.root,
+      masterKey: options.masterKey,
+      token: cookieValue(request) ?? '',
+    }));
     return;
   }
 
@@ -2227,6 +2267,26 @@ function releaseKeyPath(root: string, body: Record<string, unknown>): string {
   return explicit === '' ? join(root, 'trust', 'release-key.pem') : explicit;
 }
 
+/**
+ * Everything one licensing view states: the entitlement, its history, the
+ * durable import evidence, and what an unusable license leaves open. It never
+ * carries a signature, a License Request secret, or the key that verified it.
+ */
+function licenseSurface(options: ConsoleServerOptions): Record<string, unknown> {
+  const deployment = readDeployment(options.root);
+  const license = readLicenseView(options.root, join(options.root, 'license.json'));
+  return {
+    ...license,
+    access: licenseAccess(license),
+    release: deployment.release,
+    deployment_id: deployment.deployment_id,
+    state: deployment.state,
+    history: readLicenseHistoryEntries(options.root),
+    evidence: recentEvidence(options.root, LICENSE_EVIDENCE_OPERATIONS, 5),
+    checked_at: new Date().toISOString(),
+  };
+}
+
 /** One lifecycle mutation at a time, so a browser never races the migration lock. */
 function assertLifecycleIdle(job: LifecycleJob | undefined): void {
   if (job?.state !== 'running') return;
@@ -2623,6 +2683,10 @@ const STATUS_BY_CODE: Record<string, number> = {
   LICENSE_NOT_YET_VALID: 409,
   LICENSE_EXPIRED: 409,
   LICENSE_RELEASE_INVALID: 409,
+  // A malformed document and a host clock that moved backwards are both
+  // governed refusals an Operator must be able to act on.
+  LICENSE_MALFORMED: 409,
+  LICENSE_CLOCK_ROLLBACK: 409,
   UPGRADE_NOT_READY: 409,
   UPGRADE_RELEASE_MISMATCH: 409,
   VERIFICATION_REQUIRED: 409,

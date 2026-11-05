@@ -4,16 +4,18 @@ import { t } from './i18n/zh-CN.js';
 import { PlatformApp } from './PlatformApp.js';
 import { ConsoleScreen } from './screens/ConsoleScreen.js';
 import { EnrollmentScreen } from './screens/EnrollmentScreen.js';
+import { LicenseScreen } from './screens/LicenseScreen.js';
 import { LifecycleScreen } from './screens/LifecycleScreen.js';
 import { SignInScreen } from './screens/SignInScreen.js';
 import { Shell } from './ui/Shell.js';
 
-type Path = '/' | '/upgrade' | '/enroll';
+type Path = '/' | '/license' | '/upgrade' | '/enroll';
 
 function currentPath(): Path {
   const pathname = window.location.pathname.replace(/\/+$/u, '');
   if (pathname === '/enroll') return '/enroll';
   if (pathname === '/upgrade') return '/upgrade';
+  if (pathname === '/license') return '/license';
   return '/';
 }
 
@@ -108,6 +110,8 @@ function OperatorApp() {
         <ConsoleNav path={path} onNavigate={navigate} />
         {path === '/upgrade' ? (
           <LifecycleScreen onSessionLost={sessionLost} />
+        ) : path === '/license' ? (
+          <LicenseScreen onSessionLost={sessionLost} />
         ) : (
           <ConsoleScreen onSessionLost={sessionLost} />
         )}
@@ -140,6 +144,7 @@ function ConsoleNav({ path, onNavigate }: { path: Path; onNavigate: (next: Path)
   return (
     <nav className="console-nav" aria-label={t('console.navLabel')}>
       {link('/', t('nav.console'))}
+      {link('/license', t('nav.license'))}
       {link('/upgrade', t('nav.lifecycle'))}
     </nav>
   );
