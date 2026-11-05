@@ -85,11 +85,6 @@ interface ServingContract {
   schema: DatasetSchemaField[];
 }
 
-/** The exact authorized scope one reader may apply to one Contract line. */
-interface AuthorizedServing extends ServingContract {
-  scope: GrantScope;
-}
-
 /** The narration model a Report may use, or the reason its narrative is absent. */
 interface NarrationModel {
   binding: WorkspaceModelBindingRecord;
@@ -648,7 +643,9 @@ export function showReportTemplate(options: {
   if (!template) {
     deny(session, actorLabel(actor.user), context, 'REPORT_TEMPLATE_NOT_AVAILABLE', 'The Report Template is not available to this actor.');
   }
-  requireWorkspaceAdministrator(session, actor, context, template.workspace_id);
+  if (workspaceRoleOf(session.state, actor.user.user_id, template.workspace_id) !== 'Workspace Administrator') {
+    deny(session, actorLabel(actor.user), context, 'REPORT_TEMPLATE_NOT_AVAILABLE', 'The Report Template is not available to this actor.');
+  }
   const version = options.version === undefined
     ? (template.published_version === null
       ? undefined
@@ -984,11 +981,6 @@ export function reportAgeMinutes(report: ReportRecord, now: Date): number {
   return Math.max(0, (now.getTime() - Date.parse(report.generated_at)) / 60_000);
 }
 
-/** Whether a Report is fresh by age alone against its own pinned policy. */
-export function reportAgeFresh(report: ReportRecord, now: Date): boolean {
-  return reportAgeMinutes(report, now) <= report.freshness_policy.max_age_minutes;
-}
-
 /** One part of the effective authorization a response discloses. */
 export interface AuthorizationPart {
   data_product_id: string;
@@ -1094,6 +1086,9 @@ export async function reuseReport(options: ReuseRequest): Promise<ReportReuse> {
       const report = candidates[index]!;
       const ageMinutes = reportAgeMinutes(report, options.now);
       if (report.data_product.data_product_release === serving.release.release
+        && report.template.content_hash === version.content_hash
+        && report.normalized_question === normalized
+        && canonicalDigest(report.parameters) === canonicalDigest(version.parameters)
         && report.security.scope_fingerprint === scope.fingerprint
         && ageMinutes <= version.freshness_policy.max_age_minutes) {
         return {
@@ -1108,8 +1103,12 @@ export async function reuseReport(options: ReuseRequest): Promise<ReportReuse> {
     }
     // A matching Template whose stock is stale, pinned to an older Release, or
     // generated under another authorization produces a new Report for exactly
-    // this reader; nothing reuses another actor's stored rows.
-    const superseded = candidates[candidates.length - 1] ?? null;
+    // this reader; nothing reuses another actor's stored rows. Only a Report of
+    // this actor's own scope is ever named as the one being superseded.
+    const previous = candidates[candidates.length - 1];
+    const superseded = previous !== undefined && previous.security.scope_fingerprint === scope.fingerprint
+      ? previous
+      : null;
     try {
       const report = await generateReport({
         session: options.session,
@@ -1171,7 +1170,9 @@ export async function generateTemplateReport(options: {
   if (!template) {
     deny(session, actorLabel(actor.user), context, 'REPORT_TEMPLATE_NOT_AVAILABLE', 'The Report Template is not available to this actor.');
   }
-  requireWorkspaceAdministrator(session, actor, context, template.workspace_id);
+  if (workspaceRoleOf(session.state, actor.user.user_id, template.workspace_id) !== 'Workspace Administrator') {
+    deny(session, actorLabel(actor.user), context, 'REPORT_TEMPLATE_NOT_AVAILABLE', 'The Report Template is not available to this actor.');
+  }
   const version = template.published_version === null
     ? undefined
     : findReportTemplateVersion(template, template.published_version);

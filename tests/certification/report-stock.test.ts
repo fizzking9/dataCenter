@@ -375,7 +375,7 @@ test('a Template pins normalized semantics, typed parameters, the grounded-answe
   // Templates are administrator configuration, not a Consumer surface.
   const denied = command(s.fixture, ['report', 'template-show', '--template', s.templateId], { token: s.consumerToken });
   assert.equal(denied.status, 2);
-  assert.equal(denied.error['code'], 'WORKSPACE_ACCESS_DENIED');
+  assert.equal(denied.error['code'], 'REPORT_TEMPLATE_NOT_AVAILABLE');
 });
 
 test('an exact normalized match returns stock without rerunning a query or invoking the model', async (t) => {
