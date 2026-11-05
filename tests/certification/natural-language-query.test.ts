@@ -197,5 +197,69 @@ test('NLQ gives the model only the authorized Contract and refuses a plan that c
   assert.equal(dataProductAudits(s.fixture), auditsBefore, 'an unpublished request key never reaches the engine');
 });
 
+test('NLQ asks a targeted clarification before executing and discloses governed defaults', async (t) => {
+  const s = await readySurface();
+  t.after(() => s.endpoint.close());
+  const auditsBefore = dataProductAudits(s.fixture);
+
+  // A missing period is material: nothing executes and no number comes back.
+  const missingPeriod = asOutput(await ask(s, ['--question', '杭州的处理量合计是多少？']));
+  assert.equal(missingPeriod.outcome, 'clarification', JSON.stringify(missingPeriod));
+  assert.equal(missingPeriod.executed, false);
+  assert.equal(missingPeriod.result, null);
+  assert.equal(missingPeriod.answer, null);
+  const period = asRecord(missingPeriod.clarification);
+  assert.deepEqual(period['missing'], ['period']);
+  const periodQuestion = String(period['question'] ?? '');
+  assert.ok((periodQuestion.match(/[\u4e00-\u9fff]/gu) ?? []).length >= 6, periodQuestion);
+  assert.match(periodQuestion, /时间范围/u);
+  assert.equal(dataProductAudits(s.fixture), auditsBefore, 'a clarification executes nothing');
+
+  // The clarification is asked in Chinese, targeted by its missing kind.
+  const clarifyCall = s.endpoint.calls.filter((call) => call['purpose'] === 'clarification').at(-1);
+  assert.ok(clarifyCall, 'the model was asked for a clarification');
+  assert.deepEqual(asRecord(clarifyCall['input'])['missing'], ['period']);
+
+  // Answering the clarification supplies the period and the query executes.
+  const answered = asOutput(await ask(s, ['--question', '杭州的处理量合计是多少？', '--clarification', '2026-01-01 至 2026-01-31']));
+  assert.equal(answered.outcome, 'answered', JSON.stringify(answered));
+  const auditsAfterAnswer = dataProductAudits(s.fixture);
+  assert.equal(auditsAfterAnswer, auditsBefore + 1, 'the answered turn executed exactly one governed read');
+  const defaults = answered.defaults_applied as Array<Record<string, unknown>>;
+  assert.ok(defaults.some((entry) => entry['name'] === 'limit' && entry['value'] === 100), 'the applied limit is disclosed');
+  assert.equal(defaults.some((entry) => entry['name'] === 'window'), false, 'an explicit window is not a default');
+  assert.ok((answered.limitations as string[]).some((line) => line.includes('默认值')), 'the answer states the defaults it applied');
+
+  // An unresolved metric is material even when the model itself asks.
+  s.endpoint.behaviour = 'clarify_metric';
+  const metric = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-01-31 杭州的合计是多少？']));
+  assert.equal(metric.outcome, 'clarification', JSON.stringify(metric));
+  assert.deepEqual(asRecord(metric.clarification)['missing'], ['metric']);
+  assert.deepEqual(asRecord(metric.clarification)['candidates'], ['device_count', 'handled_total', 'settled_total']);
+  assert.equal(metric.executed, false);
+  assert.equal(metric.result, null);
+
+  // An unresolved grouping dimension is material as well.
+  s.endpoint.behaviour = 'clarify_dimension';
+  const dimension = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-01-31 各城市的处理量合计是多少？']));
+  assert.equal(dimension.outcome, 'clarification', JSON.stringify(dimension));
+  assert.deepEqual(asRecord(dimension.clarification)['missing'], ['dimension']);
+  assert.deepEqual(asRecord(dimension.clarification)['candidates'], ['city']);
+
+  assert.equal(dataProductAudits(s.fixture), auditsAfterAnswer, 'no clarification executes a governed read');
+
+  // A plan that states no metric is resolved by a disclosed governed default.
+  s.endpoint.behaviour = 'omitted_metrics_plan';
+  const allMetrics = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-01-31 杭州的全部指标合计是多少？']));
+  assert.equal(allMetrics.outcome, 'answered', JSON.stringify(allMetrics));
+  const applied = allMetrics.defaults_applied as Array<Record<string, unknown>>;
+  const metricDefault = applied.find((entry) => entry['name'] === 'metrics');
+  assert.ok(metricDefault, 'the applied metric default is disclosed');
+  assert.deepEqual(metricDefault['value'], ['device_count', 'handled_total', 'settled_total']);
+  const totalsDefault = applied.find((entry) => entry['name'] === 'include_totals');
+  assert.ok(totalsDefault, 'the applied totals default is disclosed');
+  assert.equal(totalsDefault['value'], true);
+});
+
 // The remaining acceptance criteria are added one at a time, each red before green.
 void EXTENDED_LEDGER_CONTRACT;

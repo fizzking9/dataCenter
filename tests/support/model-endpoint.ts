@@ -23,7 +23,8 @@ export type MockBehaviour =
   | 'sql_plan'
   | 'unknown_key_plan'
   | 'clarify_metric'
-  | 'clarify_dimension';
+  | 'clarify_dimension'
+  | 'omitted_metrics_plan';
 
 export interface MockModelEndpoint {
   url: string;
@@ -186,12 +187,12 @@ function queryPlan(body: Record<string, unknown>, behaviour: MockBehaviour): Rec
     interpretation: planInterpretation(metric, groupBy, filter, window !== undefined),
     query: {
       kind: 'aggregate',
-      ...(metric === null ? {} : { metrics: [metric] }),
+      ...(behaviour === 'omitted_metrics_plan' || metric === null ? {} : { metrics: [metric] }),
       ...(filter === null ? {} : { filters: [filter] }),
       ...(groupBy.length === 0 ? {} : { group_by: groupBy }),
       ...(window === undefined ? {} : { window }),
       ...(comparison === undefined ? {} : { comparison }),
-      include_totals: true,
+      ...(behaviour === 'omitted_metrics_plan' ? {} : { include_totals: true }),
     },
   };
 }
