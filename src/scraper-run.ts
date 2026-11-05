@@ -364,6 +364,7 @@ export async function runScraperService(options: {
     mode: 'scraper',
     trigger: 'manual',
     backfill: null,
+    scheduled_for: null,
     integration_configuration_version: integration.version,
     attempts: 1,
     status: 'running',
