@@ -86,6 +86,7 @@ function queueRun(
   queuedAt: string,
   scheduledFor: string | null,
   backfill: { start: string; end: string } | null,
+  rerunOf: string | null = null,
 ): AcquisitionRunRecord {
   const run: AcquisitionRunRecord = {
     acquisition_run_id: randomUUID(),
@@ -94,6 +95,7 @@ function queueRun(
     mode: 'connector',
     trigger,
     backfill,
+    rerun_of: rerunOf,
     integration_configuration_version: adoptedIntegrationVersion(
       findIntegrationConfiguration(session.state.integration_configurations, source.source_id),
     )?.version ?? null,
@@ -152,6 +154,8 @@ export function enqueueAcquisition(options: {
   sourceId: string;
   from?: string;
   to?: string;
+  /** The Run this manual request reruns, so the ledger links one request to the next. */
+  rerunOf?: string;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'acquisition_enqueue', scope: 'workspace' };
@@ -160,7 +164,25 @@ export function enqueueAcquisition(options: {
   const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
   requireConnectorSource(session, actorLabel(actor.user), scoped, source);
   const backfill = readBackfill(session, actorLabel(actor.user), scoped, options.from, options.to);
-  const run = queueRun(session, source, actorLabel(actor.user), scoped, 'manual', new Date().toISOString(), null, backfill);
+  if (options.rerunOf !== undefined && options.rerunOf !== '') {
+    const previous = session.state.acquisition_runs.find(
+      (candidate) => candidate.acquisition_run_id === options.rerunOf && candidate.source_id === source.source_id,
+    );
+    if (!previous) {
+      reject(session, actorLabel(actor.user), scoped, 'ACQUISITION_RUN_NOT_FOUND', 'No Acquisition Run of this Source has this identifier.');
+    }
+  }
+  const run = queueRun(
+    session,
+    source,
+    actorLabel(actor.user),
+    scoped,
+    'manual',
+    new Date().toISOString(),
+    null,
+    backfill,
+    options.rerunOf === undefined || options.rerunOf === '' ? null : options.rerunOf,
+  );
   session.save();
   return {
     source_id: source.source_id,
@@ -168,6 +190,7 @@ export function enqueueAcquisition(options: {
     status: run.status,
     trigger: run.trigger,
     backfill: run.backfill,
+    rerun_of: run.rerun_of ?? null,
     queued_at: run.queued_at,
   };
 }

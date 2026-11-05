@@ -390,12 +390,251 @@ export interface SourceReleaseView {
 
 export interface SourceRunView {
   acquisition_run_id: string;
+  mode?: string;
+  trigger: string;
   status: string;
+  attempts: number;
+  backfill?: { start: string; end: string } | null;
+  rerun_of?: string | null;
   queued_at: string;
+  scheduled_for: string | null;
   started_at: string | null;
   completed_at: string | null;
   integration_configuration_version: number | null;
+  error_code?: string | null;
 }
+
+/** One immutable acquisition configuration Version a connector Source pins. */
+export interface AcquisitionConfigurationVersionView {
+  version: number;
+  published_at: string;
+  content_hash: string;
+  connection_id: string;
+  connection_version: number;
+  connector: { name: string; version: number };
+  path: string;
+  record_path: string | null;
+  completion: { kind: string; flag?: string; done_value?: boolean };
+  window: AcquisitionWindowView | null;
+  content_type: string | null;
+}
+
+export interface AcquisitionWindowView {
+  mode: string;
+  start_parameter: string;
+  end_parameter: string;
+  initial_start: string;
+  initial_end: string | null;
+  maximum_span_minutes: number;
+  lookback_minutes: number;
+  time_zone: string;
+  end_inclusive: boolean;
+}
+
+/** The durable resume point a completed attempt advances and a failure leaves alone. */
+export interface AcquisitionCheckpointView {
+  watermark: string | null;
+  cursor: string | null;
+  cursor_state: 'valid' | 'invalid';
+  updated_at: string | null;
+  generation: number;
+}
+
+/** One Connection Version as the browser reads it; the credential value is absent. */
+export interface ConnectionVersionView {
+  version: number;
+  base_url: string;
+  credential_ref: string;
+  has_credential: boolean;
+  auth_scheme: string;
+  retry: {
+    max_attempts: number;
+    base_delay_ms: number;
+    max_delay_ms: number;
+    retry_on: number[];
+  };
+  pacing: {
+    serialization: boolean;
+    minimum_interval_seconds: number;
+    maximum_requests_per_minute: number | null;
+    maximum_concurrent_runs: number;
+  };
+  schedule: { every_minutes: number; start_tolerance_seconds: number } | null;
+  publication_targets: { p95_seconds: number; p99_seconds: number } | null;
+  content_hash: string;
+}
+
+export interface ConnectionView {
+  connection_id: string;
+  name: string;
+  adopted_version: number | null;
+  versions: ConnectionVersionView[];
+}
+
+export interface ConnectionList {
+  workspace_id: string;
+  connections: ConnectionView[];
+}
+
+/** A guided Connection review; it names the credential reference, never the secret. */
+export interface ConnectionPreview {
+  valid: boolean;
+  name?: string;
+  declaration?: Record<string, unknown>;
+  credential_ref?: string;
+  has_credential?: boolean;
+  content_hash?: string;
+  errors: Array<{ code: string; message?: string }>;
+}
+
+export interface ConnectionPublicationView {
+  connection_id: string;
+  workspace_id: string;
+  name: string;
+  connection_version: number;
+  base_url: string;
+  credential_ref: string;
+  has_credential: boolean;
+  auth: Record<string, unknown>;
+  retry: ConnectionVersionView['retry'];
+  pacing: ConnectionVersionView['pacing'];
+  pagination: Record<string, unknown>;
+  schedule: ConnectionVersionView['schedule'];
+  publication_targets: ConnectionVersionView['publication_targets'];
+  content_hash: string;
+  published_at: string;
+}
+
+export interface SourceAcquisitionConfigurationPreview {
+  valid: boolean;
+  declaration?: Record<string, unknown>;
+  content_hash?: string;
+  errors: Array<{ code: string; message?: string }>;
+}
+
+export interface SourceAcquisitionConfigurationPublicationView {
+  source_id: string;
+  acquisition_configuration_version: number;
+  connection_id: string;
+  connection_version: number;
+  connector: { name: string; version: number };
+  path: string;
+  record_path: string | null;
+  completion: AcquisitionConfigurationVersionView['completion'];
+  window: AcquisitionWindowView | null;
+  content_type: string | null;
+  content_hash: string;
+}
+
+export interface AcquisitionRunQueuedView {
+  source_id: string;
+  acquisition_run_id: string;
+  status: string;
+  trigger: string;
+  backfill: { start: string; end: string } | null;
+  rerun_of: string | null;
+  queued_at: string;
+}
+
+export interface AcquisitionRunWorkView {
+  acquisition_run_id: string;
+  status: string;
+  trigger: string;
+  paced?: boolean;
+  pacing_reason?: 'fifo' | 'serialization' | 'concurrency' | 'interval' | 'rate' | null;
+  queue_position?: number;
+  not_before?: string | null;
+  plan: AcquisitionPlanRecordView | null;
+  raw_acquisition_count: number;
+  raw_acquisition_ids: string[];
+  batch_raw_acquisition_count: number | null;
+  integration_batch_id: string | null;
+  dataset_release: number | null;
+  records: number | null;
+  error_code?: string | null;
+}
+
+export interface AcquisitionPlanPageView {
+  page: number;
+  raw_id: string | null;
+  outcome: 'received' | 'empty' | 'failed';
+  record_count: number | null;
+  error_code: string | null;
+  attempts: number;
+  failed_attempts: Array<{
+    raw_id: string | null;
+    status: number | null;
+    error_code: string;
+    retry_after_ms: number | null;
+  }>;
+}
+
+export interface AcquisitionPlanWindowView {
+  mode: string;
+  start: string;
+  end: string;
+  lookback_minutes: number;
+  end_inclusive: boolean;
+  captured_at: string;
+}
+
+export interface AcquisitionPlanRecordView {
+  plan_id: string;
+  status: 'planned' | 'complete' | 'partial' | 'failed';
+  trigger: string;
+  connector: { name: string; version: number };
+  connection_id: string;
+  connection_version: number;
+  acquisition_configuration_version: number;
+  integration_configuration_version: number;
+  pages: AcquisitionPlanPageView[];
+  window: AcquisitionPlanWindowView | null;
+  start_cursor: string | null;
+  checkpoint_before: { watermark: string | null; cursor: string | null } | null;
+  checkpoint_after: { watermark: string | null; cursor: string | null } | null;
+  end_cursor: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface AcquisitionPlanView {
+  source_id: string;
+  acquisition_run_id: string;
+  plan: AcquisitionPlanRecordView;
+  raw_acquisitions: Array<{
+    raw_id: string;
+    content_hash: string;
+    byte_length: number;
+    received_at: string;
+  }>;
+}
+
+export interface ConnectionSessionView {
+  connection_id: string;
+  workspace_id: string;
+  connection_version: number | null;
+  auth_scheme: string | null;
+  state: 'active' | 'intervention_required';
+  has_access_token: boolean;
+  has_cookie: boolean;
+  cookie_name: string | null;
+  issued_at: string | null;
+  expires_at: string | null;
+  generation: number;
+  updated_at: string | null;
+}
+
+export interface ConnectionPacingView {
+  connection_id: string;
+  workspace_id: string;
+  queue: Array<{ acquisition_run_id: string; source_id: string; enqueued_at: string; not_before: string | null }>;
+  active: Array<{ acquisition_run_id: string; source_id: string; started_at: string }>;
+  last_finished_at: string | null;
+  requests_last_minute: number;
+  updated_at: string | null;
+  policy: ConnectionVersionView['pacing'] | null;
+}
+
 
 export interface SourceLatestAcquisitionView {
   batch_id: string;
@@ -410,6 +649,17 @@ export interface SourceDetailView {
   configuration: {
     adopted_version: number | null;
     versions: SourceConfigurationVersionView[];
+  };
+  acquisition: {
+    adopted_version: number | null;
+    checkpoint: AcquisitionCheckpointView | null;
+    versions: AcquisitionConfigurationVersionView[];
+    connection: {
+      connection_id: string;
+      name: string;
+      adopted_version: number | null;
+      versions: ConnectionVersionView[];
+    } | null;
   };
   dataset: {
     releases: SourceReleaseView[];
@@ -755,6 +1005,108 @@ export const platformApi = {
     requestUpload<SourceAcquisitionView>(
       `/api/workspace/sources/${encodeURIComponent(sourceId)}/acquisitions`,
       file,
+    ),
+  connections: (workspaceId: string) =>
+    request<ConnectionList>(`/api/workspace/connections${workspaceQuery(workspaceId)}`),
+  previewConnection: (
+    workspaceId: string,
+    name: string,
+    declaration: Record<string, unknown>,
+    credential: string,
+  ) =>
+    request<ConnectionPreview>('/api/workspace/connections/preview', {
+      method: 'POST',
+      body: JSON.stringify({
+        workspace_id: workspaceId,
+        name,
+        declaration,
+        ...(credential === '' ? {} : { credential }),
+      }),
+    }),
+  publishConnection: (
+    workspaceId: string,
+    name: string,
+    declaration: Record<string, unknown>,
+    credential: string,
+  ) =>
+    request<ConnectionPublicationView>('/api/workspace/connections', {
+      method: 'POST',
+      body: JSON.stringify({
+        workspace_id: workspaceId,
+        name,
+        declaration,
+        ...(credential === '' ? {} : { credential }),
+      }),
+    }),
+  adoptConnection: (connectionId: string, version: number) =>
+    request<{ connection_id: string; adopted_version: number; content_hash: string }>(
+      `/api/workspace/connections/${encodeURIComponent(connectionId)}/adopt`,
+      { method: 'POST', body: JSON.stringify({ version }) },
+    ),
+  connectionSession: (connectionId: string) =>
+    request<ConnectionSessionView>(`/api/workspace/connections/${encodeURIComponent(connectionId)}/session`),
+  resetConnectionSession: (connectionId: string) =>
+    request<{ connection_id: string; reset: boolean; sessions_removed: number; state: string }>(
+      `/api/workspace/connections/${encodeURIComponent(connectionId)}/session/reset`,
+      { method: 'POST' },
+    ),
+  connectionPacing: (connectionId: string) =>
+    request<ConnectionPacingView>(`/api/workspace/connections/${encodeURIComponent(connectionId)}/pacing`),
+  previewAcquisitionConfiguration: (sourceId: string, declaration: Record<string, unknown>) =>
+    request<SourceAcquisitionConfigurationPreview>(
+      `/api/workspace/sources/${encodeURIComponent(sourceId)}/acquisition/preview`,
+      { method: 'POST', body: JSON.stringify({ declaration }) },
+    ),
+  publishAcquisitionConfiguration: (sourceId: string, declaration: Record<string, unknown>) =>
+    request<SourceAcquisitionConfigurationPublicationView>(
+      `/api/workspace/sources/${encodeURIComponent(sourceId)}/acquisition/publish`,
+      { method: 'POST', body: JSON.stringify({ declaration }) },
+    ),
+  adoptAcquisitionConfiguration: (sourceId: string, version: number) =>
+    request<{ source_id: string; adopted_version: number; content_hash: string }>(
+      `/api/workspace/sources/${encodeURIComponent(sourceId)}/acquisition/adopt`,
+      { method: 'POST', body: JSON.stringify({ version }) },
+    ),
+  enqueueAcquisitionRun: (
+    sourceId: string,
+    options: { from?: string; to?: string; rerunOf?: string } = {},
+  ) =>
+    request<AcquisitionRunQueuedView>(
+      `/api/workspace/sources/${encodeURIComponent(sourceId)}/acquisition/runs`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          ...(options.from === undefined ? {} : { from: options.from }),
+          ...(options.to === undefined ? {} : { to: options.to }),
+          ...(options.rerunOf === undefined ? {} : { rerun_of: options.rerunOf }),
+        }),
+      },
+    ),
+  workAcquisition: (sourceId: string) =>
+    request<AcquisitionRunWorkView>(
+      `/api/workspace/sources/${encodeURIComponent(sourceId)}/acquisition/work`,
+      { method: 'POST' },
+    ),
+  sourceCheckpoint: (sourceId: string) =>
+    request<{ source_id: string; checkpoint: AcquisitionCheckpointView | null }>(
+      `/api/workspace/sources/${encodeURIComponent(sourceId)}/acquisition/checkpoint`,
+    ),
+  resetSourceCheckpoint: (sourceId: string) =>
+    request<{ source_id: string; checkpoint: AcquisitionCheckpointView }>(
+      `/api/workspace/sources/${encodeURIComponent(sourceId)}/acquisition/checkpoint/reset`,
+      { method: 'POST' },
+    ),
+  cancelAcquisitionRun: (runId: string) =>
+    request<{ acquisition_run_id: string; source_id: string; status: string; error_code: string | null }>(
+      `/api/workspace/acquisition-runs/${encodeURIComponent(runId)}/cancel`,
+      { method: 'POST' },
+    ),
+  acquisitionPlan: (runId: string) =>
+    request<AcquisitionPlanView>(`/api/workspace/acquisition-runs/${encodeURIComponent(runId)}/plan`),
+  tickAcquisitionSchedule: () =>
+    request<{ at: string; enqueued: Array<{ source_id: string; acquisition_run_id: string; due_at: string }> }>(
+      '/api/workspace/acquisition/schedule',
+      { method: 'POST', body: JSON.stringify({}) },
     ),
   modelProfiles: () => request<ModelProfileList>('/api/deployment/model-profiles'),
   publishModelProfile: (body: Record<string, unknown>) =>
