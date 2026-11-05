@@ -365,6 +365,14 @@ export function readPlatform(root: string): PlatformState {
   state.retention_holds ??= [];
   state.purge_jobs ??= [];
   state.purge_ledger ??= [];
+  // A schedule recorded before pausing existed was never paused, so the tick
+  // keeps evaluating it exactly as it did.
+  for (const schedule of state.report_schedules) {
+    schedule.paused_at ??= null;
+    schedule.paused_by ??= null;
+    schedule.resumed_at ??= null;
+    schedule.resumed_by ??= null;
+  }
   // A Report or Template Version recorded before Withdrawal existed was never
   // withdrawn, so it keeps serving exactly as it did.
   for (const template of state.report_templates) {

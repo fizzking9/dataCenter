@@ -1006,3 +1006,36 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+.report-candidates,
+.report-schedules {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 16px;
+}
+
+.report-candidates__item,
+.report-schedules__item {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--border-subtle, #d8dee6);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+}
+
+.report-candidates__head,
+.report-schedules__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.report-candidates__similarity {
+  padding: 12px;
+  border-radius: 6px;
+  background: var(--surface-muted, #f6f8fa);
+}
