@@ -719,6 +719,7 @@ test('the Model Profile list publishes every governed purpose, data category, an
     assert.deepEqual(vocabulary['purposes'], [
       'integration_proposal',
       'data_product_proposal',
+      'scraper_repair',
       'grounded_narration',
       'clarification',
       'query_plan',
@@ -729,6 +730,7 @@ test('the Model Profile list publishes every governed purpose, data category, an
       'source_mapping',
       'sample_records',
       'product_contract',
+      'scraper_diagnostics',
     ]);
     assert.deepEqual(vocabulary['adapters'], ['hosted', 'generic_local']);
   } finally {
@@ -754,6 +756,7 @@ test('the Model Profile form renders every purpose and data category the server 
     for (const purpose of [
       'integration_proposal',
       'data_product_proposal',
+      'scraper_repair',
       'grounded_narration',
       'clarification',
       'query_plan',
@@ -766,6 +769,7 @@ test('the Model Profile form renders every purpose and data category the server 
       'source_mapping',
       'sample_records',
       'product_contract',
+      'scraper_diagnostics',
     ]) {
       assert.equal(await page.getByLabel(category, { exact: true }).count(), 1, category);
     }

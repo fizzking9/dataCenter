@@ -39,8 +39,10 @@ import {
   readPage,
   scopeAllows,
   type ScraperCredentialMaterial,
+  type ScraperPageReading,
   type ScraperPageReply,
 } from './scraper-engine.js';
+import { buildScraperDiagnostics, storeScraperDiagnostics } from './scraper-diagnostics.js';
 import { requireAdministeredSource } from './sources.js';
 
 /** One page an attempt read, with the records extracted from it. */
@@ -55,8 +57,17 @@ export interface ScrapeAttempt {
   pages: ScraperManifestPage[];
   fragments: ScrapedFragment[];
   diagnostics: ScraperDiagnostic[];
+  /** Every page request the attempt made, accepted or refused, for diagnosis. */
+  readings: ScraperPageReadingRecord[];
   record_count: number;
   complete: boolean;
+}
+
+/** One page request and the raw reading it produced, kept only to diagnose a failure. */
+export interface ScraperPageReadingRecord {
+  page: number;
+  url: string;
+  reading: ScraperPageReading;
 }
 
 /** The credential values one Service Version may present, or the reference that is missing. */
@@ -133,12 +144,18 @@ export async function scrapeAttempt(options: {
   const pages: ScraperManifestPage[] = [];
   const fragments: ScrapedFragment[] = [];
   const diagnostics: ScraperDiagnostic[] = [];
+  const readings: ScraperPageReadingRecord[] = [];
   let recordCount = 0;
   let complete = false;
 
   for (const page of plannedPages(service.content.target)) {
     const url = pageUrl(service.content.target, parameters, page);
     if (url === null) {
+      readings.push({
+        page,
+        url: `${service.content.target.base_url}${service.content.target.path}`,
+        reading: { status: null, content_type: null, body: null, response_hash: null, response_bytes: null },
+      });
       diagnostics.push({
         code: 'SCRAPER_TARGET_UNRESOLVED',
         page,
@@ -147,6 +164,11 @@ export async function scrapeAttempt(options: {
       break;
     }
     if (!scopeAllows(service.content.network_scope, url)) {
+      readings.push({
+        page,
+        url,
+        reading: { status: null, content_type: null, body: null, response_hash: null, response_bytes: null },
+      });
       diagnostics.push({
         code: 'SCRAPER_NETWORK_SCOPE_REFUSED',
         page,
@@ -161,6 +183,7 @@ export async function scrapeAttempt(options: {
       credentials,
       page,
     });
+    readings.push({ page, url, reading: read.reading });
     if (read.reply === null) {
       if (read.diagnostic !== null) diagnostics.push(read.diagnostic);
       break;
@@ -202,7 +225,7 @@ export async function scrapeAttempt(options: {
       message: 'Every permitted page carried records, so the sequence could not be proven exhausted.',
     });
   }
-  return { pages, fragments, diagnostics, record_count: recordCount, complete };
+  return { pages, fragments, diagnostics, readings, record_count: recordCount, complete };
 }
 
 /** The tabular logical output one page produced, written the way integration reads it. */
@@ -422,6 +445,28 @@ export async function runScraperService(options: {
     run.status = 'failed';
     run.error_code = attempt.diagnostics[0]?.code ?? 'SCRAPER_ATTEMPT_FAILED';
     manifest.status = 'failed';
+    // The failure is diagnosed against the versions this Run really used, so a
+    // repair never has to reconstruct what the attempt saw.
+    const diagnostics = storeScraperDiagnostics(
+      session,
+      buildScraperDiagnostics({
+        workspaceId: source.workspace_id,
+        sourceId: source.source_id,
+        mode: 'run',
+        actor: actorLabel(actor.user),
+        proposalId: null,
+        attempt,
+        taskId: pinned.task.scraper_task_id,
+        serviceId: pinned.artifact.scraper_service_id,
+        service: pinned.service,
+        taskVersion: pinned.taskVersion,
+        parameters,
+        credentials: resolvedCredentials.material,
+        rawAcquisitions: raws,
+        acquisitionRunId: run.acquisition_run_id,
+        manifestId: manifest.manifest_id,
+      }),
+    );
     session.audit({
       ...scoped,
       actor: actorLabel(actor.user),
@@ -431,10 +476,13 @@ export async function runScraperService(options: {
         manifest_id: manifest.manifest_id,
         error_code: run.error_code,
         raw_acquisition_count: run.raw_acquisition_ids.length,
+        diagnostics_id: diagnostics.diagnostics_id,
+        diagnostics_stage: diagnostics.stage,
+        diagnostics_category: diagnostics.category,
       },
     });
     session.save();
-    return viewRun(source, run, manifest, pinned, raws, null, null, false);
+    return viewRun(source, run, manifest, pinned, raws, null, null, false, diagnostics.diagnostics_id);
   }
 
   const batch: IntegrationBatchRecord = {
@@ -477,7 +525,7 @@ export async function runScraperService(options: {
       },
     });
     session.save();
-    return viewRun(source, run, manifest, pinned, raws, batch, null, false);
+    return viewRun(source, run, manifest, pinned, raws, batch, null, false, null);
   }
 
   session.audit({
@@ -494,7 +542,7 @@ export async function runScraperService(options: {
     },
   });
   session.save();
-  return viewRun(source, run, manifest, pinned, raws, batch, released, true);
+  return viewRun(source, run, manifest, pinned, raws, batch, released, true, null);
 }
 
 /** One Run's Raw Acquisitions, manifest, diagnostics, and Provenance, never a credential. */
@@ -507,12 +555,14 @@ function viewRun(
   batch: IntegrationBatchRecord | null,
   released: Record<string, unknown> | null,
   complete: boolean,
+  diagnosticsId: string | null,
 ): Record<string, unknown> {
   return {
     source_id: source.source_id,
     acquisition_run_id: run.acquisition_run_id,
     status: run.status,
     error_code: run.error_code ?? null,
+    diagnostics_id: diagnosticsId,
     scraper_service_id: pinned.artifact.scraper_service_id,
     scraper_service_version: pinned.service.version,
     scraper_service_content_hash: pinned.service.content_hash,

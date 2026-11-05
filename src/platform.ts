@@ -18,6 +18,7 @@ import type {
   ArtifactProposalRecord,
   ModelProfileArtifact,
   ScraperCredentialRecord,
+  ScraperDiagnosticsRecord,
   ScraperRunManifest,
   ScraperServiceArtifact,
   ScraperTaskArtifact,
@@ -203,6 +204,7 @@ export interface PlatformState {
   source_scraper_services: SourceScraperServiceRecord[];
   scraper_credentials: ScraperCredentialRecord[];
   scraper_runs: ScraperRunManifest[];
+  scraper_diagnostics: ScraperDiagnosticsRecord[];
 }
 
 /** Every human identity is stated as one account identifier of the form name@domain. */
@@ -259,6 +261,7 @@ export function readPlatform(root: string): PlatformState {
         source_scraper_services: [],
         scraper_credentials: [],
         scraper_runs: [],
+        scraper_diagnostics: [],
       };
   // A Deployment installed under an earlier schema keeps working: the added
   // Collections start empty rather than failing the read closed.
@@ -295,6 +298,8 @@ export function readPlatform(root: string): PlatformState {
   state.source_scraper_services ??= [];
   state.scraper_credentials ??= [];
   state.scraper_runs ??= [];
+  // Scraper failure diagnoses starts empty on a Deployment written before repairs existed.
+  state.scraper_diagnostics ??= [];
   // A Run recorded before acquisition was queued still reads as a completed
   // manual attempt rather than a Run that never started.
   for (const run of state.acquisition_runs) {

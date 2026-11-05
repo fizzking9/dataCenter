@@ -854,12 +854,23 @@ export type ModelAdapterKind = 'hosted' | 'generic_local';
 export type ModelPurpose =
   | 'integration_proposal'
   | 'data_product_proposal'
+  | 'scraper_repair'
   | 'grounded_narration'
   | 'clarification'
   | 'query_plan';
 
-/** The data categories a Model Profile Version may receive for a purpose. */
-export type ModelDataCategory = 'dataset_schema' | 'cleaning_rules' | 'source_mapping' | 'sample_records' | 'product_contract';
+/**
+ * The data categories a Model Profile Version may receive for a purpose.
+ * `scraper_diagnostics` covers the sanitized failure diagnostics and the
+ * versioned fixture pages a Scraper Service repair is given.
+ */
+export type ModelDataCategory =
+  | 'dataset_schema'
+  | 'cleaning_rules'
+  | 'source_mapping'
+  | 'sample_records'
+  | 'product_contract'
+  | 'scraper_diagnostics';
 
 /** One prompt an exact Model Profile Version pins for one purpose. */
 export interface ModelPrompt {
@@ -1484,6 +1495,97 @@ export interface ScraperRunManifest {
   status: 'running' | 'complete' | 'failed';
 }
 
+/** The pipeline stage one scraper diagnostic was raised in. */
+export type ScraperDiagnosticStage = 'request' | 'transport' | 'page' | 'extraction' | 'sequence' | 'attempt';
+
+/** The governed category one scraper diagnostic belongs to. */
+export type ScraperDiagnosticCategory =
+  | 'network_scope'
+  | 'target_unresolved'
+  | 'request_failed'
+  | 'http_status'
+  | 'content_type'
+  | 'page_too_large'
+  | 'record_limit'
+  | 'page_limit'
+  | 'field_missing'
+  | 'unknown';
+
+/**
+ * The request evidence one diagnostic carries: the address that was read, the
+ * header names it presented, and the credential references it resolved. A value
+ * is never among them.
+ */
+export interface ScraperEvidenceRequest {
+  method: 'GET';
+  url: string;
+  header_names: string[];
+  credential_refs: string[];
+}
+
+/** The sanitized page evidence one diagnostic carries: no credential value, one bounded excerpt. */
+export interface ScraperEvidencePage {
+  status: number | null;
+  content_type: string | null;
+  response_hash: string | null;
+  response_bytes: number | null;
+  body_excerpt: string | null;
+  excerpt_truncated: boolean;
+}
+
+/** One immutable Raw Acquisition a failed attempt kept, named only by reference. */
+export interface ScraperEvidenceRawRef {
+  raw_id: string;
+  content_hash: string;
+  byte_length: number;
+}
+
+/** One sanitized diagnostic: stage, category, request and page evidence, raw references. */
+export interface ScraperFailureDiagnostic {
+  code: string;
+  stage: ScraperDiagnosticStage;
+  category: ScraperDiagnosticCategory;
+  page: number | null;
+  message: string;
+  request: ScraperEvidenceRequest;
+  page_evidence: ScraperEvidencePage;
+  raw_refs: ScraperEvidenceRawRef[];
+}
+
+/**
+ * One immutable failure diagnosis. It names the exact Task and Service Versions,
+ * engine, and fixtures that governed the failing attempt, so a repair is
+ * generated against facts rather than a reconstructed guess.
+ */
+export interface ScraperDiagnosticsRecord {
+  diagnostics_id: string;
+  workspace_id: string;
+  source_id: string | null;
+  mode: 'run' | 'verification';
+  acquisition_run_id: string | null;
+  manifest_id: string | null;
+  proposal_id: string | null;
+  recorded_at: string;
+  recorded_by: string;
+  failure_code: string;
+  stage: ScraperDiagnosticStage;
+  category: ScraperDiagnosticCategory;
+  engine: { name: 'declarative-scraper'; version: 1 };
+  scraper_task_id: string;
+  scraper_task_version: number;
+  scraper_task_content_hash: string;
+  scraper_service_id: string;
+  scraper_service_version: number;
+  scraper_service_content_hash: string;
+  fixtures_version: number;
+  fixtures_hash: string;
+  /** The resolved run parameters the failing attempt was held to. */
+  parameters: Record<string, string>;
+  diagnostics: ScraperFailureDiagnostic[];
+  raw_refs: ScraperEvidenceRawRef[];
+  evidence_hash: string;
+}
+
 /** The Scraper Service Versions a Proposal was compiled against. */
 export interface ScraperProposalBase {
   scraper_service_id: string | null;
@@ -1498,12 +1600,62 @@ export interface ScraperProposalEvidence {
   fixtures_hash: string;
   output_fields: string[];
   network_scope: ScraperNetworkScope;
+  /**
+   * The fixture pages a repair adds beside the retained base fixtures. A
+   * compiled candidate adds none, so its Approval covers existing fixtures only.
+   */
+  regression_fixtures: string[];
 }
 
 /** The one candidate Scraper Service a Proposal submits for all-or-nothing Approval. */
 export interface ScraperProposalCandidates {
   service: ScraperServiceContent;
   content_hash: string;
+}
+
+/** The exact immutable Model Profile Version one repair candidate was generated under. */
+export interface ScraperRepairModelPin {
+  model_profile_id: string;
+  model_profile_version: number;
+  model_profile_content_hash: string;
+  adapter: ModelAdapterKind;
+  model_id: string;
+  binding_id: string;
+  prompt_id: 'scraper_repair';
+  prompt_hash: string;
+}
+
+/**
+ * What one repair addresses: the published base it repairs, the exact failure
+ * diagnosis it was generated from, and the isolated model call that produced it.
+ * A Proposal generated by ordinary compilation carries no repair at all.
+ */
+export interface ScraperRepairRecord {
+  base_service_version: number | null;
+  base_service_content_hash: string | null;
+  base_task_version: number;
+  base_task_content_hash: string;
+  diagnostics_id: string;
+  failure_evidence_hash: string;
+  failure_code: string;
+  failure_stage: ScraperDiagnosticStage;
+  failure_category: ScraperDiagnosticCategory;
+  model: ScraperRepairModelPin;
+  /** The content address of the exact isolated input the model received. */
+  input_hash: string;
+}
+
+/** The repair lineage every Approval, Publication, verification, and Adoption restates. */
+export interface ScraperRepairProvenance {
+  base_service_version: number | null;
+  base_service_content_hash: string | null;
+  base_task_version: number;
+  base_task_content_hash: string;
+  diagnostics_id: string;
+  failure_evidence_hash: string;
+  failure_code: string;
+  input_hash: string;
+  model: ScraperRepairModelPin;
 }
 
 /** One deterministic check the validation evidence reports on. */
@@ -1560,6 +1712,8 @@ export interface ScraperProposalProvenance {
   verification_hash: string;
   candidate_content_hash: string;
   proposal_hash: string;
+  /** The repair this Proposal carries, or null when it was compiled normally. */
+  repair: ScraperRepairProvenance | null;
 }
 
 /** One Workspace Administrator decision on one exact Scraper Proposal. */
@@ -1610,6 +1764,8 @@ export interface ScraperProposalRecord {
   base: ScraperProposalBase;
   evidence: ScraperProposalEvidence;
   candidates: ScraperProposalCandidates;
+  /** Set only when this Proposal repairs a recorded failure. */
+  repair: ScraperRepairRecord | null;
   proposal_hash: string;
   validations: ScraperValidationRecord[];
   verifications: ScraperVerificationRecord[];
@@ -1700,4 +1856,12 @@ export function adoptedScraperService(
   sourceId: string,
 ): SourceScraperServiceRecord | undefined {
   return pins.find((pin) => pin.source_id === sourceId);
+}
+
+/** The failure diagnosis one attempt recorded, by its own identity. */
+export function findScraperDiagnostics(
+  records: ScraperDiagnosticsRecord[],
+  diagnosticsId: string,
+): ScraperDiagnosticsRecord | undefined {
+  return records.find((record) => record.diagnostics_id === diagnosticsId);
 }

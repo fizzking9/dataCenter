@@ -240,6 +240,25 @@ export function staticPathPrefix(path: string): string {
 export interface PageReadOutcome {
   reply: ScraperPageReply | null;
   diagnostic: ScraperDiagnostic | null;
+  /** What the request really returned, whether or not it was accepted. */
+  reading: ScraperPageReading;
+}
+
+/**
+ * One raw page reading. It is kept in memory so a failure can be diagnosed with
+ * the request and page evidence the attempt actually saw; only a sanitized
+ * excerpt is ever recorded.
+ */
+export interface ScraperPageReading {
+  status: number | null;
+  content_type: string | null;
+  body: string | null;
+  response_hash: string | null;
+  response_bytes: number | null;
+}
+
+function emptyReading(): ScraperPageReading {
+  return { status: null, content_type: null, body: null, response_hash: null, response_bytes: null };
 }
 
 function credentialHeaders(material: ScraperCredentialMaterial[]): Record<string, string> {
@@ -270,6 +289,7 @@ export async function readPage(options: {
   if (!scopeAllows(options.scope, options.url)) {
     return {
       reply: null,
+      reading: emptyReading(),
       diagnostic: {
         code: 'SCRAPER_NETWORK_SCOPE_REFUSED',
         page: options.page,
@@ -287,6 +307,7 @@ export async function readPage(options: {
   } catch {
     return {
       reply: null,
+      reading: emptyReading(),
       diagnostic: {
         code: 'SCRAPER_PAGE_REQUEST_FAILED',
         page: options.page,
@@ -295,9 +316,19 @@ export async function readPage(options: {
     };
   }
   const bytes = Buffer.from(await response.arrayBuffer());
+  const declared = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? null;
+  const body = bytes.toString('utf8');
+  const reading: ScraperPageReading = {
+    status: response.status,
+    content_type: declared,
+    body,
+    response_hash: createHash('sha256').update(bytes).digest('hex'),
+    response_bytes: bytes.byteLength,
+  };
   if (bytes.byteLength > options.constraints.max_bytes) {
     return {
       reply: null,
+      reading: { ...reading, body: null },
       diagnostic: {
         code: 'SCRAPER_PAGE_TOO_LARGE',
         page: options.page,
@@ -308,6 +339,7 @@ export async function readPage(options: {
   if (!response.ok) {
     return {
       reply: null,
+      reading,
       diagnostic: {
         code: 'SCRAPER_PAGE_STATUS',
         page: options.page,
@@ -315,10 +347,10 @@ export async function readPage(options: {
       },
     };
   }
-  const declared = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? null;
   if (declared !== 'text/html') {
     return {
       reply: null,
+      reading,
       diagnostic: {
         code: 'SCRAPER_PAGE_CONTENT_TYPE',
         page: options.page,
@@ -329,11 +361,12 @@ export async function readPage(options: {
   return {
     reply: {
       status: response.status,
-      body: bytes.toString('utf8'),
+      body,
       content_type: declared,
-      responseHash: createHash('sha256').update(bytes).digest('hex'),
-      responseBytes: bytes.byteLength,
+      responseHash: reading.response_hash!,
+      responseBytes: reading.response_bytes!,
     },
+    reading,
     diagnostic: null,
   };
 }

@@ -68,12 +68,14 @@ import {
   compileScraperService,
   publishScraperProposal,
   rejectScraperProposal,
+  repairScraperService,
   showScraperProposal,
   validateScraperProposal,
   verifyScraperProposal,
 } from './scraper-service.js';
 import { publishScraperCredential, publishScraperTask, showScraperTask } from './scraper-task.js';
 import { runScraperService } from './scraper-run.js';
+import { showScraperDiagnostics } from './scraper-diagnostics.js';
 import { deploymentStatus } from './status.js';
 import { readDeployment } from './state.js';
 import { createUser, deactivateUser, listUsers, transferOwnership } from './users.js';
@@ -819,6 +821,24 @@ async function main(): Promise<void> {
   }
   if (command === 'scraper' && subcommand === 'show') {
     emit(showScraperProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'repair') {
+    emit(await repairScraperService({
+      ...governed(options),
+      diagnosticsId: required(options, 'diagnostics'),
+      bindingId: required(options, 'binding'),
+      taskVersion: Number(required(options, 'task-version')),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'diagnostics') {
+    emit(showScraperDiagnostics({
+      ...governed(options),
+      ...(options.has('diagnostics') ? { diagnosticsId: required(options, 'diagnostics') } : {}),
+      ...(options.has('run') ? { runId: required(options, 'run') } : {}),
+      ...(options.has('proposal') ? { proposalId: required(options, 'proposal') } : {}),
+    }));
     return;
   }
   if (command === 'scraper' && subcommand === 'run') {
