@@ -214,12 +214,16 @@ test('release certification certifies both bundle channels, every shipped adapte
     .find((scenario) => scenario['name'] === 'critical_grounding')!;
   assert.equal((grounding['detail'] as Record<string, unknown>)['grounded_result_preserved'], true);
 
-  // Every shipped adapter holds three consecutive passing runs, and the adverse
-  // endpoints are refused rather than repaired.
+  // Every shipped adapter holds three consecutive passing runs, clears its
+  // Binding preflight, and every adverse endpoint is refused rather than repaired.
   const adapters = evidence['adapters'] as Array<Record<string, unknown>>;
   assert.deepEqual(
     adapters.map((adapter) => adapter['provider']),
     PROVIDER_PROFILES.map((profile) => profile.key),
+  );
+  assert.deepEqual(
+    adapters.map((adapter) => adapter['adapter']),
+    PROVIDER_PROFILES.map((profile) => profile.adapter),
   );
   for (const adapter of adapters) {
     const runs = adapter['runs'] as Array<Record<string, unknown>>;
@@ -228,23 +232,45 @@ test('release certification certifies both bundle channels, every shipped adapte
     assert.equal(runs.every((run) => run['passed'] === true), true, JSON.stringify(runs));
     assert.equal(adapter['consecutive_passes'], 3);
     assert.equal(adapter['passed'], true);
+    const checks = runs[0]!['checks'] as Array<Record<string, unknown>>;
+    for (const name of [
+      'preflight',
+      'pinned_identity',
+      'structured_output',
+      'constrained_tools',
+      'simplified_chinese_prompt',
+      'grounded_narration',
+      'simplified_chinese_narrative',
+      'simplified_chinese_clarification',
+    ]) {
+      assert.equal(checks.find((check) => check['name'] === name)?.['passed'], true, `${String(adapter['adapter'])}: ${name}`);
+    }
+    const binding = adapter['binding'] as Record<string, unknown>;
+    assert.equal(binding['passed'], true, `${String(adapter['adapter'])} binding: ${JSON.stringify(binding)}`);
+    assert.ok((binding['checks'] as unknown[]).length > 0);
   }
-  // One adverse family per shipped adapter, and each was refused rather than repaired.
+  // One adverse family per shipped adapter, each refused rather than repaired.
   const adverse = adapters.flatMap((adapter) => adapter['adverse'] as Array<Record<string, unknown>>);
-  assert.deepEqual(adverse.map((entry) => entry['behaviour']).sort(), ['malformed_structured_output', 'undeclared_tool']);
+  assert.equal(adverse.length, adapters.length);
+  assert.deepEqual(
+    adverse.map((entry) => entry['behaviour']).sort(),
+    ['identity_mismatch', 'identity_mismatch', 'malformed_structured_output', 'malformed_structured_output', 'undeclared_tool'],
+  );
   for (const entry of adverse) {
     assert.equal(entry['refused'], true);
     assert.ok((entry['failed_checks'] as unknown[]).length > 0);
   }
   const summary = evidence['adapter_summary'] as Record<string, unknown>;
-  assert.equal(summary['profiles_passed'], 4);
-  assert.equal(summary['profiles_total'], 4);
+  assert.deepEqual(summary['shipped_adapters'], ['hosted', 'generic_local', 'alibaba_qwen', 'deepseek', 'openai_compatible']);
+  assert.equal(summary['profiles_passed'], PROVIDER_PROFILES.length);
+  assert.equal(summary['profiles_total'], PROVIDER_PROFILES.length);
   assert.equal((summary['activation'] as Record<string, unknown>)['activated_version'], 1);
 
   // Real-model runs were not configured, so they are recorded as not_configured
   // and the certification fails closed instead of claiming them.
   const realModels = evidence['real_models'] as Array<Record<string, unknown>>;
   assert.deepEqual(realModels.map((model) => model['provider']), ['alibaba-qwen', 'deepseek', 'openai-compatible']);
+  assert.deepEqual(realModels.map((model) => model['adapter']), ['alibaba_qwen', 'deepseek', 'openai_compatible']);
   for (const model of realModels) {
     assert.equal(model['status'], 'not_configured');
     assert.equal(model['model_id'], null);
@@ -376,7 +402,7 @@ test('certification fails closed for a failed suite, adapter sequence, adverse a
   (adverseAdapter['adverse'] as Array<Record<string, unknown>>)[0]!['refused'] = false;
   const adverseAssessment = assessCertification(acceptedAdverse);
   assert.equal(adverseAssessment.certified, false);
-  assert.ok(adverseAssessment.blockers.includes('adapter.alibaba-qwen:accepted_undeclared_tool'));
+  assert.ok(adverseAssessment.blockers.includes('adapter.alibaba-qwen:accepted_identity_mismatch'));
 
   const leakedEgress = structuredClone(unblocked);
   (leakedEgress['disconnected'] as Record<string, unknown>)['egress_attempts'] = 1;
