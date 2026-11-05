@@ -105,6 +105,14 @@ function answer(body: Record<string, unknown>, behaviour: MockBehaviour): Record
   return envelope;
 }
 
+/** The Chinese name of a governed record field, so the mock names what it counts. */
+const GOVERNED_LABELS: Record<string, string> = {
+  value: '数值',
+  handled_count: '处理量',
+  settled_amount: '结算金额',
+  device_count: '设备数',
+};
+
 function profileHashOf(body: Record<string, unknown>): string {
   const pinned = body['model_profile'];
   return typeof pinned === 'object' && pinned !== null
@@ -339,7 +347,7 @@ function narration(body: Record<string, unknown>, behaviour: MockBehaviour): Rec
   }
   return {
     narrative: label === null
-      ? `根据证据，第一条受治理记录的数值为 ${String(value)}。`
+      ? `根据证据，第一条受治理记录的${GOVERNED_LABELS[key] ?? '数值'}为 ${String(value)}。`
       : `根据证据，${label}的数值为 ${String(value)}。`,
     evidence_refs: [{ field: key, value }],
   };
@@ -446,7 +454,7 @@ function clarification(body: Record<string, unknown>, behaviour: MockBehaviour):
   if (missing.includes('filter_value')) {
     return { question: '请确认筛选条件具体对应哪个取值？' };
   }
-  return { question: '请确认要统计的时间范围（起止日期）？' };
+  return { question: '请确认要统计的时间范围是哪一段？' };
 }
 
 function stringsOf(value: unknown): string[] {
