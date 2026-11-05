@@ -439,6 +439,8 @@ test('an administrator compiles, reviews, and adopts a Scraper Service in the br
       assert.equal(pin['adopted_version'], 1);
       assert.equal(pin['proposal_id'], proposal['proposal_id']);
       const pinsPanel = page.getByRole('region', { name: '数据源固定版本' });
+      // The pin list reloads after Adoption, so wait for the pinned Source first.
+      await pinsPanel.getByText('设备处理量报表').waitFor();
       assert.match(await pinsPanel.innerText(), /设备处理量报表[\s\S]*第 1 版/u);
 
       // Repeated Runs reuse exactly the adopted Version; each acquires again
