@@ -12,6 +12,7 @@ import {
   tickSchedules,
   workAcquisition,
 } from './acquisition-run.js';
+import { acquisitionTargets } from './acquisition-targets.js';
 import { listAuditEvents } from './audit-view.js';
 import { createAgentIdentity, registerOAuthClient, revokeAgentIdentity, revokeOAuthClient } from './agents.js';
 import { login, logout } from './auth.js';
@@ -379,6 +380,10 @@ async function main(): Promise<void> {
   }
   if (command === 'acquisition' && subcommand === 'checkpoint') {
     emit(acquisitionCheckpoint({ ...governed(options), sourceId: required(options, 'source') }));
+    return;
+  }
+  if (command === 'acquisition' && subcommand === 'targets') {
+    emit(acquisitionTargets({ ...governed(options), sourceId: required(options, 'source') }));
     return;
   }
   if (command === 'acquisition' && subcommand === 'checkpoint-reset') {
