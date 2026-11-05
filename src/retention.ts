@@ -30,10 +30,12 @@ import {
   type RetentionBounds,
   type RetentionDataClass,
   type RetentionHoldRecord,
+  type RetentionPolicyArtifact,
   type RetentionPolicyVersion,
   type RetentionScope,
   type RetentionScopeKind,
   type RetentionTerm,
+  type WorkspaceRetentionOverrideArtifact,
   type WorkspaceRetentionOverrideVersion,
 } from './catalog.js';
 import { canonicalDigest } from './crypto.js';
@@ -249,19 +251,36 @@ function validBounds(raw: unknown): RetentionBounds | null {
   return { min_days: min, max_days: max };
 }
 
+/**
+ * The policy document a caller stated in memory, which is the same document the
+ * CLI reads from a file. The governed module validates it identically.
+ */
+function statedConfig(
+  options: { configPath?: string; config?: unknown },
+  fail: Fail,
+  label: string,
+): unknown {
+  if (options.config !== undefined) return options.config;
+  if (options.configPath === undefined) {
+    fail('RETENTION_CONFIG_UNREADABLE', `The ${label} must be stated as a JSON object.`);
+  }
+  return readJsonDocument(options.configPath, fail, 'RETENTION_CONFIG_UNREADABLE', `The ${label} file must contain valid JSON.`);
+}
+
 /** Publishes one immutable Deployment retention policy Version. */
 export function publishRetentionPolicy(options: {
   root: string;
   masterKey: string;
   token: string;
-  configPath: string;
+  configPath?: string;
+  config?: unknown;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'retention_policy_publish', scope: 'deployment' };
   const actor = resolveActor(session, options.token, context);
   requireDeploymentAdministrator(session, actor, context);
   const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), context, code, message, nextStep);
-  const config = readJsonDocument(options.configPath, fail, 'RETENTION_CONFIG_UNREADABLE', 'The retention policy file must contain valid JSON.');
+  const config = statedConfig(options, fail, 'retention policy');
   if (!isRecord(config)) fail('RETENTION_POLICY_INVALID', 'A retention policy must be a JSON object.');
   const current = latestPolicy(session.state);
   const defaults: Record<RetentionDataClass, RetentionTerm> = deepCopy(current?.defaults ?? SETTLED_RETENTION_DEFAULTS);
@@ -345,7 +364,8 @@ export function publishRetentionOverride(options: {
   masterKey: string;
   token: string;
   workspaceId: string;
-  configPath: string;
+  configPath?: string;
+  config?: unknown;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = {
@@ -356,7 +376,7 @@ export function publishRetentionOverride(options: {
   const actor = resolveActor(session, options.token, context);
   requireWorkspaceAdministrator(session, actor, context, options.workspaceId);
   const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), context, code, message, nextStep);
-  const config = readJsonDocument(options.configPath, fail, 'RETENTION_CONFIG_UNREADABLE', 'The retention override file must contain valid JSON.');
+  const config = statedConfig(options, fail, 'retention override');
   if (!isRecord(config)) fail('RETENTION_POLICY_INVALID', 'A retention override must be a JSON object.');
   const policy = latestPolicy(session.state);
   const bounds = policy?.bounds ?? SETTLED_RETENTION_BOUNDS;
@@ -424,6 +444,37 @@ export function publishRetentionOverride(options: {
   };
 }
 
+/** The version lineage an administrator reads beside the effective clocks. */
+function policyHistory(policy: RetentionPolicyArtifact | undefined): Array<Record<string, unknown>> {
+  return (policy?.versions ?? []).map((version) => ({
+    version: version.version,
+    published_at: version.published_at,
+    published_by: version.published_by,
+    content_hash: version.content_hash,
+  }));
+}
+
+function overrideHistory(artifact: WorkspaceRetentionOverrideArtifact | undefined): Array<Record<string, unknown>> {
+  return (artifact?.versions ?? []).map((version) => ({
+    version: version.version,
+    policy_version: version.policy_version,
+    terms: deepCopy(version.terms),
+    updated_at: version.updated_at,
+    updated_by: version.updated_by,
+  }));
+}
+
+function retentionPolicyArtifact(state: PlatformState): RetentionPolicyArtifact | undefined {
+  return state.retention_policies.find((candidate) => candidate.artifact_id === 'retention-policy');
+}
+
+function retentionOverrideArtifact(
+  state: PlatformState,
+  workspaceId: string,
+): WorkspaceRetentionOverrideArtifact | undefined {
+  return state.retention_overrides.find((candidate) => candidate.workspace_id === workspaceId);
+}
+
 /** Shows the Deployment policy, or one Workspace's effective terms. */
 export function showRetentionPolicy(options: {
   root: string;
@@ -457,6 +508,8 @@ export function showRetentionPolicy(options: {
         effective: deepCopy(effective.terms),
         overrides: deepCopy(effective.overrides),
         clamped: [...effective.clamped],
+        policy_history: [],
+        override_history: overrideHistory(retentionOverrideArtifact(session.state, options.workspaceId)),
         summary: '当前生效的是内置保留默认值，适用于既有数据和未来数据。',
       };
     }
@@ -467,6 +520,7 @@ export function showRetentionPolicy(options: {
       defaults: deepCopy(SETTLED_RETENTION_DEFAULTS),
       bounds: deepCopy(SETTLED_RETENTION_BOUNDS),
       content_hash: null,
+      history: [],
       summary: '当前生效的是内置保留默认值，适用于既有数据和未来数据。',
     };
   }
@@ -487,12 +541,15 @@ export function showRetentionPolicy(options: {
       effective: deepCopy(effective.terms),
       overrides: deepCopy(effective.overrides),
       clamped: [...effective.clamped],
+      policy_history: policyHistory(retentionPolicyArtifact(session.state)),
+      override_history: overrideHistory(retentionOverrideArtifact(session.state, options.workspaceId)),
       summary: `当前生效的保留策略为第 ${stored.version} 版，并叠加工作区覆盖。`,
     };
   }
   return {
     ...policyView(stored),
     source: 'published',
+    history: policyHistory(retentionPolicyArtifact(session.state)),
     summary: `当前生效的保留策略为第 ${stored.version} 版，适用于既有数据和未来数据。`,
   };
 }
@@ -1211,8 +1268,52 @@ function planSummary(plan: PurgePlanEntry[]): { eligible: number; held: number; 
   return { eligible, held, blocked: plan.length - eligible };
 }
 
+/**
+ * Evaluates one explicit Purge scope without acting, so the exact target, the
+ * records it reaches, their dependencies, and their consequences are visible
+ * before an administrator confirms anything.
+ */
+export function previewPurge(options: RetentionOptions & { scopeKind: string }): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'retention_purge_preview', scope: 'deployment' };
+  const actor = resolveActor(session, options.token, context);
+  const kind = optionScopeKind(options.scopeKind);
+  if (kind === 'deployment') {
+    reject(session, actorLabel(actor.user), context, 'RETENTION_SCOPE_INVALID', 'A manual Purge supports workspace, source, dataset, release, proposal-evidence, and export scopes.');
+  }
+  const scope = resolveScope(session, actor, context, options, kind);
+  const scoped: ActionContext = scope.workspace_id === null
+    ? context
+    : { ...context, scope: 'workspace', workspace_id: scope.workspace_id };
+  const now = nowOf(options);
+  const plan = evaluateScope(session.state, scope, now);
+  const counts = planSummary(plan);
+  session.audit({
+    ...scoped,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: { scope_kind: scope.kind, eligible_count: counts.eligible, held_count: counts.held, blocked_count: counts.blocked },
+  });
+  return {
+    mode: 'preview',
+    at: now.toISOString(),
+    scope: scopeView(scope),
+    plan: plan.map((entry) => ({ ...entry, held_by: [...entry.held_by], dependencies: [...entry.dependencies] })),
+    eligible_count: counts.eligible,
+    blocked_count: counts.blocked,
+    held_count: counts.held,
+    summary: counts.eligible === 0
+      ? '本次清除预演没有符合条件的内容：当前、保留中、受暂停或仍被依赖的记录一律保留。'
+      : `本次清除预演将立即撤销访问并异步删除 ${counts.eligible} 条记录，其余 ${counts.blocked} 条因当前、保留中、受暂停或依赖而保留。`,
+  };
+}
+
 /** Requests one manual Purge: access is revoked now, deletion is asynchronous. */
-export function requestPurge(options: RetentionOptions & { scopeKind: string }): Record<string, unknown> {
+export function requestPurge(options: RetentionOptions & {
+  scopeKind: string;
+  /** The instant a separate step-up authentication verified this actor. */
+  stepUpVerifiedAt?: string;
+}): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'retention_purge_request', scope: 'deployment' };
   const actor = resolveActor(session, options.token, context);
@@ -1281,6 +1382,7 @@ export function requestPurge(options: RetentionOptions & { scopeKind: string }):
       blocked_count: counts.blocked,
       held_count: counts.held,
       access_revoked_at: job.access_revoked_at,
+      ...(options.stepUpVerifiedAt === undefined ? {} : { step_up_verified_at: options.stepUpVerifiedAt }),
     },
   });
   session.save();
@@ -1609,7 +1711,12 @@ export function listPurgeJobs(options: RetentionOptions): Record<string, unknown
     })
     .map((job) => jobView(job));
   session.audit({ ...context, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { jobs_returned: jobs.length } });
-  return { jobs, ledger: deepCopy(session.state.purge_ledger), summary: '已列出当前管理员范围内的清除任务与清除台账。' };
+  return {
+    jobs,
+    ledger: deepCopy(session.state.purge_ledger),
+    health: retentionHealth(session.state),
+    summary: '已列出当前管理员范围内的清除任务与清除台账。',
+  };
 }
 
 /**

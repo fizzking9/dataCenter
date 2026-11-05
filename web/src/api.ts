@@ -1847,6 +1847,255 @@ export interface ProductProposalPublicationResult {
   contract_hash: string;
 }
 
+/** One settled retention clock as the server states it. */
+export type RetentionTermView =
+  | { kind: 'days'; days: number }
+  | { kind: 'indefinite' }
+  | { kind: 'no_guarantee' };
+
+export type RetentionClassKey =
+  | 'raw_acquisition'
+  | 'dataset_release_history'
+  | 'report'
+  | 'artifact_version'
+  | 'provenance'
+  | 'audit_event'
+  | 'proposal_evidence'
+  | 'export'
+  | 'derived_data';
+
+export type OverridableRetentionClassKey = 'raw_acquisition' | 'dataset_release_history' | 'report';
+
+export interface RetentionBoundsView {
+  min_days: number;
+  max_days: number;
+}
+
+export interface RetentionPolicyVersionView {
+  version: number;
+  published_at: string;
+  published_by: string;
+  content_hash: string;
+}
+
+/** The Deployment policy: settled defaults or one published Version. */
+export interface DeploymentRetentionView {
+  policy_version: number;
+  source: 'settled' | 'published';
+  defaults: Record<RetentionClassKey, RetentionTermView>;
+  bounds: Record<OverridableRetentionClassKey, RetentionBoundsView>;
+  content_hash: string | null;
+  history: RetentionPolicyVersionView[];
+  summary: string;
+}
+
+export interface WorkspaceRetentionOverrideVersionView {
+  version: number;
+  policy_version: number;
+  terms: Partial<Record<OverridableRetentionClassKey, RetentionTermView>>;
+  updated_at: string;
+  updated_by: string;
+}
+
+/** One Workspace's effective clocks, its override, and both version lineages. */
+export interface WorkspaceRetentionView {
+  workspace_id: string;
+  policy_version: number;
+  override_version: number | null;
+  effective: Record<RetentionClassKey, RetentionTermView>;
+  overrides: Partial<Record<OverridableRetentionClassKey, RetentionTermView>>;
+  clamped: OverridableRetentionClassKey[];
+  policy_history: RetentionPolicyVersionView[];
+  override_history: WorkspaceRetentionOverrideVersionView[];
+  summary: string;
+}
+
+export interface RetentionScopeView {
+  kind: 'deployment' | 'workspace' | 'source' | 'dataset' | 'release' | 'proposal_evidence' | 'export';
+  workspace_id: string | null;
+  source_id: string | null;
+  dataset_id: string | null;
+  dataset_release: number | null;
+  target_id: string | null;
+}
+
+export interface RetentionHoldView {
+  hold_id: string;
+  scope: RetentionScopeView;
+  reason: string;
+  review_at: string;
+  created_at: string;
+  created_by: string;
+  released_at: string | null;
+  released_by: string | null;
+  active: boolean;
+  pins_restorable_backups: boolean;
+}
+
+export interface RetentionHoldList {
+  holds: RetentionHoldView[];
+  summary: string;
+}
+
+export type PurgeRecordKindView =
+  | 'raw_acquisition'
+  | 'dataset_release'
+  | 'data_product_release'
+  | 'report'
+  | 'proposal_evidence'
+  | 'export';
+
+export type PurgeReasonView =
+  | 'eligible'
+  | 'within_retention'
+  | 'current'
+  | 'held'
+  | 'dependent'
+  | 'indefinite'
+  | 'no_guarantee';
+
+export interface PurgePlanEntryView {
+  data_class: RetentionClassKey;
+  record_kind: PurgeRecordKindView;
+  record_id: string;
+  workspace_id: string;
+  eligible: boolean;
+  reason: PurgeReasonView;
+  held_by: string[];
+  dependencies: string[];
+  purged?: boolean;
+  deferred?: boolean;
+}
+
+export interface PurgeJobView {
+  purge_id: string;
+  mode: 'manual' | 'automatic';
+  status: 'pending' | 'failed' | 'completed' | 'nothing_eligible';
+  scope: RetentionScopeView;
+  requested_at: string;
+  requested_by: string;
+  access_revoked_at: string | null;
+  attempts: number;
+  retry_at: string | null;
+  last_error: string | null;
+  completed_at: string | null;
+  ledger_sequence: number | null;
+  purged_count: number;
+  deferred_count: number;
+  plan: PurgePlanEntryView[];
+  summary?: string;
+}
+
+export interface PurgeLedgerEntryView {
+  sequence: number;
+  purge_id: string;
+  mode: 'manual' | 'automatic';
+  recorded_at: string;
+  scope: RetentionScopeView;
+  purged: Array<{ record_kind: PurgeRecordKindView; record_id: string; data_class: RetentionClassKey }>;
+}
+
+export interface RetentionHealthView {
+  health: 'healthy' | 'degraded';
+  failed_purges: number;
+  pending_purges: number;
+}
+
+export interface PurgeJobList {
+  jobs: PurgeJobView[];
+  ledger: PurgeLedgerEntryView[];
+  health: RetentionHealthView;
+  summary: string;
+}
+
+/** A read-only Purge plan: what the named scope would reach and why. */
+export interface PurgePreviewView {
+  mode: 'preview';
+  at: string;
+  scope: RetentionScopeView;
+  plan: PurgePlanEntryView[];
+  eligible_count: number;
+  blocked_count: number;
+  held_count: number;
+  summary: string;
+}
+
+/** The Purge request answer; `purge_id` stays null when nothing is eligible. */
+export interface PurgeOutcomeView {
+  purge_id: string | null;
+  mode: 'manual';
+  status: 'pending' | 'failed' | 'completed' | 'nothing_eligible';
+  access_revoked_at: string | null;
+  scope: RetentionScopeView;
+  plan: PurgePlanEntryView[];
+  eligible_count: number;
+  blocked_count: number;
+  held_count: number;
+  summary: string;
+}
+
+export interface RetentionEvaluationView {
+  workspace_id: string;
+  at: string;
+  policy_version: number;
+  override_version: number | null;
+  terms: Record<RetentionClassKey, RetentionTermView>;
+  plan: PurgePlanEntryView[];
+  eligible_count: number;
+  blocked_count: number;
+  held_count: number;
+  summary: string;
+}
+
+export interface RetentionTickView {
+  at: string;
+  created_jobs: string[];
+  jobs: PurgeJobView[];
+  ledger: PurgeLedgerEntryView[];
+  health: 'healthy' | 'degraded';
+  failed_purges: number;
+  pending_purges: number;
+  summary: string;
+}
+
+export interface RetentionPolicyPublicationView {
+  policy_version: number;
+  published_at: string;
+  published_by: string;
+  defaults: Record<RetentionClassKey, RetentionTermView>;
+  bounds: Record<OverridableRetentionClassKey, RetentionBoundsView>;
+  content_hash: string;
+  summary: string;
+}
+
+export interface RetentionOverridePublicationView {
+  workspace_id: string;
+  override_version: number;
+  policy_version: number;
+  terms: Partial<Record<OverridableRetentionClassKey, RetentionTermView>>;
+  effective: Record<RetentionClassKey, RetentionTermView>;
+  clamped: OverridableRetentionClassKey[];
+  summary: string;
+}
+
+/** The explicit scope one retention request names, exactly as it was stated. */
+export interface RetentionScopeInput {
+  workspaceId: string;
+  scopeKind: RetentionScopeView['kind'];
+  sourceId?: string;
+  datasetId?: string;
+  datasetRelease?: number;
+  proposalId?: string;
+  exportId?: string;
+}
+
+/** The one step-up proof a Purge demands beside the standing session. */
+export interface StepUpCredentials {
+  password: string;
+  totp?: string;
+  recovery_code?: string;
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<ApiResult<T>> {
   let response: Response;
   try {
@@ -1910,6 +2159,19 @@ async function requestUpload<T>(path: string, file: Blob): Promise<ApiResult<T>>
 
 function workspaceQuery(workspaceId: string): string {
   return `?workspace_id=${encodeURIComponent(workspaceId)}`;
+}
+
+/** The explicit identifiers one retention scope names, and nothing it does not. */
+function retentionScopeBody(scope: RetentionScopeInput): Record<string, unknown> {
+  return {
+    workspace_id: scope.workspaceId,
+    scope_kind: scope.scopeKind,
+    ...(scope.sourceId === undefined ? {} : { source_id: scope.sourceId }),
+    ...(scope.datasetId === undefined ? {} : { dataset_id: scope.datasetId }),
+    ...(scope.datasetRelease === undefined ? {} : { dataset_release: scope.datasetRelease }),
+    ...(scope.proposalId === undefined ? {} : { proposal_id: scope.proposalId }),
+    ...(scope.exportId === undefined ? {} : { export_id: scope.exportId }),
+  };
 }
 
 /**
@@ -2358,6 +2620,70 @@ export const platformApi = {
       `/api/workspace/product-proposals/${encodeURIComponent(proposalId)}/publish`,
       { method: 'POST' },
     ),
+  deploymentRetention: () => request<DeploymentRetentionView>('/api/deployment/retention'),
+  publishRetentionPolicy: (
+    defaults: Partial<Record<RetentionClassKey, RetentionTermView>>,
+    bounds: Partial<Record<OverridableRetentionClassKey, RetentionBoundsView>>,
+  ) =>
+    request<RetentionPolicyPublicationView>('/api/deployment/retention', {
+      method: 'POST',
+      body: JSON.stringify({ defaults, bounds }),
+    }),
+  deploymentRetentionHolds: () =>
+    request<RetentionHoldList>('/api/deployment/retention/holds'),
+  createDeploymentRetentionHold: (reason: string, reviewAt: string) =>
+    request<RetentionHoldView>('/api/deployment/retention/holds', {
+      method: 'POST',
+      body: JSON.stringify({ reason, review_at: reviewAt }),
+    }),
+  deploymentPurges: () => request<PurgeJobList>('/api/deployment/retention/purges'),
+  tickRetention: (at?: string) =>
+    request<RetentionTickView>('/api/deployment/retention/tick', {
+      method: 'POST',
+      body: JSON.stringify(at === undefined ? {} : { at }),
+    }),
+  workspaceRetention: (workspaceId: string) =>
+    request<WorkspaceRetentionView>(`/api/workspace/retention${workspaceQuery(workspaceId)}`),
+  publishRetentionOverride: (
+    workspaceId: string,
+    terms: Partial<Record<OverridableRetentionClassKey, RetentionTermView>>,
+  ) =>
+    request<RetentionOverridePublicationView>('/api/workspace/retention/override', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, terms }),
+    }),
+  evaluateRetention: (workspaceId: string) =>
+    request<RetentionEvaluationView>(`/api/workspace/retention/evaluate${workspaceQuery(workspaceId)}`),
+  workspaceRetentionHolds: (workspaceId: string) =>
+    request<RetentionHoldList>(`/api/workspace/retention/holds${workspaceQuery(workspaceId)}`),
+  createRetentionHold: (scope: RetentionScopeInput, reason: string, reviewAt: string) =>
+    request<RetentionHoldView>('/api/workspace/retention/holds', {
+      method: 'POST',
+      body: JSON.stringify({ ...retentionScopeBody(scope), reason, review_at: reviewAt }),
+    }),
+  releaseRetentionHold: (holdId: string) =>
+    request<RetentionHoldView>(`/api/retention/holds/${encodeURIComponent(holdId)}/release`, {
+      method: 'POST',
+    }),
+  workspacePurges: (workspaceId: string) =>
+    request<PurgeJobList>(`/api/workspace/retention/purges${workspaceQuery(workspaceId)}`),
+  previewPurge: (scope: RetentionScopeInput) =>
+    request<PurgePreviewView>('/api/workspace/retention/purge/preview', {
+      method: 'POST',
+      body: JSON.stringify(retentionScopeBody(scope)),
+    }),
+  requestPurge: (scope: RetentionScopeInput, stepUp: StepUpCredentials) =>
+    request<PurgeOutcomeView>('/api/workspace/retention/purge', {
+      method: 'POST',
+      body: JSON.stringify({
+        ...retentionScopeBody(scope),
+        password: stepUp.password,
+        ...(stepUp.totp === undefined || stepUp.totp === '' ? {} : { totp: stepUp.totp }),
+        ...(stepUp.recovery_code === undefined || stepUp.recovery_code === ''
+          ? {}
+          : { recovery_code: stepUp.recovery_code }),
+      }),
+    }),
 };
 
 /**

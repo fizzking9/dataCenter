@@ -163,3 +163,79 @@ export function logout(options: {
   session.save();
   return { revoked: true, user_id: actor.user.user_id };
 }
+
+export interface StepUpOptions {
+  root: string;
+  masterKey: string;
+  token: string;
+  password: string;
+  totp?: string;
+  recoveryCode?: string;
+  /** The consequential operation this challenge unlocks, recorded when it is verified. */
+  purpose: string;
+  workspaceId?: string;
+  target?: string;
+}
+
+/**
+ * A fresh authentication challenge beside an existing session, required before
+ * an irreversible operation. The session itself stays valid, but the
+ * consequential action only proceeds when the actor re-proves the current
+ * password and a current MFA factor; a failure is audited and changes nothing.
+ */
+export async function verifyStepUpAuthentication(options: StepUpOptions): Promise<{
+  verified_at: string;
+  method: 'totp' | 'recovery_code';
+  username: string;
+}> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'step_up_authentication',
+    scope: options.workspaceId === undefined ? 'deployment' : 'workspace',
+    ...(options.workspaceId === undefined ? {} : { workspace_id: options.workspaceId }),
+    target: options.target ?? options.purpose,
+  };
+  const actor = resolveActor(session, options.token, context);
+  if (!(await verifyPassword(options.password, actor.user.password_hash))) {
+    registerFailure(session, actor.user);
+    session.audit({
+      ...context,
+      actor: actorLabel(actor.user),
+      outcome: 'failed',
+      detail: { reason: 'password', purpose: options.purpose },
+    });
+    session.save();
+    throw new OperatorError(
+      'STEP_UP_AUTHENTICATION_FAILED',
+      'Step-up authentication failed.',
+      'Re-enter the current password and a current dynamic code before the consequential action.',
+    );
+  }
+  if (!satisfiesMfa(session, actor.user, options.totp, options.recoveryCode)) {
+    registerFailure(session, actor.user);
+    session.audit({
+      ...context,
+      actor: actorLabel(actor.user),
+      outcome: 'failed',
+      detail: { reason: 'mfa', purpose: options.purpose },
+    });
+    session.save();
+    throw new OperatorError(
+      'STEP_UP_AUTHENTICATION_FAILED',
+      'Step-up authentication failed.',
+      'Re-enter the current password and a current dynamic code before the consequential action.',
+    );
+  }
+  actor.user.failure_count = 0;
+  actor.user.locked_until = null;
+  const method: 'totp' | 'recovery_code' = options.totp !== undefined ? 'totp' : 'recovery_code';
+  const verifiedAt = new Date().toISOString();
+  session.audit({
+    ...context,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: { method, purpose: options.purpose, verified_at: verifiedAt },
+  });
+  session.save();
+  return { verified_at: verifiedAt, method, username: actor.user.username };
+}

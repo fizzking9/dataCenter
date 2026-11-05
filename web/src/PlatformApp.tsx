@@ -14,12 +14,13 @@ import { WorkspaceProposals } from './screens/PlatformProposalScreen.js';
 import { WorkspaceAgents } from './screens/PlatformAgentScreen.js';
 import { WorkspaceScrapers } from './screens/PlatformScraperScreen.js';
 import { WorkspaceSources } from './screens/PlatformSourceScreen.js';
+import { DeploymentRetention, WorkspaceRetention } from './screens/PlatformRetentionScreen.js';
 import { Alert, Panel } from './ui/Panel.js';
 import { Shell } from './ui/Shell.js';
 
 const VIEWS = [
   'overview', 'sources', 'scrapers', 'products', 'productProposals', 'context', 'members', 'audit',
-  'models', 'proposals', 'agents', 'modelProfiles', 'users',
+  'models', 'proposals', 'agents', 'modelProfiles', 'users', 'retention',
 ] as const;
 type View = (typeof VIEWS)[number];
 
@@ -34,11 +35,13 @@ const HOME: Route = { workspaceId: null, view: 'overview', deployment: false };
 const DEPLOYMENT: Route = { workspaceId: null, view: 'overview', deployment: true };
 const DEPLOYMENT_PROFILES: Route = { workspaceId: null, view: 'modelProfiles', deployment: true };
 const DEPLOYMENT_USERS: Route = { workspaceId: null, view: 'users', deployment: true };
+const DEPLOYMENT_RETENTION: Route = { workspaceId: null, view: 'retention', deployment: true };
 
 /** The navigation key each deployment destination is authorized by. */
 const DEPLOYMENT_KEYS: Partial<Record<View, string>> = {
   modelProfiles: 'deployment.modelProfiles',
   users: 'deployment.users',
+  retention: 'deployment.retention',
 };
 
 function viewOf(value: string | undefined): View {
@@ -53,6 +56,7 @@ function viewOf(value: string | undefined): View {
     case 'proposals':
     case 'agents':
     case 'users':
+    case 'retention':
       return value;
     case 'product-proposals':
       return 'productProposals';
@@ -78,6 +82,7 @@ function parseRoute(pathname: string): Route {
   if (normalized === '/app/deployment') return DEPLOYMENT;
   if (normalized === '/app/deployment/model-profiles') return DEPLOYMENT_PROFILES;
   if (normalized === '/app/deployment/users') return DEPLOYMENT_USERS;
+  if (normalized === '/app/deployment/retention') return DEPLOYMENT_RETENTION;
   const match = /^\/app\/w\/([^/]+)\/([^/]+)$/u.exec(normalized);
   if (match === null) return HOME;
   const id = match[1];
@@ -280,6 +285,8 @@ export function PlatformApp() {
       <DeploymentModelProfiles onSessionLost={sessionLost} />
     ) : route.view === 'users' ? (
       <DeploymentUsers onSessionLost={sessionLost} />
+    ) : route.view === 'retention' ? (
+      <DeploymentRetention onSessionLost={sessionLost} />
     ) : (
       <PlatformDeploymentScreen onSessionLost={sessionLost} />
     );
@@ -337,6 +344,8 @@ export function PlatformApp() {
     <WorkspaceModelBindings workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'proposals' ? (
     <WorkspaceProposals workspaceId={activeId} onSessionLost={sessionLost} />
+  ) : route.view === 'retention' ? (
+    <WorkspaceRetention workspaceId={activeId} onSessionLost={sessionLost} />
   ) : (
     <WorkspaceOverview
       workspaceName={activeName}
