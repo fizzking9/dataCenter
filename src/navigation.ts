@@ -18,6 +18,7 @@ export type NavigationKey =
   | 'deployment.users'
   | 'deployment.modelProfiles'
   | 'workspace.overview'
+  | 'workspace.sources'
   | 'workspace.products'
   | 'workspace.context'
   | 'workspace.members'
@@ -32,6 +33,7 @@ export type NavigationKey =
 const WORKSPACE_NAVIGATION: Record<WorkspaceRole, NavigationKey[]> = {
   'Workspace Administrator': [
     'workspace.overview',
+    'workspace.sources',
     'workspace.products',
     'workspace.context',
     'workspace.members',
