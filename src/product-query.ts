@@ -22,6 +22,7 @@ import { evaluateAggregate, orderGroups, type EvaluatedGroup, type MetricValue }
 import { queryCacheKey, readCachedPage, writeCachedPage } from './product-cache.js';
 import { decodeCursor, encodeCursor } from './product-cursor.js';
 import { periodComplete, sameElapsedInterval } from './product-period.js';
+import { PAGE_BYTE_CEILING } from './product-contract.js';
 import {
   readQuery,
   readQueryTarget,
@@ -433,7 +434,9 @@ function normalizeQuery(
   scopeFingerprint: string,
 ): Record<string, unknown> {
   if (query.kind === 'search') {
-    return { release, major, scope: scopeFingerprint, kind: 'search', terms: [...query.terms] };
+    return {
+      release, major, scope: scopeFingerprint, kind: 'search', terms: [...query.terms], include_totals: query.includeTotals,
+    };
   }
   if (query.kind === 'suggest') {
     return { release, major, scope: scopeFingerprint, kind: 'suggest', q: query.q };
@@ -447,6 +450,7 @@ function normalizeQuery(
       filters: query.filters,
       window: query.window ?? null,
       include: query.include.map((spec) => ({ relationship: spec.relationship.name, filters: spec.filters })),
+      include_totals: query.includeTotals,
     };
   }
   return {
@@ -816,6 +820,15 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
 
   /** Records the answer for reuse under exactly this context, then returns it. */
   const remember = (response: Record<string, unknown>): Record<string, unknown> => {
+    // Spec section 15: one page carries at most 5 MiB, whatever the item limit.
+    const bytes = Buffer.byteLength(JSON.stringify(response), 'utf8');
+    if (bytes > PAGE_BYTE_CEILING) {
+      fail(
+        'DATA_PRODUCT_QUERY_RESULT_TOO_LARGE',
+        `This page carries ${bytes} bytes, beyond the ${PAGE_BYTE_CEILING}-byte page ceiling.`,
+        'Request fewer items or a narrower projection.',
+      );
+    }
     if (persistCache) writeCachedPage(session.root, session.dataKey, cacheKey, response);
     return { ...response, cache: { reused: false } };
   };
@@ -855,7 +868,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
       ranking: { ...query.search.ranking },
       columns: [...baseColumns],
       records,
-      matched_count: hits.length,
+      ...(query.includeTotals ? { matched_count: hits.length } : {}),
       returned: records.length,
       truncated: more,
       next_cursor: more
@@ -942,7 +955,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
         ? {}
         : { linked: included.map(({ spec }) => spec.relationship.name) }),
       records: projected,
-      matched_count: selected.length,
+      ...(query.includeTotals ? { matched_count: selected.length } : {}),
       returned: projected.length,
       truncated: more,
       next_cursor: more
@@ -1032,7 +1045,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
           }),
       }
       : null,
-    groups_total: merged.length,
+    ...(query.includeTotals ? { groups_total: merged.length } : {}),
     returned: returned.length,
     truncated: more,
     next_cursor: more

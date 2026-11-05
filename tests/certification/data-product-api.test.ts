@@ -122,11 +122,11 @@ function query(
   fixture: PlatformFixture,
   token: string,
   productId: string,
-  request: unknown,
+  request: Record<string, unknown>,
 ): QueryResponse {
   const result = command(
     fixture,
-    ['product', 'query', '--product', productId, '--request', jsonFile(fixture, 'query', request)],
+    ['product', 'query', '--product', productId, '--request', jsonFile(fixture, 'query', { include_totals: true, ...request })],
     { token },
   );
   assert.equal(result.status, 0, result.stderr);
@@ -294,4 +294,63 @@ test('a published name cannot be moved to another Source and filter values keep 
   );
   assert.equal(mistyped.status, 2);
   assert.equal(mistyped.error.code, 'DATA_PRODUCT_QUERY_REFUSED');
+});
+
+test('exact totals are opt-in and the Contract envelope follows spec section 15', () => {
+  const { fixture, workspaceId, workspaceAdministratorToken, consumerToken }: WorkspaceFixture = workspaceFixture();
+  const sourceId = publishSomething(fixture, workspaceAdministratorToken, workspaceId);
+  acquireAndRelease(fixture, workspaceAdministratorToken, sourceId, DEVICE_LEDGER);
+  const product = publishProduct(fixture, workspaceAdministratorToken, sourceId);
+  const metricProduct = publishProduct(fixture, workspaceAdministratorToken, sourceId, {
+    ...CONTRACT,
+    title: '设备维修台账计数',
+    dimensions: ['city'],
+    metrics: [{ name: 'device_count', aggregation: 'count', value_type: 'integer' }],
+  });
+
+  const raw = (request: Record<string, unknown>, slug: string, target = product.data_product_id): Record<string, unknown> => {
+    const result = command(
+      fixture,
+      ['product', 'query', '--product', target, '--request', jsonFile(fixture, slug, request)],
+      { token: consumerToken },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return result.output;
+  };
+
+  const recordsDefault = raw({ kind: 'records' }, 'records-default');
+  assert.equal('matched_count' in recordsDefault, false, 'a record page states no exact population by default');
+  const recordsOpted = raw({ kind: 'records', include_totals: true }, 'records-opted');
+  assert.equal(recordsOpted['matched_count'], 2);
+  const aggregateDefault = raw(
+    { kind: 'aggregate', group_by: ['city'], metrics: ['device_count'] },
+    'aggregate-default',
+    metricProduct.data_product_id,
+  );
+  assert.equal('groups_total' in aggregateDefault, false, 'an aggregate page states no exact group count by default');
+  const aggregateOpted = raw(
+    { kind: 'aggregate', group_by: ['city'], metrics: ['device_count'], include_totals: true },
+    'aggregate-opted',
+    metricProduct.data_product_id,
+  );
+  assert.equal(aggregateOpted['groups_total'], 2);
+
+  const invalid = (contract: Record<string, unknown>, slug: string): string => {
+    const result = command(
+      fixture,
+      ['product', 'publish', '--source', sourceId, '--name', `契约-${slug}`, '--contract', jsonFile(fixture, `contract-${slug}`, contract)],
+      { token: workspaceAdministratorToken },
+    );
+    assert.equal(result.status, 2, result.stdout);
+    return String(result.error['code']);
+  };
+  assert.equal(invalid({ ...CONTRACT, limit: { default: 100, max: 501 } }, 'page-max'), 'DATA_PRODUCT_CONTRACT_INVALID');
+  assert.equal(
+    invalid({ ...CONTRACT, limits: { max_scanned_records: 100_000, max_groups: 5_001, max_execution_ms: 5_000 } }, 'groups-max'),
+    'DATA_PRODUCT_CONTRACT_INVALID',
+  );
+  assert.equal(
+    invalid({ ...CONTRACT, limits: { max_scanned_records: 100_000, max_groups: 5_000, max_execution_ms: 10_001 } }, 'exec-max'),
+    'DATA_PRODUCT_CONTRACT_INVALID',
+  );
 });

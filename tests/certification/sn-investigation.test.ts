@@ -62,10 +62,10 @@ interface QueryResponse {
   };
 }
 
-function query(workload: SnWorkload, token: string, productId: string, request: unknown): QueryResponse {
+function query(workload: SnWorkload, token: string, productId: string, request: Record<string, unknown>): QueryResponse {
   const result = command(
     workload.fixture,
-    ['product', 'query', '--product', productId, '--request', jsonFile(workload.fixture, 'sn-query', request)],
+    ['product', 'query', '--product', productId, '--request', jsonFile(workload.fixture, 'sn-query', { include_totals: true, ...request })],
     { token },
   );
   assert.equal(result.status, 0, result.stderr);

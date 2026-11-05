@@ -65,7 +65,7 @@ function query(
 ): Record<string, unknown> {
   const result = command(
     fixture,
-    ['product', 'query', '--product', productId, '--request', jsonFile(fixture, 'adversarial-query', request)],
+    ['product', 'query', '--product', productId, '--request', jsonFile(fixture, 'adversarial-query', { include_totals: true, ...request })],
     { token },
   );
   assert.equal(result.status, 0, result.stderr);
