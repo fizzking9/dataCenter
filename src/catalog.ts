@@ -779,10 +779,10 @@ export function activeAgentGrants(
 export type ModelAdapterKind = 'hosted' | 'generic_local';
 
 /** The generation purposes a Model Profile Version supports. */
-export type ModelPurpose = 'integration_proposal' | 'grounded_narration' | 'clarification';
+export type ModelPurpose = 'integration_proposal' | 'grounded_narration' | 'clarification' | 'query_plan';
 
 /** The data categories a Model Profile Version may receive for a purpose. */
-export type ModelDataCategory = 'dataset_schema' | 'cleaning_rules' | 'source_mapping' | 'sample_records';
+export type ModelDataCategory = 'dataset_schema' | 'cleaning_rules' | 'source_mapping' | 'sample_records' | 'product_contract';
 
 /** One prompt an exact Model Profile Version pins for one purpose. */
 export interface ModelPrompt {

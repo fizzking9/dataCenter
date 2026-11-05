@@ -23,6 +23,7 @@ import {
   isSimplifiedChinese,
   narrationFailure,
   promptPinsSimplifiedChinese,
+  queryPlanFailure,
 } from './model-generation.js';
 import { pinnedFor, readDataCategories, readPurposes } from './model-profile.js';
 import { openPlatform, type PlatformSession } from './session.js';
@@ -36,6 +37,7 @@ const PURPOSE_CATEGORIES: Record<ModelPurpose, ModelDataCategory[]> = {
   integration_proposal: ['dataset_schema', 'cleaning_rules', 'source_mapping'],
   grounded_narration: ['sample_records'],
   clarification: [],
+  query_plan: ['product_contract'],
 };
 
 function readVersion(
@@ -110,6 +112,23 @@ async function preflight(
         const answer = await generateForPurpose(pinned, purpose, EVALUATION_INPUTS[purpose], failure);
         if (!isSimplifiedChinese(String(answer.output['narrative'] ?? ''))) {
           throw new OperatorError('NARRATION_NOT_SIMPLIFIED_CHINESE', 'The narrative is not grounded Simplified Chinese.');
+        }
+        return 'zh-CN';
+      });
+    }
+    if (purpose === 'query_plan') {
+      await record('query_plan', async () => {
+        const answer = await generateForPurpose(pinned, purpose, EVALUATION_INPUTS[purpose], failure);
+        const mismatch = queryPlanFailure(answer.output);
+        if (mismatch !== null) {
+          throw new OperatorError(mismatch, 'The plan is not a request in the published query vocabulary.');
+        }
+        return answer.output['action'] === 'clarify' ? 'clarify' : 'query';
+      });
+      await record('simplified_chinese_plan', async () => {
+        const answer = await generateForPurpose(pinned, purpose, EVALUATION_INPUTS[purpose], failure);
+        if (!isSimplifiedChinese(String(answer.output['interpretation'] ?? ''))) {
+          throw new OperatorError('QUERY_PLAN_NOT_SIMPLIFIED_CHINESE', 'The plan is not explained in Simplified Chinese.');
         }
         return 'zh-CN';
       });

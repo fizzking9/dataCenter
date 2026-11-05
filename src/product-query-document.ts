@@ -29,7 +29,7 @@ const OPERATORS: QueryOperator[] = [
 const NULL_TESTS: QueryOperator[] = ['is_null', 'is_not_null'];
 
 /** Keys a query may never carry: the Contract supports no arbitrary computation. */
-const REFUSED_KEYS = [
+export const REFUSED_KEYS = [
   'sql', 'query', 'expression', 'formula', 'join', 'joins',
   'relationship', 'relationships', 'select', 'where', 'having',
 ];
