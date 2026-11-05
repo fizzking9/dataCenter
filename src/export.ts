@@ -484,7 +484,7 @@ export function listOwnExports(options: {
   workspaceId: string;
   dataProductId?: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'data_product_export_listing',
     scope: 'workspace',

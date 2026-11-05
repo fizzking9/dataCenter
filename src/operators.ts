@@ -526,7 +526,9 @@ export async function verifyOperatorStepUp(options: {
   if (resolved === undefined) {
     throw new OperatorError('OPERATOR_SESSION_INVALID', 'The Operator Console session is not valid.', undefined, 401);
   }
-  const session = openPlatform(options.root, options.masterKey);
+  // Operator authentication and step-up stay available under an expired
+  // license so recovery and other lifecycle commands remain reachable.
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const console = readOperatorConsole(options.root);
   const account = findOperatorById(console, resolved.operator.operator_id);
   assertCondition(account !== undefined, 'OPERATOR_NOT_FOUND', 'The Operator Console account does not exist.');
@@ -595,7 +597,9 @@ export function consumeOperatorStepUp(options: {
   if (resolved === undefined) {
     throw new OperatorError('OPERATOR_SESSION_INVALID', 'The Operator Console session is not valid.', undefined, 401);
   }
-  const session = openPlatform(options.root, options.masterKey);
+  // Spending a step-up grant stays available under an expired license for the
+  // same reason it is issued: the consequential lifecycle command still runs.
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const console = readOperatorConsole(options.root);
   const wanted = hashToken(options.grant.trim());
   const now = Date.now();
