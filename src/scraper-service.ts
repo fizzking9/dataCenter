@@ -19,7 +19,6 @@ import {
   type ScraperDiagnosticsRecord,
   type ScraperFixturePage,
   type ScraperManifestPage,
-  type ScraperNetworkScope,
   type ScraperProposalBase,
   type ScraperProposalCandidates,
   type ScraperProposalEvidence,
@@ -456,7 +455,8 @@ function repairChecks(
   return checks;
 }
 
-/** Provenance restated by every Approval, Publication, verification, and Adoption. */function provenanceOf(proposal: ScraperProposalRecord): ScraperProposalProvenance {
+/** Provenance restated by every Approval, Publication, verification, and Adoption. */
+function provenanceOf(proposal: ScraperProposalRecord): ScraperProposalProvenance {
   const validation = proposal.validations[proposal.validations.length - 1];
   const verification = proposal.verifications[proposal.verifications.length - 1];
   return {
@@ -700,20 +700,10 @@ function assertDiagnosticsIntact(
   }
 }
 
-function scopeWithin(inner: ScraperNetworkScope, outer: ScraperNetworkScope): boolean {
-  const originsCovered = inner.origins.every((origin) => outer.origins.includes(origin));
-  const pathsCovered = inner.paths.every((path) => pathAllows(outer.paths, staticPathPrefix(path)));
-  return originsCovered && pathsCovered;
-}
-
-function fixturePagesOf(taskVersion: ScraperTaskVersion): ScraperFixturePage[] {
-  return taskVersion.fixtures.pages;
-}
-
 /** The fixture pages a repair adds beside the retained base fixtures. */
 function regressionFixtureNames(taskVersion: ScraperTaskVersion, baseVersion: ScraperTaskVersion): string[] {
   const baseNames = new Set(baseVersion.fixtures.pages.map((page) => page.name));
-  return fixturePagesOf(taskVersion)
+  return taskVersion.fixtures.pages
     .filter((page) => !baseNames.has(page.name))
     .map((page) => page.name);
 }
@@ -981,7 +971,8 @@ export async function repairScraperService(options: {
  * Validates the candidate against the exact fixtures its Task Version pins. The
  * checks read declarations and frozen fixtures only: no target is contacted and
  * no production credential is opened.
- */export function validateScraperProposal(options: {
+ */
+export function validateScraperProposal(options: {
   root: string;
   masterKey: string;
   token: string;
