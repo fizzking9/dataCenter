@@ -545,7 +545,7 @@ export const catalog = {
   'scraper.task.list.target': '目标地址',
   'scraper.task.list.credentials': '凭据引用',
   'scraper.task.list.fixtureCount': '夹具页面数',
-  'scraper.task.list.none': '无',
+  'scraper.task.list.none': '暂无',
 
   'scraper.service.version': '第 {version} 版',
   'scraper.service.taskVersion': '来源任务版本',
@@ -595,7 +595,7 @@ export const catalog = {
   'scraper.proposal.evidence.stale': '基线已变化，请重新编译提案。',
   'scraper.proposal.createdBy': '创建人',
   'scraper.proposal.summary': '记录选择器 {selector}，共 {fields} 个字段',
-  'scraper.proposal.parameterSummary': '{name}：{type}（{requirement}）',
+  'scraper.proposal.parameterSummary': '参数 {name}：{type}（{requirement}）',
   'scraper.proposal.required': '必填',
   'scraper.proposal.optional': '可选',
   'scraper.proposal.constraintsSummary': '超时 {timeout} 毫秒，最大 {bytes} 字节，最多 {records} 条记录',
@@ -627,7 +627,6 @@ export const catalog = {
   'scraper.preview.shown': '仅显示前 {shown} 条，共 {total} 条。',
   'scraper.preview.previewedAt': '预览时间',
   'scraper.preview.column': '字段',
-  'scraper.preview.value': '值',
 
   'scraper.actions.title': '审批、发布、验证与采纳',
   'scraper.actions.description': '四个动作各自针对精确版本，任何一步都不能替代另一步。',
