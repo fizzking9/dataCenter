@@ -111,7 +111,7 @@ export function listServiceIdentities(options: {
   masterKey: string;
   token: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'service_identity_listing', scope: 'deployment' };
   const actor = resolveActor(session, options.token, context);
   requireDeploymentAdministrator(session, actor, context);

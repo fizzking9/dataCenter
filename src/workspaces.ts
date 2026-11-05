@@ -30,7 +30,7 @@ export function listWorkspaces(options: {
   masterKey: string;
   token: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'workspace_listing', scope: 'deployment' };
   const actor = resolveActor(session, options.token, context);
   const visible = session.state.workspaces.map((workspace) => ({
@@ -303,7 +303,7 @@ export function listMemberships(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'membership_listing',
     scope: 'workspace',

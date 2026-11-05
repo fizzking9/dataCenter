@@ -140,7 +140,7 @@ export function browserIdentity(options: {
   masterKey: string;
   token: string;
 }): BrowserIdentity {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const actor = resolveActor(session, options.token, { action: 'session_check', scope: 'deployment' });
   return {
     username: actor.user.username,
@@ -165,7 +165,7 @@ export interface NavigationOptions {
  * confirms an existence the actor may not see.
  */
 export function browserNavigation(options: NavigationOptions): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'browser_navigation', scope: 'deployment' };
   const actor = resolveActor(session, options.token, context);
 

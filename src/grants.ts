@@ -516,7 +516,7 @@ export function listGrants(options: {
   token: string;
   dataProductId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'data_product_grant_listing', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
   const product = requireAdministeredProduct(session, actor, context, options.dataProductId);

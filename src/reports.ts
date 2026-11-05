@@ -637,7 +637,7 @@ export function showReportTemplate(options: {
   reportTemplateId: string;
   version?: number;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'report_template_read',
     scope: 'workspace',
@@ -682,7 +682,7 @@ export function listReportTemplates(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'report_template_listing',
     scope: 'workspace',
@@ -873,6 +873,12 @@ export interface GenerateReportOptions {
  */
 export async function generateReport(options: GenerateReportOptions): Promise<ReportRecord> {
   const { session, reader, template, version } = options;
+  if (session.license?.status === 'expired') {
+    throw new ReportGenerationFailure(
+      'LICENSE_EXPIRED',
+      'The Deployment License has expired; Report generation and stock refresh are closed.',
+    );
+  }
   if (version.withdrawn_at !== null) {
     throw new ReportGenerationFailure(
       'REPORT_TEMPLATE_WITHDRAWN',
@@ -1512,7 +1518,7 @@ export function showReport(options: {
   reportId: string;
   now?: Date;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'report_retrieval',
     scope: 'workspace',
@@ -1568,7 +1574,7 @@ export function listReports(options: {
   includeWithdrawn?: boolean;
   now?: Date;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'report_listing',
     scope: 'workspace',

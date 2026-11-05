@@ -1074,7 +1074,7 @@ export function queryDataProduct(options: {
   dataProductId: string;
   requestPath: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'data_product_query', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
   const product = requireReadableProduct(session, actor, context, options.dataProductId);

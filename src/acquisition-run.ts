@@ -262,7 +262,7 @@ export function acquisitionQueue(options: {
   token: string;
   sourceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'acquisition_queue_read', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
   const source = requireAdministeredSource(session, actor, context, options.sourceId);
@@ -808,7 +808,7 @@ export function readAcquisitionPlan(options: {
   token: string;
   runId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'acquisition_plan_read', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
   const run = session.state.acquisition_runs.find(
@@ -874,7 +874,7 @@ export function listSourceAcquisition(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'source_acquisition_listing',
     scope: 'workspace',

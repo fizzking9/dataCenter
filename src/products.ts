@@ -624,7 +624,7 @@ export function listDataProducts(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'data_product_listing',
     scope: 'workspace',
@@ -760,7 +760,7 @@ export function listDataProductReleases(options: {
   /** The active Workspace the browser names, so a foreign Product is never read. */
   workspaceId?: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'data_product_release_listing', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
   const product = requireReadableProduct(session, actor, context, options.dataProductId);

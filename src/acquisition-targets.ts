@@ -83,7 +83,7 @@ export function acquisitionTargets(options: {
   token: string;
   sourceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'acquisition_targets_read', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
   const source = requireAdministeredSource(session, actor, context, options.sourceId);

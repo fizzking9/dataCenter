@@ -737,6 +737,8 @@ function baseResponse(question: string, workspaceId: string): Record<string, unk
     freshness: null,
     candidate: null as Record<string, unknown> | null,
     conversation: null as string | null,
+    /** An expired license answers read-only and persists nothing. */
+    ephemeral: false,
   };
 }
 
@@ -1054,6 +1056,10 @@ async function runTurn(principal: TurnPrincipal, options: TurnRequest): Promise<
     ...(requestedProduct === null ? {} : { target: requestedProduct.data_product_id }),
   };
   const response = baseResponse(question, workspaceId);
+  // An expired license keeps Natural-Language Query as an ephemeral read: no
+  // stock refresh, no new Report, and no candidate may be persisted from it.
+  const ephemeral = session.license?.status === 'expired';
+  response['ephemeral'] = ephemeral;
   response['authorization'] = authorizationView(workspaceId, role, []);
 
   let prior: ConversationPayload = { workspaceId, subject: principal.subject, questions: [], productIds: [] };
@@ -1093,7 +1099,7 @@ async function runTurn(principal: TurnPrincipal, options: TurnRequest): Promise<
   // Release, or generated under another authorization produces a fresh Report
   // under exactly this reader. A Template that cannot produce one falls through
   // to the settled Natural-Language Query path below.
-  if (options.clarification === undefined) {
+  if (!ephemeral && options.clarification === undefined) {
     const reuse = await reuseReport({
       session,
       generatedBy: principal.generatedBy,
@@ -1504,7 +1510,8 @@ async function runTurn(principal: TurnPrincipal, options: TurnRequest): Promise<
   // repeated normalized semantic joins the one open item without a new notice.
   const single = parts.length === 1 ? parts[0]! : null;
   const candidateOwner = principal.attributedUserId;
-  if (single !== null
+  if (!ephemeral
+    && single !== null
     && candidateOwner !== null
     && single['executed'] === true
     && isSimplifiedChinese(question)
@@ -1623,6 +1630,12 @@ function finishTurn(
   question: string,
   prior: ConversationPayload,
 ): Record<string, unknown> {
+  if (session.license?.status === 'expired') {
+    const notice = '许可已过期：本次问答为临时只读结果，不会保存候选报告、报告模板、报告或配置。';
+    const limitations = stringsOf(response['limitations']);
+    response['ephemeral'] = true;
+    if (!limitations.includes(notice)) response['limitations'] = [...limitations, notice];
+  }
   const outcome = response['outcome'] as NaturalLanguageOutcome;
   const binding = objectOrNull(response['binding']);
   const model = objectOrNull(response['model']);
@@ -1704,7 +1717,7 @@ export async function askNaturalLanguageQueryForAgent(
  * the shared engine.
  */
 async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<string, unknown>> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const entry: ActionContext = {
     action: 'natural_language_query',
     scope: 'workspace',

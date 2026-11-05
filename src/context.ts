@@ -339,7 +339,7 @@ export function showContext(options: {
   workspaceId?: string;
   version?: number;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'business_context_read',
     scope: options.workspaceId === undefined ? 'deployment' : 'workspace',
@@ -443,7 +443,7 @@ export function showContextHistory(options: {
   token: string;
   workspaceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const artifactId = workspaceContextArtifact(options.workspaceId);
   const context: ActionContext = {
     action: 'business_context_history_read',

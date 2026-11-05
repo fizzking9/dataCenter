@@ -285,7 +285,7 @@ export function showScraperDiagnostics(options: {
   runId?: string;
   proposalId?: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'scraper_diagnostics_read',
     scope: 'workspace',

@@ -155,7 +155,7 @@ export function createExport(options: {
   /** The same query a browser form already parsed on the server. */
   request?: unknown;
 }): Record<string, unknown> {
-  const authorizer = openPlatform(options.root, options.masterKey);
+  const authorizer = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'data_product_export', scope: 'workspace' };
   const actor = resolveActor(authorizer, options.token, context);
   const product = requireReadableProduct(authorizer, actor, context, options.dataProductId);
@@ -235,7 +235,7 @@ export function createExport(options: {
 
   // The pages each saved their own audit row, so the recording session is opened
   // afterwards and never overwrites what the governed reads wrote.
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const csv = toCsv(table.header, table.rows);
   const bytes = Buffer.from(csv, 'utf8');
   const objectPath = objectPathOf(exportId);
@@ -318,7 +318,7 @@ export function downloadExport(options: {
   token: string;
   exportId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'data_product_export_download', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
   // Only the Consumer who produced an export may read it, and an export in
@@ -454,7 +454,7 @@ export function listExports(options: {
   workspaceId: string;
   dataProductId?: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'data_product_export_listing',
     scope: 'workspace',
@@ -517,7 +517,7 @@ export function revokeExport(options: {
   token: string;
   exportId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'data_product_export_revocation', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
   const record = session.state.exports.find((candidate) => candidate.export_id === options.exportId);

@@ -566,7 +566,7 @@ export function listScraperRuns(options: {
   workspaceId: string;
   sourceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = {
     action: 'scraper_run_listing',
     scope: 'workspace',

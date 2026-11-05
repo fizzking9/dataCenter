@@ -83,7 +83,7 @@ export function issueOperatorEnrollment(options: {
     'OPERATOR_ENROLLMENT_TTL_INVALID',
     `The enrollment lifetime must run from 0 to ${MAX_ENROLLMENT_TTL_MINUTES} minutes.`,
   );
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const console = readOperatorConsole(options.root);
   const existing = findOperator(console, username);
   assertCondition(
@@ -139,7 +139,7 @@ export function revokeOperatorEnrollment(options: {
   enrollmentId: string;
   actor?: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const console = readOperatorConsole(options.root);
   const enrollment = console.enrollments.find((record) => record.enrollment_id === options.enrollmentId);
   assertCondition(enrollment !== undefined, 'OPERATOR_ENROLLMENT_NOT_FOUND', 'The Operator enrollment does not exist.');
@@ -175,7 +175,7 @@ export function revokeOperator(options: {
   actor?: string;
 }): Record<string, unknown> {
   const username = assertOperatorUsername(options.operator);
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const console = readOperatorConsole(options.root);
   const account = findOperator(console, username);
   assertCondition(account !== undefined, 'OPERATOR_NOT_FOUND', 'The Operator Console account does not exist.');
@@ -261,7 +261,7 @@ export async function exchangeOperatorEnrollment(options: {
   secret: string;
   password: string;
 }): Promise<OperatorCredentials> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const secretHash = enrollmentSecretHash(session.dataKey, options.secret);
   assertEnrollmentUsable(readOperatorConsole(options.root), secretHash, options.password);
 
@@ -374,7 +374,7 @@ export async function signInOperator(options: {
   totp?: string;
   recoveryCode?: string;
 }): Promise<OperatorSignIn> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const console = readOperatorConsole(options.root);
   const account = findOperator(console, options.username);
   if (!account) {
@@ -451,7 +451,7 @@ export function signOutOperator(options: {
 }): Record<string, unknown> {
   const resolved = resolveOperatorSession(options.root, options.token);
   if (!resolved) return { revoked: false };
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const console = readOperatorConsole(options.root);
   const record = console.sessions.find((candidate) => candidate.token_hash === resolved.session.token_hash);
   if (record) record.revoked_at = new Date().toISOString();

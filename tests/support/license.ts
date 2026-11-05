@@ -1,5 +1,6 @@
 import { randomUUID, sign } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { BundleFixture } from './bundle.js';
 
 function canonical(value: unknown): string {
@@ -53,4 +54,31 @@ export function issueLicense(
     },
   }, null, 2)}\n`, { mode: 0o600 });
   return payload.license_id;
+}
+
+/** The License Request the installed Deployment was issued for. */
+export function installedLicenseRequest(root: string): LicenseRequest {
+  return JSON.parse(readFileSync(join(root, 'license-request.json'), 'utf8')) as LicenseRequest;
+}
+
+/**
+ * Signs one Deployment License for the installed License Request. Tests use it
+ * for renewal, replacement, and for copying an already-expired entitlement into
+ * place, which is the same file an ordinary expiration leaves behind.
+ */
+export function signedLicenseFor(
+  directory: string,
+  name: string,
+  bundle: BundleFixture,
+  request: LicenseRequest,
+  options: Parameters<typeof issueLicense>[3] = {},
+): string {
+  const path = join(directory, `${name}.json`);
+  issueLicense(path, bundle, request, options);
+  return path;
+}
+
+/** Installs one signed license exactly as the removable-media import would. */
+export function installLicenseFile(root: string, licensePath: string): void {
+  writeFileSync(join(root, 'license.json'), readFileSync(licensePath));
 }

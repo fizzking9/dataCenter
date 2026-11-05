@@ -731,7 +731,7 @@ export function listProductProposals(options: {
   token: string;
   sourceId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'data_product_proposal_listing', scope: 'workspace', target: options.sourceId };
   const actor = resolveActor(session, options.token, context);
   const source = requireAdministeredSource(session, actor, context, options.sourceId);
@@ -1307,7 +1307,7 @@ export function showProductProposal(options: {
   token: string;
   proposalId: string;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
+  const session = openPlatform(options.root, options.masterKey, 'allow');
   const context: ActionContext = { action: 'data_product_proposal_read', scope: 'workspace', target: options.proposalId };
   const actor = resolveActor(session, options.token, context);
   const proposal = findProductProposal(session.state.artifact_proposals, options.proposalId);
