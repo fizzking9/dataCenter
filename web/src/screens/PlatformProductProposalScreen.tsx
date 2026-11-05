@@ -69,13 +69,16 @@ function join(values: unknown): string {
 }
 
 function metricValue(value: unknown): string {
-  return value === null || value === undefined ? '空' : stringOf(value);
+  return value === null || value === undefined ? t('productProposal.preview.emptyMetric') : stringOf(value);
 }
 
 /** The two Business Context Versions a Release pins, as the preview restates them. */
 function pinnedContextText(value: unknown): string {
   const pins = recordOf(value);
-  return `通用 ${stringOf(pins['common_business_context_version'])} · 工作区 ${stringOf(pins['workspace_business_context_version'])}`;
+  return message('productProposal.preview.pins', {
+    common: stringOf(pins['common_business_context_version']),
+    workspace: stringOf(pins['workspace_business_context_version']),
+  });
 }
 
 function NoticeLine({ notice }: { notice: Notice | null }) {

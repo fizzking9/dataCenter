@@ -32,7 +32,7 @@ function join(values: unknown): string {
 
 function filterText(filters: Array<{ field: string; op: string; value: string | number | null }>): string {
   return filters
-    .map((filter) => `${filter.field} ${optional(`value.grantOp.${filter.op}`) ?? filter.op} ${filter.value === null ? '空值' : String(filter.value)}`)
+    .map((filter) => `${filter.field} ${optional(`value.grantOp.${filter.op}`) ?? filter.op} ${filter.value === null ? t('value.null') : String(filter.value)}`)
     .join('；');
 }
 
@@ -722,7 +722,9 @@ export function WorkspaceProductGovernance({ workspaceId, onSessionLost }: Works
                     { term: t('workspace.productGovernance.evolution.base'), value: String(preview.base.data_product_version) },
                     {
                       term: t('workspace.productGovernance.evolution.version'),
-                      value: `契约 ${preview.candidate.contract_version.major}.${preview.candidate.contract_version.minor}`,
+                      value: message('workspace.productGovernance.evolution.contractVersion', {
+                        version: `${preview.candidate.contract_version.major}.${preview.candidate.contract_version.minor}`,
+                      }),
                     },
                     {
                       term: t('workspace.productGovernance.evolution.change'),

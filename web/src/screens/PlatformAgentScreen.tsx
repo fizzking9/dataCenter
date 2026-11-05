@@ -535,7 +535,7 @@ export function AgentIdentities({ onSessionLost }: AgentScreenProps) {
 
 function filterText(grant: AgentGrantView): string {
   return grant.row_filters
-    .map((filter) => `${filter.field} ${filter.op} ${filter.value === null ? '空值' : String(filter.value)}`)
+    .map((filter) => `${filter.field} ${filter.op} ${filter.value === null ? t('value.null') : String(filter.value)}`)
     .join('；');
 }
 
