@@ -1337,7 +1337,15 @@ export function evaluateRetention(options: RetentionOptions): Record<string, unk
   };
 }
 
-function removeCandidate(session: PlatformSession, entry: PurgePlanEntry): void {
+/**
+ * Applies one Purge decision to the stores. The same function serves an executed
+ * Purge job and a Purge Ledger replay during disaster recovery, so restored
+ * content is removed exactly the way the original Purge removed it.
+ */
+export function removePurgedRecord(
+  session: PlatformSession,
+  entry: Pick<PurgePlanEntry, 'record_kind' | 'record_id'>,
+): void {
   switch (entry.record_kind) {
     case 'raw_acquisition': {
       const raw = session.state.raw_acquisitions.find((candidate) => candidate.raw_id === entry.record_id);
@@ -1404,7 +1412,7 @@ function executeJob(session: PlatformSession, job: PurgeJobRecord, at: Date): vo
       entry.dependencies = [...current.dependencies];
       continue;
     }
-    removeCandidate(session, entry);
+    removePurgedRecord(session, entry);
     entry.purged = true;
   }
   const retained = job.plan.filter((entry) => entry.purged !== true && entry.deferred !== true);

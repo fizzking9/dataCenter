@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { backupHealth } from './backup.js';
 import { readMountedMasterKey, unwrapDataKey, type WrappedDataKey } from './keys.js';
 import { validateLicense } from './license.js';
 import { readPlatform } from './platform.js';
@@ -13,15 +14,26 @@ export function deploymentStatus(options: {
   operator: string;
 }): Record<string, unknown> {
   const deployment = readDeployment(options.root);
+  // Recovery health is stated even while service is closed: a Deployment that
+  // stopped checkpointing has lost its promised RPO whatever else it reports.
+  const backup = backupHealth(options.root);
+  const recovery = {
+    workers_enabled: deployment.workers_enabled !== false,
+    connectivity_enabled: deployment.connectivity_enabled !== false,
+    restored: deployment.restored ?? null,
+    backup,
+  };
   const licensePath = join(options.root, 'license.json');
   if (!existsSync(licensePath) || !deployment.service_open) {
     const evidenceId = recordEvidence(options.root, 'status', 'closed', options.operator, {
       state: deployment.state,
+      backup_health: backup.health,
     });
     return {
       state: deployment.state,
       health: 'closed',
       service_open: false,
+      ...recovery,
       evidence_id: evidenceId,
     };
   }
@@ -36,7 +48,7 @@ export function deploymentStatus(options: {
   // A failed physical deletion degrades health until a retry succeeds; it never
   // changes published data, so the Deployment keeps serving while it is degraded.
   const retention = retentionHealth(readPlatform(options.root));
-  const health = retention.health;
+  const health = retention.health === 'degraded' || backup.health === 'degraded' ? 'degraded' : 'healthy';
   const evidenceId = recordEvidence(options.root, 'status', health, options.operator, {
     state: deployment.state,
     runtime_services: services,
@@ -44,6 +56,8 @@ export function deploymentStatus(options: {
     master_key_valid: true,
     failed_purges: retention.failed_purges,
     pending_purges: retention.pending_purges,
+    backup_health: backup.health,
+    backup_reasons: backup.reasons,
   });
   return {
     state: deployment.state,
@@ -54,6 +68,7 @@ export function deploymentStatus(options: {
     default_credentials: deployment.default_credentials !== false,
     master_key_external: deployment.master_key_external === true,
     retention,
+    ...recovery,
     evidence_id: evidenceId,
   };
 }

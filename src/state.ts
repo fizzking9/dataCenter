@@ -14,6 +14,11 @@ export interface DeploymentState {
   default_credentials?: boolean;
   master_key_external?: boolean;
   runtime_services?: string[];
+  /** Absent means enabled: a Deployment that was never restored keeps working. */
+  workers_enabled?: boolean;
+  connectivity_enabled?: boolean;
+  /** Present only on a Deployment produced by an isolated restoration. */
+  restored?: { backup_id: string; restored_at: string; verification_id: string } | null;
 }
 
 export function readJsonFile<T>(path: string): T {

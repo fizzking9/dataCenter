@@ -16,6 +16,7 @@ import {
   type ReportTemplateArtifact,
   type ReportTemplateVersion,
 } from './catalog.js';
+import { assertWorkersEnabled } from './backup.js';
 import { memberReader } from './grants.js';
 import {
   findUser,
@@ -302,6 +303,9 @@ export async function tickReportSchedules(options: {
   scheduleId?: string;
   at?: string;
 }): Promise<Record<string, unknown>> {
+  // Report generation is background work, so a restored Deployment keeps it
+  // closed until an Operator explicitly enables workers.
+  assertWorkersEnabled(options.root);
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = {
     action: 'report_schedule_tick',

@@ -9,6 +9,7 @@ import type {
   RawAcquisitionRecord,
   SourceAcquisitionVersion,
 } from './catalog.js';
+import { assertConnectivityEnabled } from './backup.js';
 import {
   AUTHENTICATION_INTERVENTION_REQUIRED,
   openConnectionAuth,
@@ -119,6 +120,8 @@ export async function runConnector(options: {
   acquisition: SourceAcquisitionVersion;
 }): Promise<ConnectorOutcome> {
   const { session, plan, connection, connectionVersion, acquisition } = options;
+  // A restored Deployment has no route to a Source until an Operator opens one.
+  assertConnectivityEnabled(session.root);
   const rawIds: string[] = [];
   const batchIds: string[] = [];
   const retry = connectionVersion.retry;
