@@ -51,6 +51,7 @@ import {
 import { browserIdentity, browserNavigation } from './navigation.js';
 import { askWorkspaceQuery } from './natural-language-query.js';
 import { listDataProductReleases, listDataProducts, previewDataProductEvolution, publishDataProductEvolution, rollbackDataProductVersion, withdrawDataProductVersion } from './products.js';
+import { generateTemplateReport, listReportTemplates, listReports, publishReportTemplate, showReport, showReportTemplate } from './reports.js';
 import { publishModelBinding, revokeModelBinding, showModelBindingWorkspace } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, listModelProfiles, publishModelProfile } from './model-profile.js';
 import {
@@ -913,6 +914,95 @@ async function handleApi(
       ...(conversation === '' ? {} : { conversation }),
       ...(bindingId === '' ? {} : { bindingId }),
       ...(at === '' ? {} : { now: at }),
+    }));
+    return;
+  }
+
+  // The immutable Report library reads through the same governed reporters the
+  // CLI uses. Listing and reading are pure stock operations: they generate
+  // nothing and never invoke a model, and every read reauthorizes the caller.
+  if (pathname === '/api/workspace/reports' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listReports({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+      includeWithdrawn: true,
+    }));
+    return;
+  }
+
+  const reportRoute = /^\/api\/workspace\/reports\/([^/]+)$/u.exec(pathname);
+  if (reportRoute !== null && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, showReport({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      reportId: decodeURIComponent(reportRoute[1]!),
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  // Workspace Administrators publish single-question Report Templates through
+  // the same engine as the CLI; the server validates every pinned semantic.
+  if (pathname === '/api/workspace/report-templates' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listReportTemplates({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/report-templates' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const freshness = text(body, 'freshness');
+    sendJson(response, 201, publishReportTemplate({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: workspaceFromBody(body),
+      productId: requiredText(body, 'product_id'),
+      name: requiredText(body, 'name'),
+      config: {
+        question: text(body, 'question'),
+        parameters: jsonDocument(body, 'parameters'),
+        query: jsonDocument(body, 'query'),
+        grounded_prompt: text(body, 'grounded_prompt'),
+        ...(freshness.trim() === '' ? {} : { freshness: { max_age_minutes: Number(freshness) } }),
+      },
+    }));
+    return;
+  }
+
+  const reportTemplateRoute = /^\/api\/workspace\/report-templates\/([^/]+)$/u.exec(pathname);
+  if (reportTemplateRoute !== null && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, showReportTemplate({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      reportTemplateId: decodeURIComponent(reportTemplateRoute[1]!),
+    }));
+    return;
+  }
+
+  const reportTemplateGenerateRoute = /^\/api\/workspace\/report-templates\/([^/]+)\/generate$/u.exec(pathname);
+  if (reportTemplateGenerateRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, await generateTemplateReport({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      reportTemplateId: decodeURIComponent(reportTemplateGenerateRoute[1]!),
+      workspaceId: workspaceFromBody(body),
     }));
     return;
   }
@@ -2760,6 +2850,24 @@ const STATUS_BY_CODE: Record<string, number> = {
   DATA_PRODUCT_QUERY_REFUSED: 403,
   DATA_PRODUCT_NOT_AVAILABLE: 404,
   DATA_PRODUCT_NOT_PUBLISHED: 409,
+  // Report library and Template publication refusals are governed decisions.
+  REPORT_NOT_AVAILABLE: 404,
+  REPORT_WITHDRAWN: 409,
+  REPORT_GENERATION_FAILED: 422,
+  REPORT_TEMPLATE_NOT_AVAILABLE: 404,
+  REPORT_TEMPLATE_VERSION_NOT_FOUND: 404,
+  REPORT_TEMPLATE_NOT_PUBLISHED: 409,
+  REPORT_TEMPLATE_WITHDRAWN: 409,
+  REPORT_TEMPLATE_NAME_INVALID: 400,
+  REPORT_TEMPLATE_QUESTION_INVALID: 400,
+  REPORT_TEMPLATE_PARAMETERS_INVALID: 400,
+  REPORT_TEMPLATE_PARAMETERS_INCONSISTENT: 422,
+  REPORT_TEMPLATE_PROMPT_NOT_SIMPLIFIED_CHINESE: 400,
+  REPORT_TEMPLATE_FRESHNESS_INVALID: 400,
+  REPORT_TEMPLATE_QUERY_INVALID: 400,
+  REPORT_TEMPLATE_RELEASE_PIN_REFUSED: 400,
+  REPORT_TEMPLATE_CONFIGURATION_UNREADABLE: 400,
+  REPORT_TEMPLATE_CONFIGURATION_INVALID: 400,
   DATA_PRODUCT_RELEASE_NOT_FOUND: 404,
   DATASET_RELEASE_NOT_FOUND: 409,
   DATA_PRODUCT_QUERY_TOO_COMPLEX: 422,

@@ -1041,6 +1041,191 @@ export interface NaturalLanguageAnswerView {
   conversation: string | null;
 }
 
+/** One typed parameter an exact Report Template Version pinned. */
+export interface ReportParameterView {
+  name: string;
+  type: string;
+  value: unknown;
+}
+
+/** The exact Template a stocked Report was generated from. */
+export interface ReportTemplateReferenceView {
+  report_template_id: string;
+  name: string;
+  version: number;
+  content_hash: string;
+  owner_user_id: string;
+}
+
+/** The exact Data Product Releases a stocked Report pins. */
+export interface ReportProductReferenceView {
+  data_product_id: string;
+  name: string;
+  api_path: string;
+  data_product_version: number;
+  data_product_release: number;
+  dataset_release: number;
+  contract_version: { major: number; minor: number };
+  contract_hash: string;
+}
+
+/** How complete the governed answer a stocked Report really is. */
+export interface ReportCompletionView {
+  status: 'complete' | 'incomplete';
+  outcome: 'answered' | 'empty' | 'no_evidence';
+  partial_period: boolean;
+  truncated: boolean;
+  limitations: string[];
+}
+
+/** The optional grounded narrative stored beside the structured result. */
+export interface ReportNarrativeView {
+  narrative: string;
+  evidence_refs: Array<Record<string, unknown>>;
+  grounded_answer_prompt_hash: string;
+  prompt_hash: string;
+  model: Record<string, unknown>;
+}
+
+/** The authorization scope a Report was generated under and is reauthorized against. */
+export interface ReportSecurityView {
+  scope_fingerprint: string;
+  restricted: boolean;
+  columns: string[];
+  row_filter_count: number;
+}
+
+/** One immutable stocked Report exactly as the server preserved it. */
+export interface ReportView {
+  report_id: string;
+  workspace_id: string;
+  template: ReportTemplateReferenceView;
+  data_product: ReportProductReferenceView;
+  question: string;
+  normalized_question: string;
+  parameters: ReportParameterView[];
+  interpretation: string;
+  query: Record<string, unknown>;
+  result: NlqResultView;
+  narrative: ReportNarrativeView | null;
+  provenance: NlqProvenanceView | null;
+  freshness: NlqPartView['freshness'];
+  completion: ReportCompletionView;
+  security: ReportSecurityView;
+  freshness_policy: { max_age_minutes: number };
+  generated_at: string;
+  generated_by: string;
+  withdrawn_at: string | null;
+  withdrawn_by: string | null;
+}
+
+/** The current effective authorization one Report response is answered under. */
+export interface ReportAuthorizationView {
+  workspace_id: string;
+  role: string;
+  parts: Array<{
+    data_product_id: string;
+    restricted: boolean;
+    columns: string[];
+    row_filter_count: number;
+    scope_fingerprint: string;
+  }>;
+}
+
+/** One entry of the authorized Report library. */
+export interface ReportListViewEntry {
+  report_id: string;
+  template: ReportTemplateReferenceView;
+  data_product: ReportProductReferenceView;
+  question: string;
+  generated_at: string;
+  completion: ReportCompletionView;
+  withdrawn_at: string | null;
+  age_minutes: number;
+  max_age_minutes: number;
+  fresh: boolean;
+}
+
+export interface ReportListResponse {
+  origin: 'stock';
+  workspace_id: string;
+  reports: ReportListViewEntry[];
+  authorization: ReportAuthorizationView;
+}
+
+/** One retrieval: it returns stored content and never regenerates it. */
+export interface ReportRetrievalResponse {
+  origin: 'stock';
+  summary: string;
+  report: ReportView;
+  withdrawn: boolean;
+  stock: {
+    report_id: string;
+    reused: boolean;
+    generated_at: string;
+    age_minutes: number;
+    max_age_minutes: number;
+    fresh: boolean;
+  };
+  authorization: ReportAuthorizationView;
+}
+
+/** One explicit generation from the exact published Template Version. */
+export interface ReportGenerationResponse {
+  origin: 'generated';
+  summary: string;
+  report: ReportView;
+  authorization: ReportAuthorizationView;
+}
+
+/** One published Report Template Version, with every pinned semantic. */
+export interface ReportTemplateView {
+  report_template_id: string;
+  workspace_id: string;
+  name: string;
+  owner: { user_id: string; username: string | null };
+  published_version: number | null;
+  template_version: number;
+  content_hash: string;
+  question: string;
+  normalized_question: string;
+  interpretation: string;
+  parameters: ReportParameterView[];
+  data_product_id: string;
+  contract_major: number;
+  query: Record<string, unknown>;
+  grounded_prompt: { id: string; body: string; hash: string };
+  freshness_policy: { max_age_minutes: number };
+  published_at: string;
+  published_by: string;
+  withdrawn_at: string | null;
+}
+
+/** One Template summary the administrator's list states. */
+export interface ReportTemplateSummaryView {
+  report_template_id: string;
+  name: string;
+  owner: { user_id: string; username: string | null };
+  published_version: number | null;
+  question?: string;
+  normalized_question?: string;
+  interpretation?: string;
+  parameters?: ReportParameterView[];
+  data_product_id?: string;
+  contract_major?: number;
+  query?: Record<string, unknown>;
+  grounded_prompt?: { id: string; body: string; hash: string };
+  freshness_policy?: { max_age_minutes: number };
+  content_hash?: string;
+  published_at?: string;
+  withdrawn_at?: string | null;
+}
+
+export interface ReportTemplateListResponse {
+  workspace_id: string;
+  report_templates: ReportTemplateSummaryView[];
+}
+
 export interface ProductExportCreated {
   export_id: string;
   workspace_id: string;
@@ -3196,6 +3381,35 @@ export const platformApi = {
     request<NaturalLanguageAnswerView>(
       `/api/workspace/nlq${workspaceQuery(workspaceId)}`,
       { method: 'POST', body: JSON.stringify(body) },
+    ),
+  reports: (workspaceId: string) =>
+    request<ReportListResponse>(`/api/workspace/reports${workspaceQuery(workspaceId)}`),
+  report: (reportId: string, workspaceId: string) =>
+    request<ReportRetrievalResponse>(
+      `/api/workspace/reports/${encodeURIComponent(reportId)}${workspaceQuery(workspaceId)}`,
+    ),
+  reportTemplates: (workspaceId: string) =>
+    request<ReportTemplateListResponse>(`/api/workspace/report-templates${workspaceQuery(workspaceId)}`),
+  publishReportTemplate: (
+    workspaceId: string,
+    body: {
+      product_id: string;
+      name: string;
+      question: string;
+      parameters: string;
+      query: string;
+      grounded_prompt: string;
+      freshness: string;
+    },
+  ) =>
+    request<ReportTemplateView>('/api/workspace/report-templates', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, ...body }),
+    }),
+  generateReportFromTemplate: (reportTemplateId: string, workspaceId: string) =>
+    request<ReportGenerationResponse>(
+      `/api/workspace/report-templates/${encodeURIComponent(reportTemplateId)}/generate`,
+      { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) },
     ),
   createProductExport: (dataProductId: string, workspaceId: string, query: unknown) =>
     request<ProductExportCreated>(

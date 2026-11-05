@@ -11,6 +11,7 @@ import { WorkspaceAudit, WorkspaceMembers } from './screens/PlatformWorkspaceAdm
 import { WorkspaceContext, WorkspaceOverview } from './screens/PlatformWorkspaceScreen.js';
 import { WorkspaceExplore } from './screens/PlatformExploreScreen.js';
 import { WorkspaceNlq } from './screens/PlatformNlqScreen.js';
+import { WorkspaceReports } from './screens/PlatformReportsScreen.js';
 import { WorkspaceProductGovernance } from './screens/PlatformProductGovernanceScreen.js';
 import { WorkspaceProductProposals } from './screens/PlatformProductProposalScreen.js';
 import { WorkspaceProposals } from './screens/PlatformProposalScreen.js';
@@ -22,7 +23,7 @@ import { Alert, Panel } from './ui/Panel.js';
 import { Shell } from './ui/Shell.js';
 
 const VIEWS = [
-  'overview', 'sources', 'scrapers', 'products', 'nlq', 'productGovernance', 'productProposals', 'context', 'members',
+  'overview', 'sources', 'scrapers', 'products', 'nlq', 'reports', 'productGovernance', 'productProposals', 'context', 'members',
   'audit', 'models', 'proposals', 'agents', 'modelProfiles', 'users', 'retention',
 ] as const;
 type View = (typeof VIEWS)[number];
@@ -53,6 +54,7 @@ function viewOf(value: string | undefined): View {
     case 'scrapers':
     case 'products':
     case 'nlq':
+    case 'reports':
     case 'context':
     case 'members':
     case 'audit':
@@ -338,6 +340,8 @@ export function PlatformApp() {
     <WorkspaceExplore workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'nlq' ? (
     <WorkspaceNlq workspaceId={activeId} onSessionLost={sessionLost} />
+  ) : route.view === 'reports' ? (
+    <WorkspaceReports workspaceId={activeId} role={activeRole} onSessionLost={sessionLost} />
   ) : route.view === 'productGovernance' ? (
     <WorkspaceProductGovernance workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'productProposals' ? (
