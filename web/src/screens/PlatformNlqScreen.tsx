@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import {
   platformApi,
   type NaturalLanguageAnswerView,
+  type NlqAsOfView,
   type NlqPartView,
   type NlqProvenanceView,
   type NlqResolvedView,
@@ -374,6 +375,41 @@ function ProvenanceFacts({
   );
 }
 
+/** The as-of story every independent part discloses, so no snapshot is implied. */
+function AsOfFacts({ entries }: { entries: NlqAsOfView[] }) {
+  if (entries.length < 2) return null;
+  return (
+    <Panel
+      level={2}
+      title={t('workspace.nlq.asOf.title')}
+      description={t('workspace.nlq.asOf.description')}
+    >
+      <table className="data-table">
+        <thead>
+          <tr>
+            <th scope="col">{t('workspace.nlq.asOf.part')}</th>
+            <th scope="col">{t('workspace.nlq.asOf.release')}</th>
+            <th scope="col">{t('workspace.nlq.asOf.releasedAt')}</th>
+            <th scope="col">{t('workspace.nlq.asOf.dataThrough')}</th>
+            <th scope="col">{t('workspace.nlq.asOf.status')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((entry, index) => (
+            <tr key={`${entry.data_product_id ?? 'part'}-${String(index)}`}>
+              <td>{entry.name ?? t('workspace.nlq.asOf.unnamed')}</td>
+              <td>{entry.data_product_release === null ? '—' : String(entry.data_product_release)}</td>
+              <td>{formatInstant(entry.released_at ?? undefined)}</td>
+              <td>{entry.data_through ?? '—'}</td>
+              <td>{entry.executed ? t('workspace.nlq.asOf.executed') : t('workspace.nlq.asOf.notExecuted')}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Panel>
+  );
+}
+
 /** One independent answer part with its own result, Release, freshness, and evidence. */
 function PartSection({ part, answer }: { part: NlqPartView; answer: NaturalLanguageAnswerView }) {
   const title = part.name === null
@@ -428,6 +464,10 @@ export function WorkspaceNlq({ workspaceId, onSessionLost }: WorkspaceViewProps)
   const [asked, setAsked] = useState('');
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState<'ask' | 'clarify' | null>(null);
+  // The opaque handle the server issued for this conversation. It is only ever
+  // echoed back: the server re-resolves the actor, Grants, and Releases on every
+  // turn, so holding it cannot widen what this Consumer may read.
+  const [conversation, setConversation] = useState('');
 
   const turn = useCallback(async (
     body: Record<string, unknown>,
@@ -449,21 +489,40 @@ export function WorkspaceNlq({ workspaceId, onSessionLost }: WorkspaceViewProps)
     setAnswer(result.data);
     setAsked(askedQuestion);
     setClarification('');
+    // A refused handle is forgotten so the next question starts cleanly; every
+    // other turn keeps the last server-issued handle, which the server verifies.
+    if (result.data.conversation !== null) {
+      setConversation(result.data.conversation);
+    } else if (result.data.reason_code === 'NLQ_CONVERSATION_INVALID') {
+      setConversation('');
+    }
   }, [workspaceId, onSessionLost]);
 
   const ask = useCallback((): void => {
     if (question.trim() === '') return;
-    void turn({ question }, question, 'ask');
-  }, [question, turn]);
+    void turn(
+      { question, ...(conversation === '' ? {} : { conversation }) },
+      question,
+      'ask',
+    );
+  }, [question, conversation, turn]);
 
   const clarify = useCallback((): void => {
     if (answer === null || answer.clarification === null || clarification.trim() === '') return;
     void turn(
-      { question: asked, clarification, ...(answer.conversation === null ? {} : { conversation: answer.conversation }) },
+      { question: asked, clarification, ...(conversation === '' ? {} : { conversation }) },
       asked,
       'clarify',
     );
-  }, [answer, asked, clarification, turn]);
+  }, [answer, asked, clarification, conversation, turn]);
+
+  const startNewConversation = useCallback((): void => {
+    setAnswer(null);
+    setAsked('');
+    setClarification('');
+    setConversation('');
+    setNotice(null);
+  }, []);
 
   const originating = answer === null ? null : answer.clarification;
 
@@ -485,7 +544,15 @@ export function WorkspaceNlq({ workspaceId, onSessionLost }: WorkspaceViewProps)
         <Button busy={busy === 'ask'} onClick={ask}>
           {busy === 'ask' ? t('workspace.nlq.asking') : t('workspace.nlq.ask')}
         </Button>
+        {conversation === '' ? null : (
+          <Button variant="secondary" onClick={startNewConversation}>
+            {t('workspace.nlq.conversation.reset')}
+          </Button>
+        )}
       </div>
+      {conversation === '' ? null : (
+        <p className="field__hint">{t('workspace.nlq.conversation.active')}</p>
+      )}
       {notice === null ? null : (
         <Alert tone={notice.tone} {...(notice.code === undefined ? {} : { code: notice.code })}>
           {notice.text}
@@ -496,6 +563,7 @@ export function WorkspaceNlq({ workspaceId, onSessionLost }: WorkspaceViewProps)
           <p className="context__meta">
             <span>{outcomeLabel(answer.outcome)}</span>
             <span>{statusLabel(answer.status)}</span>
+            {answer.follow_up ? <span>{t('workspace.nlq.followUp')}</span> : null}
             <span>{t('workspace.nlq.answer.question')}：{asked}</span>
             {answer.reason_code === null ? null : <code>{answer.reason_code}</code>}
           </p>
@@ -561,6 +629,7 @@ export function WorkspaceNlq({ workspaceId, onSessionLost }: WorkspaceViewProps)
               </div>
             </Panel>
           )}
+          <AsOfFacts entries={answer.as_of} />
           {answer.parts.map((part, index) => (
             <PartSection key={`${part.name ?? 'part'}-${String(index)}`} part={part} answer={answer} />
           ))}
