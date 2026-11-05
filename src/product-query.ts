@@ -526,7 +526,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
     requireBudget();
     session.audit({
       ...scoped,
-      actor: actorLabel(actor.user),
+      actor: reader.label,
       outcome: 'succeeded',
       detail: { data_product_release: release.release, matched_count: hits.length, returned: records.length },
     });
@@ -559,7 +559,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
     requireBudget();
     session.audit({
       ...scoped,
-      actor: actorLabel(actor.user),
+      actor: reader.label,
       outcome: 'succeeded',
       detail: { data_product_release: release.release, suggestion_count: suggestions.length },
     });
