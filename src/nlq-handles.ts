@@ -36,10 +36,11 @@ export interface ConversationPayload {
 
 /**
  * Collapses the whitespace a question may carry so two turns that mean the same
- * thing normalize to the same text, without rewriting the business wording.
+ * thing normalize to the same text, without rewriting the business wording. A
+ * question is never truncated: only what one conversation remembers is bounded.
  */
 export function normalizeQuestion(text: string): string {
-  return text.replace(/\s+/gu, ' ').trim().slice(0, MAX_QUESTION_LENGTH);
+  return text.replace(/\s+/gu, ' ').trim();
 }
 
 function sign(dataKey: Buffer, body: string): string {
@@ -103,7 +104,8 @@ export function encodeConversation(
     k: CONVERSATION_KIND,
     u: payload.userId,
     w: payload.workspaceId,
-    q: payload.questions.slice(-MAX_CONVERSATION_QUESTIONS),
+    q: payload.questions.slice(-MAX_CONVERSATION_QUESTIONS)
+      .map((question) => question.slice(0, MAX_QUESTION_LENGTH)),
     p: payload.productIds.slice(0, MAX_CONVERSATION_PRODUCTS),
   });
 }
