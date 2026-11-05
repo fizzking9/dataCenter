@@ -16,6 +16,7 @@ import { openPlatform } from './session.js';
 import { constantTimeEquals, hashToken } from './tokens.js';
 
 /** The scopes an Agent Identity may hold; each one opens a tool surface and nothing else. */
+// mcp:nlq is reserved for ticket #47 (Natural-Language Query and Reports over MCP).
 export const MCP_SCOPES = ['mcp:read', 'mcp:nlq'];
 
 const ACCESS_TOKEN_LIFETIME_MS = 15 * 60 * 1000;
