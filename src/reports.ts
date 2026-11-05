@@ -45,6 +45,7 @@ import { pinnedForBinding } from './model-profile.js';
 import { findUserById, workspaceRoleOf, type WorkspaceRole } from './platform.js';
 import { executeDataProductQuery } from './product-query.js';
 import { readQuery, readQueryTarget } from './product-query-document.js';
+import { isPastRetention, purgeRevoked, retentionExpiredMessage } from './retention.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
 /** The most typed parameters one Report Template Version may pin. */
@@ -1021,7 +1022,9 @@ export function freshStockReport(options: {
       && report.template.report_template_id === template.report_template_id
       && report.template.version === version.version
       && report.data_product.data_product_id === product.data_product_id
-      && report.withdrawn_at === null,
+      && report.withdrawn_at === null
+      && !purgeRevoked(session.state, 'report', report.report_id)
+      && !isPastRetention(session.state, report.workspace_id, 'report', report.generated_at, now),
   );
   for (let index = candidates.length - 1; index >= 0; index -= 1) {
     const report = candidates[index]!;
@@ -1137,7 +1140,9 @@ export async function reuseReport(options: ReuseRequest): Promise<ReportReuse> {
         && report.template.report_template_id === template.report_template_id
         && report.template.version === version.version
         && report.data_product.data_product_id === product.data_product_id
-        && report.withdrawn_at === null,
+        && report.withdrawn_at === null
+        && !purgeRevoked(options.session.state, 'report', report.report_id)
+        && !isPastRetention(options.session.state, report.workspace_id, 'report', report.generated_at, options.now),
     );
     for (let index = candidates.length - 1; index >= 0; index -= 1) {
       const report = candidates[index]!;
@@ -1339,7 +1344,31 @@ export function readReportForReader(options: {
   const { session, reader } = options;
   const report = findReport(session.state.reports, options.reportId);
   if (!report || (options.workspaceId !== undefined && report.workspace_id !== options.workspaceId)) {
+    // A purged Report stays explicitly retention-expired instead of silently absent.
+    if (purgeRevoked(session.state, 'report', options.reportId)) {
+      throw new ReportAccessFailure(
+        'RETENTION_EXPIRED',
+        'This Report has expired under the retention policy and was purged.',
+      );
+    }
     throw new ReportAccessFailure('REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
+  }
+  // Stock ages out under the settled Report clock; a Purge Ledger entry keeps a
+  // deleted Report explicitly expired rather than silently absent.
+  const now = options.now ?? new Date();
+  if (purgeRevoked(session.state, 'report', report.report_id)
+    || isPastRetention(session.state, report.workspace_id, 'report', report.generated_at, now)) {
+    throw new ReportAccessFailure(
+      'RETENTION_EXPIRED',
+      retentionExpiredMessage(
+        session.state,
+        report.workspace_id,
+        'report',
+        report.generated_at,
+        now,
+        `Report ${report.report_id}`,
+      ),
+    );
   }
   // A candidate Report is review evidence until an administrator approves its
   // Template and Report together; ordinary retrieval never exposes it early.
@@ -1361,7 +1390,6 @@ export function readReportForReader(options: {
     throw new ReportAccessFailure('REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
   }
   const { scope, serving } = current;
-  const now = options.now ?? new Date();
   const ageMinutes = reportAgeMinutes(report, now);
   const fresh = report.withdrawn_at === null
     && report.data_product.data_product_release === serving.release.release
@@ -1432,6 +1460,8 @@ export function listReportsForReader(options: {
       const ownerTemplate = findReportTemplate(session.state.report_templates, report.template.report_template_id);
       if (ownerTemplate === undefined || ownerTemplate.published_version !== report.template.version) return [];
       if (report.withdrawn_at !== null && !includeWithdrawn) return [];
+      if (purgeRevoked(session.state, 'report', report.report_id)
+        || isPastRetention(session.state, report.workspace_id, 'report', report.generated_at, now)) return [];
       const current = reportScopeFor(session, reader, report);
       if (current === null) return [];
       const { scope, serving } = current;
@@ -1490,6 +1520,21 @@ export function showReport(options: {
   };
   const actor = resolveActor(session, options.token, context);
   const report = findReport(session.state.reports, options.reportId);
+  if (!report) {
+    if (purgeRevoked(session.state, 'report', options.reportId)) {
+      const ledger = session.state.purge_ledger.find((entry) => entry.purged.some(
+        (record) => record.record_kind === 'report' && record.record_id === options.reportId,
+      ));
+      deny(
+        session,
+        actorLabel(actor.user),
+        ledger?.scope.workspace_id == null ? context : { ...context, workspace_id: ledger.scope.workspace_id },
+        'RETENTION_EXPIRED',
+        'This Report has expired under the retention policy and was purged.',
+      );
+    }
+    deny(session, actorLabel(actor.user), context, 'REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
+  }
   const role = report === undefined
     ? null
     : workspaceRoleOf(session.state, actor.user.user_id, report.workspace_id);

@@ -7,6 +7,7 @@ import {
   type ActionContext,
 } from './authz.js';
 import { isDeploymentAdministrator } from './platform.js';
+import { auditRetainedAfter } from './retention.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
 function administeredWorkspaces(session: PlatformSession, userId: string): Set<string> {
@@ -27,6 +28,8 @@ export function listAuditEvents(options: {
   masterKey: string;
   token: string;
   workspaceId?: string;
+  /** Reads the log as of one instant, so the audit retention window is inspectable. */
+  at?: string;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = {
@@ -36,6 +39,13 @@ export function listAuditEvents(options: {
   };
   const actor = resolveActor(session, options.token, context);
   const events = readAuditEvents(session.root);
+  const now = options.at === undefined ? new Date() : new Date(options.at);
+  if (!Number.isFinite(now.getTime())) {
+    deny(session, actorLabel(actor.user), context, 'AUDIT_READ_INVALID', 'The audit read instant must be an ISO 8601 instant.');
+  }
+  // Audit Events age out of the readable window under the audit retention
+  // clock while the append-only chain itself stays intact and verifiable.
+  const retainedAfter = auditRetainedAfter(session.state, now);
 
   let visible: AuditEvent[];
   if (isDeploymentAdministrator(actor.user)) {
@@ -50,6 +60,9 @@ export function listAuditEvents(options: {
         && administered.has(event.workspace_id)
         && (options.workspaceId === undefined || event.workspace_id === options.workspaceId),
     );
+  }
+  if (retainedAfter !== null) {
+    visible = visible.filter((event) => Date.parse(event.occurred_at) >= retainedAfter);
   }
 
   const integrity = verifyAuditChain(events)
@@ -93,11 +106,13 @@ export function showWorkspaceAudit(options: {
   const actor = resolveActor(session, options.token, context);
   requireWorkspaceAdministrator(session, actor, context, options.workspaceId);
   const events = readAuditEvents(session.root);
+  const retainedAfter = auditRetainedAfter(session.state, new Date());
   const visible = events
     .filter(
       (event) => event.scope === 'workspace'
         && event.workspace_id === options.workspaceId
-        && !DEPLOYMENT_ACTS.has(event.action),
+        && !DEPLOYMENT_ACTS.has(event.action)
+        && (retainedAfter === null || Date.parse(event.occurred_at) >= retainedAfter),
     )
     .sort((left, right) => right.sequence - left.sequence)
     .slice(0, WORKSPACE_AUDIT_LIMIT)
