@@ -36,6 +36,8 @@ interface Ready {
   connectionId: string;
   workspaceAdministratorToken: string;
   connectionVersion: number;
+  /** The instant the Source was created, which starts its first schedule interval. */
+  sourceCreatedAt: string;
   close(): Promise<void>;
 }
 
@@ -126,6 +128,7 @@ async function readySource(
     connectionId,
     connectionVersion: Number(connection.output.connection_version),
     workspaceAdministratorToken,
+    sourceCreatedAt: String(created.output.created_at),
     close: () => source.close(),
   };
 }
@@ -285,16 +288,19 @@ test('pagination completion, empty results, malformed responses, and non-progres
 
 test('scheduled and manual triggers queue Runs and never silently drop work', async () => {
   const source = await startHttpSource({ replies: [{ body: pageBody(DEVICES.slice(0, 1)) }] });
-  const { fixture, sourceId, workspaceAdministratorToken } = await readySource(source, {
+  const { fixture, sourceId, workspaceAdministratorToken, sourceCreatedAt } = await readySource(source, {
     everyMinutes: 60,
     size: 2,
   });
 
-  const first = command(fixture, ['acquisition', 'tick', '--at', '2026-11-04T08:00:00.000Z'], { token: workspaceAdministratorToken });
+  // The first interval starts when the Source was created, so the tick is
+  // derived from that recorded instant rather than a guessed one.
+  const firstAt = Date.parse(sourceCreatedAt);
+  const first = command(fixture, ['acquisition', 'tick', '--at', new Date(firstAt).toISOString()], { token: workspaceAdministratorToken });
   assert.equal(first.status, 0, first.stderr);
   assert.equal((first.output['enqueued'] as unknown[]).length, 1, 'a due schedule queues a Run');
 
-  const second = command(fixture, ['acquisition', 'tick', '--at', '2026-11-04T08:30:00.000Z'], { token: workspaceAdministratorToken });
+  const second = command(fixture, ['acquisition', 'tick', '--at', new Date(firstAt + 30 * 60_000).toISOString()], { token: workspaceAdministratorToken });
   assert.equal(second.status, 0, second.stderr);
   assert.equal((second.output['enqueued'] as unknown[]).length, 0, 'a queued Run is not duplicated');
 
