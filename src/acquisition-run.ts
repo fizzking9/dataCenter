@@ -17,6 +17,7 @@ import {
   type SourceAcquisitionVersion,
   type SourceRecord,
 } from './catalog.js';
+import { assertConnectivityEnabled, assertWorkersEnabled } from './backup.js';
 import {
   admitRun,
   enrolRun,
@@ -353,6 +354,9 @@ export async function workAcquisition(options: {
   sourceId: string;
   at?: string;
 }): Promise<Record<string, unknown>> {
+  // A restored Deployment keeps its workers closed until an Operator reopens
+  // them, so a disaster recovery never resumes background writes by itself.
+  assertWorkersEnabled(options.root);
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'acquisition_work', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
@@ -360,6 +364,9 @@ export async function workAcquisition(options: {
   const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
   const fail: Fail = (code, message, nextStep) => reject(session, actorLabel(actor.user), scoped, code, message, nextStep);
   requireConnectorSource(session, actorLabel(actor.user), scoped, source);
+  // Connectivity is judged before the Run is claimed, so a refused attempt
+  // leaves the queued Run exactly where it was rather than stranding it running.
+  assertConnectivityEnabled(options.root);
 
   const run = session.state.acquisition_runs.find(
     (candidate) => candidate.source_id === source.source_id && candidate.status === 'queued',
@@ -668,6 +675,7 @@ export function tickSchedules(options: {
   token: string;
   at?: string;
 }): Record<string, unknown> {
+  assertWorkersEnabled(options.root);
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'acquisition_schedule_tick', scope: 'deployment' };
   const actor = resolveActor(session, options.token, context);

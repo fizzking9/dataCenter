@@ -37,6 +37,16 @@ import {
   revokeOAuthClient,
 } from './agents.js';
 import { login, logout } from './auth.js';
+import {
+  createBackup,
+  createCheckpoint,
+  enableConnectivity,
+  enableWorkers,
+  listBackups,
+  restoreDeployment,
+  showBackup,
+  verifyBackupSet,
+} from './backup.js';
 import { issueOperatorEnrollment, revokeOperator, revokeOperatorEnrollment } from './operators.js';
 import { startConsoleServer } from './console-server.js';
 import {
@@ -127,7 +137,7 @@ const GROUPED_COMMANDS = new Set([
   'user', 'workspace', 'membership', 'ownership', 'context', 'audit',
   'source', 'connection', 'acquisition', 'acquisition-config', 'integration', 'dataset',
   'product', 'product-proposal', 'grant', 'export', 'console', 'agent', 'model', 'binding', 'proposal',
-  'scraper', 'report', 'retention',
+  'scraper', 'report', 'retention', 'backup',
 ]);
 const BOOLEAN_FLAGS = new Set([
   'admin-password-stdin', 'password-stdin', 'deployment-administrator', 'credential-stdin',
@@ -247,6 +257,69 @@ async function main(): Promise<void> {
       root: required(options, 'root'),
       ...(options.has('master-key') ? { masterKey: required(options, 'master-key') } : {}),
       operator: required(options, 'operator'),
+    }));
+    return;
+  }
+  if (command === 'backup' && subcommand === 'create') {
+    emit(createBackup({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      operator: required(options, 'operator'),
+      backupRoot: required(options, 'backup-root'),
+      ...(options.has('at') ? { at: required(options, 'at') } : {}),
+    }));
+    return;
+  }
+  if (command === 'backup' && subcommand === 'list') {
+    emit(listBackups({ backupRoot: required(options, 'backup-root') }));
+    return;
+  }
+  if (command === 'backup' && subcommand === 'show') {
+    emit(showBackup({
+      backupRoot: required(options, 'backup-root'),
+      backupId: required(options, 'backup'),
+    }));
+    return;
+  }
+  if (command === 'backup' && subcommand === 'verify') {
+    emit(verifyBackupSet({
+      backupRoot: required(options, 'backup-root'),
+      backupId: required(options, 'backup'),
+      masterKey: required(options, 'master-key'),
+      operator: required(options, 'operator'),
+    }));
+    return;
+  }
+  if (command === 'restore') {
+    emit(restoreDeployment({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      operator: required(options, 'operator'),
+      backupRoot: required(options, 'backup-root'),
+      backupId: required(options, 'backup'),
+    }));
+    return;
+  }
+  if (command === 'enable-workers') {
+    emit(enableWorkers({
+      root: required(options, 'root'),
+      operator: required(options, 'operator'),
+    }));
+    return;
+  }
+  if (command === 'enable-connectivity') {
+    emit(enableConnectivity({
+      root: required(options, 'root'),
+      operator: required(options, 'operator'),
+    }));
+    return;
+  }
+  if (command === 'checkpoint') {
+    emit(createCheckpoint({
+      root: required(options, 'root'),
+      operator: required(options, 'operator'),
+      ...(options.has('at') ? { at: required(options, 'at') } : {}),
+      ...(options.has('backup-root') ? { backupRoot: required(options, 'backup-root') } : {}),
     }));
     return;
   }

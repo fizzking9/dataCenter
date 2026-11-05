@@ -27,6 +27,7 @@ import {
   type SourceRecord,
   type SourceScraperServiceRecord,
 } from './catalog.js';
+import { assertConnectivityEnabled } from './backup.js';
 import { toCsv } from './csv.js';
 import { releaseDatasetFor } from './datasets.js';
 import { OperatorError } from './errors.js';
@@ -330,6 +331,9 @@ export async function runScraperService(options: {
   /** Run parameters a browser stated directly; the same resolver validates them. */
   parameters?: unknown;
 }): Promise<Record<string, unknown>> {
+  // A restored Deployment holds no external connectivity until an Operator
+  // explicitly enables it; a scrape is exactly such an outbound operation.
+  assertConnectivityEnabled(options.root);
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'scraper_run', scope: 'workspace' };
   const actor: Actor = resolveActor(session, options.token, context);
