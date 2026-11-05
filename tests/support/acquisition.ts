@@ -48,9 +48,14 @@ export interface ReadyOptions {
   pagination?: Record<string, unknown>;
   retry?: Record<string, unknown>;
   pacing?: Record<string, unknown>;
+  schedule?: Record<string, unknown>;
+  publicationTargets?: Record<string, unknown>;
   completion?: Record<string, unknown>;
   window?: Record<string, unknown>;
   content_type?: string | null;
+  /** The endpoint path the Source reads and where its records sit in the response. */
+  path?: string;
+  recordPath?: string;
   integration?: Record<string, unknown>;
   adopt?: boolean;
 }
@@ -97,6 +102,8 @@ export function publishConnection(
     pagination?: Record<string, unknown>;
     retry?: Record<string, unknown>;
     pacing?: Record<string, unknown>;
+    schedule?: Record<string, unknown>;
+    publicationTargets?: Record<string, unknown>;
   },
 ): ConnectionReference {
   const credential = options.credential === undefined ? 'source-access-token' : options.credential;
@@ -118,6 +125,8 @@ export function publishConnection(
         },
         ...(options.retry === undefined ? {} : { retry: options.retry }),
         ...(options.pacing === undefined ? {} : { pacing: options.pacing }),
+        ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
+        ...(options.publicationTargets === undefined ? {} : { publication_targets: options.publicationTargets }),
       }),
       ...(credential === null ? [] : ['--credential-stdin']),
     ],
@@ -154,6 +163,8 @@ export async function readySource(
     ...(options.pagination === undefined ? {} : { pagination: options.pagination }),
     ...(options.retry === undefined ? {} : { retry: options.retry }),
     ...(options.pacing === undefined ? {} : { pacing: options.pacing }),
+    ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
+    ...(options.publicationTargets === undefined ? {} : { publicationTargets: options.publicationTargets }),
   });
 
   const acquisition = command(
@@ -161,8 +172,8 @@ export async function readySource(
     ['acquisition-config', 'publish', '--source', sourceId, '--config', jsonFile(fixture, `acquisition-${sourceId}`, {
       connection: connection.connectionId,
       connection_version: connection.connectionVersion,
-      path: '/api/devices',
-      record_path: 'data.records',
+      path: options.path ?? '/api/devices',
+      record_path: options.recordPath ?? 'data.records',
       completion: options.completion ?? { kind: 'short_page' },
       ...(options.window === undefined ? {} : { window: options.window }),
       ...(options.content_type === undefined ? {} : { content_type: options.content_type }),

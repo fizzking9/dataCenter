@@ -123,6 +123,7 @@ export function uploadAcquisition(options: {
     attempts: 1,
     status: 'complete',
     queued_at: now,
+    scheduled_for: null,
     started_at: now,
     completed_at: now,
     raw_acquisition_ids: [rawId],
