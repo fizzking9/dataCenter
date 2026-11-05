@@ -4,6 +4,7 @@ import { daysUntil, formatInstant } from '../format.js';
 import { optional, t } from '../i18n/zh-CN.js';
 import { Alert, DefinitionList, Panel, StatusPill, type DefinitionRow } from '../ui/Panel.js';
 import { Button } from '../ui/Button.js';
+import { RecoverySection } from './ConsoleRecoveryScreen.js';
 
 export interface ConsoleScreenProps {
   onSessionLost: () => void;
@@ -121,6 +122,8 @@ export function ConsoleScreen({ onSessionLost }: ConsoleScreenProps) {
           {t('console.empty')}
         </p>
       )}
+
+      <RecoverySection onSessionLost={onSessionLost} />
     </div>
   );
 }

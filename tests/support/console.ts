@@ -25,21 +25,31 @@ const BROWSER_REFUSED_PORTS = new Set([
 ]);
 
 /** Starts the browser application on an address a Chromium browser will accept. */
-export async function startConsole(fixture: PlatformFixture): Promise<ConsoleHandle> {
+export async function startConsole(
+  fixture: PlatformFixture,
+  options: { backupRoot?: string; restoreRoot?: string } = {},
+): Promise<ConsoleHandle> {
   // A refused port is rare but not impossible, so the server is restarted on a
   // fresh assignment instead of handing the browser a URL it can never open.
   for (let attempt = 1; attempt < 8; attempt += 1) {
-    const handle = await startConsoleOnce(fixture);
+    const handle = await startConsoleOnce(fixture, options);
     if (!BROWSER_REFUSED_PORTS.has(handle.port)) return handle;
     await handle.stop();
   }
   throw new Error('the console never obtained a port a Chromium browser accepts');
 }
 
-async function startConsoleOnce(fixture: PlatformFixture): Promise<ConsoleHandle> {
+async function startConsoleOnce(
+  fixture: PlatformFixture,
+  options: { backupRoot?: string; restoreRoot?: string },
+): Promise<ConsoleHandle> {
+  const recovery = [
+    ...(options.backupRoot === undefined ? [] : ['--backup-root', options.backupRoot]),
+    ...(options.restoreRoot === undefined ? [] : ['--restore-root', options.restoreRoot]),
+  ];
   const child = spawn(
     process.execPath,
-    [cliPath, 'console', 'serve', '--root', fixture.root, '--master-key', fixture.masterKey, '--port', '0'],
+    [cliPath, 'console', 'serve', '--root', fixture.root, '--master-key', fixture.masterKey, '--port', '0', ...recovery],
     { env: { ...process.env, ...fixture.docker }, stdio: ['ignore', 'pipe', 'pipe'] },
   );
   const listening = await waitForListening(child);
