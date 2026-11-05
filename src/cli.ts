@@ -40,6 +40,14 @@ import { activateModelProfile, evaluateModelProfile, publishModelProfile, showMo
 import { importLicense, readLicenseSummary } from './license.js';
 import { askDataProduct, askWorkspaceQuery } from './natural-language-query.js';
 import { queryDataProduct } from './product-query.js';
+import {
+  generateTemplateReport,
+  listReportTemplates,
+  listReports,
+  publishReportTemplate,
+  showReport,
+  showReportTemplate,
+} from './reports.js';
 import { listDataProductReleases, listDataProducts, publishDataProduct, withdrawDataProductVersion } from './products.js';
 import {
   adoptProposal,
@@ -85,7 +93,7 @@ const GROUPED_COMMANDS = new Set([
   'user', 'workspace', 'membership', 'ownership', 'context', 'audit',
   'source', 'connection', 'acquisition', 'acquisition-config', 'integration', 'dataset',
   'product', 'product-proposal', 'grant', 'export', 'console', 'agent', 'model', 'binding', 'proposal',
-  'scraper',
+  'scraper', 'report',
 ]);
 const BOOLEAN_FLAGS = new Set([
   'admin-password-stdin', 'password-stdin', 'deployment-administrator', 'credential-stdin',
@@ -150,6 +158,17 @@ function list(value: string): string[] {
 
 function readStdin(): string {
   return readFileSync(0, 'utf8').replace(/[\r\n]+$/, '');
+}
+
+/** Reads an optional ISO 8601 instant, so freshness can be evaluated at a stated time. */
+function instant(options: Map<string, string>, name: string): Date | undefined {
+  const raw = options.get(name);
+  if (raw === undefined) return undefined;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`--${name} must be an ISO 8601 instant.`);
+  }
+  return parsed;
 }
 
 function emit(result: unknown): void {
@@ -501,10 +520,60 @@ async function main(): Promise<void> {
       ...(options.has('clarification') ? { clarification: required(options, 'clarification') } : {}),
       ...(options.has('binding') ? { bindingId: required(options, 'binding') } : {}),
       ...(options.has('conversation') ? { conversation: required(options, 'conversation') } : {}),
+      ...(options.has('at') ? { now: required(options, 'at') } : {}),
     };
     emit(dataProductId !== undefined
       ? await askDataProduct({ ...shared, dataProductId })
       : await askWorkspaceQuery({ ...shared, workspaceId: required(options, 'workspace') }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'template-publish') {
+    emit(publishReportTemplate({
+      ...governed(options),
+      workspaceId: required(options, 'workspace'),
+      productId: required(options, 'product'),
+      name: required(options, 'name'),
+      configPath: required(options, 'config'),
+    }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'template-show') {
+    emit(showReportTemplate({
+      ...governed(options),
+      reportTemplateId: required(options, 'template'),
+      ...(options.has('version') ? { version: Number(required(options, 'version')) } : {}),
+    }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'template-list') {
+    emit(listReportTemplates({ ...governed(options), workspaceId: required(options, 'workspace') }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'generate') {
+    const at = instant(options, 'at');
+    emit(await generateTemplateReport({
+      ...governed(options),
+      reportTemplateId: required(options, 'template'),
+      ...(at === undefined ? {} : { now: at }),
+    }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'show') {
+    const at = instant(options, 'at');
+    emit(showReport({
+      ...governed(options),
+      reportId: required(options, 'report'),
+      ...(at === undefined ? {} : { now: at }),
+    }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'list') {
+    const at = instant(options, 'at');
+    emit(listReports({
+      ...governed(options),
+      workspaceId: required(options, 'workspace'),
+      ...(at === undefined ? {} : { now: at }),
+    }));
     return;
   }
   if (command === 'grant' && subcommand === 'publish') {

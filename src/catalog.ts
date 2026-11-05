@@ -844,6 +844,145 @@ export function activeAgentGrants(
 }
 
 // ---------------------------------------------------------------------------
+// Reports and QA stock: Report Templates and immutable stocked Reports.
+// ---------------------------------------------------------------------------
+
+/** The typed values one Report Template parameter may pin. */
+export type ReportParameterType = 'date_window' | 'date' | 'integer' | 'string';
+
+/** The bounded window a `date_window` parameter pins. */
+export interface ReportDateWindow {
+  start: string;
+  end: string;
+}
+
+/** One typed parameter a Report Template pins, and the value this Version fixes. */
+export interface ReportParameter {
+  name: string;
+  type: ReportParameterType;
+  value: string | number | ReportDateWindow;
+}
+
+/** How old a stocked Report may be before it must be regenerated. */
+export interface ReportFreshnessPolicy {
+  max_age_minutes: number;
+}
+
+/** The grounded-answer prompt an exact Template Version pins for Report prose. */
+export interface ReportGroundedPrompt {
+  id: 'grounded_answer';
+  body: string;
+  hash: string;
+}
+
+/**
+ * One immutable Report Template Version: the normalized question semantics, the
+ * typed parameters, the normalized Data Product Query, the grounded-answer
+ * prompt, and the freshness policy that every Report generated from it pins.
+ */
+export interface ReportTemplateVersion {
+  version: number;
+  published_at: string;
+  published_by: string;
+  question: string;
+  normalized_question: string;
+  /** The deterministic Chinese description of the pinned query semantics. */
+  interpretation: string;
+  parameters: ReportParameter[];
+  data_product_id: string;
+  /** The Contract line this Version pins its semantics to. */
+  contract_major: number;
+  /** The normalized Data Product Query, including its pinned major line and limit. */
+  request: Record<string, unknown>;
+  grounded_prompt: ReportGroundedPrompt;
+  freshness_policy: ReportFreshnessPolicy;
+  content_hash: string;
+}
+
+/** A Workspace Artifact holding the Template Versions and the published one. */
+export interface ReportTemplateArtifact {
+  report_template_id: string;
+  workspace_id: string;
+  name: string;
+  owner_user_id: string;
+  created_at: string;
+  published_version: number | null;
+  versions: ReportTemplateVersion[];
+}
+
+/** The exact Template a Report was generated from. */
+export interface ReportTemplateReference {
+  report_template_id: string;
+  name: string;
+  version: number;
+  content_hash: string;
+  owner_user_id: string;
+}
+
+/** The exact Data Product Releases a Report pins. */
+export interface ReportProductReference {
+  data_product_id: string;
+  name: string;
+  api_path: string;
+  data_product_version: number;
+  data_product_release: number;
+  dataset_release: number;
+  contract_version: DataProductContractVersion;
+  contract_hash: string;
+}
+
+/** The authorization scope a Report was generated under, and is reauthorized against. */
+export interface ReportSecurityContext {
+  scope_fingerprint: string;
+  restricted: boolean;
+  columns: string[];
+  row_filter_count: number;
+}
+
+/** How complete the governed answer a Report stores really is. */
+export interface ReportCompletion {
+  status: 'complete' | 'incomplete';
+  outcome: 'answered' | 'empty' | 'no_evidence';
+  partial_period: boolean;
+  truncated: boolean;
+  limitations: string[];
+}
+
+/** The optional grounded narrative a Report stores beside its structured result. */
+export interface ReportNarrative {
+  narrative: string;
+  evidence_refs: Array<Record<string, unknown>>;
+  grounded_answer_prompt_hash: string;
+  prompt_hash: string;
+  model: Record<string, unknown>;
+}
+
+/**
+ * One immutable stored answer generated from an exact Report Template Version
+ * and exact Data Product Releases. Retrieving it never regenerates its content.
+ */
+export interface ReportRecord {
+  report_id: string;
+  workspace_id: string;
+  template: ReportTemplateReference;
+  data_product: ReportProductReference;
+  question: string;
+  normalized_question: string;
+  parameters: ReportParameter[];
+  interpretation: string;
+  query: Record<string, unknown>;
+  result: Record<string, unknown>;
+  narrative: ReportNarrative | null;
+  provenance: Record<string, unknown>;
+  freshness: Record<string, unknown> | null;
+  completion: ReportCompletion;
+  security: ReportSecurityContext;
+  freshness_policy: ReportFreshnessPolicy;
+  generated_at: string;
+  generated_by: string;
+}
+
+// ---------------------------------------------------------------------------
 // Governed generation: Model Profiles, Workspace Model Bindings, and Proposals.
 // ---------------------------------------------------------------------------
 
@@ -1864,4 +2003,28 @@ export function findScraperDiagnostics(
   diagnosticsId: string,
 ): ScraperDiagnosticsRecord | undefined {
   return records.find((record) => record.diagnostics_id === diagnosticsId);
+}
+
+export function findReportTemplate(
+  templates: ReportTemplateArtifact[],
+  reportTemplateId: string,
+): ReportTemplateArtifact | undefined {
+  return templates.find((template) => template.report_template_id === reportTemplateId);
+}
+
+export function latestReportTemplateVersion(
+  template: ReportTemplateArtifact | undefined,
+): ReportTemplateVersion | undefined {
+  return template?.versions[template.versions.length - 1];
+}
+
+export function findReportTemplateVersion(
+  template: ReportTemplateArtifact | undefined,
+  version: number,
+): ReportTemplateVersion | undefined {
+  return template?.versions.find((candidate) => candidate.version === version);
+}
+
+export function findReport(reports: ReportRecord[], reportId: string): ReportRecord | undefined {
+  return reports.find((report) => report.report_id === reportId);
 }

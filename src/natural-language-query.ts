@@ -12,10 +12,19 @@ import {
   type DataProductVersion,
   type ModelProfileArtifact,
   type ModelProfileVersion,
+  type ReportRecord,
   type WorkspaceModelBindingRecord,
 } from './catalog.js';
 import { isRecord } from './documents.js';
 import { OperatorError } from './errors.js';
+import {
+  classifyResult,
+  freshnessOf,
+  groupLabel,
+  narrationFacts,
+  narrativeViolation,
+  type NarratablePart,
+} from './governed-result.js';
 import { memberReader, type GrantReader, type GrantScope } from './grants.js';
 import { pinnedForBinding } from './model-profile.js';
 import {
@@ -35,6 +44,13 @@ import {
 import { workspaceRoleOf } from './platform.js';
 import { executeDataProductQuery } from './product-query.js';
 import { contractView, productIdentity, requireReadableProduct } from './products.js';
+import {
+  authorizationView,
+  reportView,
+  reuseReport,
+  scopeAuthorization,
+  type ReportReuse,
+} from './reports.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
 /** The distinct structured outcomes one Natural-Language Query turn may report. */
@@ -46,9 +62,6 @@ export type NaturalLanguageOutcome =
   | 'unavailable'
   | 'refused'
   | 'partial';
-
-/** The outcome one independent part of a compound question may report. */
-type PartOutcome = Exclude<NaturalLanguageOutcome, 'clarification' | 'partial'>;
 
 /** One governed default the platform applied and therefore has to disclose. */
 interface AppliedDefault {
@@ -89,6 +102,8 @@ interface PartTarget {
   product: DataProductArtifact;
   version: DataProductVersion;
   release: DataProductRelease;
+  /** The exact authorization this part reads under, disclosed with the answer. */
+  scope: GrantScope;
   /** The Contract exactly as this reader may see it. */
   authorized: Record<string, unknown>;
   identity: Record<string, unknown>;
@@ -110,10 +125,6 @@ interface PlannedPart {
 const ALL_TIME = /全部|所有|累计|历史|至今|总体|不限时间/u;
 const ALL_METRICS = /全部指标|所有指标|各指标|各项指标/u;
 const GROUPING = /各|按|每个|分别|分组/u;
-const CAUSAL = /因为|由于|导致|造成|引发|因此|所以|从而|使得|because|due to|caused|led to|therefore|as a result/iu;
-/** A narrative may not assert a relationship between governed facts, or across products. */
-const RELATIONAL = /关联|相关|成正比|反比|同步|联动|互为|彼此影响|互相影响|互相带动|存在关系|存在关联|correlat|relationship/iu;
-const NUMBERS = /\d+(?:\.\d+)?/gu;
 const PLAN_QUERY_KEYS = [
   'kind', 'filters', 'metric_filters', 'group_by', 'metrics', 'sort',
   'window', 'comparison', 'include_totals', 'limit', 'q',
@@ -132,10 +143,6 @@ function objectOrNull(value: unknown): Record<string, unknown> | null {
 
 function arrayOf(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
-}
-
-function normalizedNumbers(text: string): string[] {
-  return [...text.matchAll(NUMBERS)].map((match) => String(Number(match[0])));
 }
 
 /**
@@ -428,147 +435,6 @@ function compileQuery(
   return { request, defaults };
 }
 
-/** Classifies one executed result into a distinct structured outcome. */
-function classify(result: Record<string, unknown>): PartOutcome {
-  const kind = result['kind'];
-  if (kind === 'aggregate') {
-    const groups = arrayOf(result['groups']).filter(isRecord);
-    const groupTotal = Number(result['groups_total'] ?? groups.length);
-    if (groupTotal === 0) return 'empty';
-    const hasGroupValue = groups.some((group) => {
-      const metrics = objectOrNull(group['metrics']);
-      return metrics !== null && Object.values(metrics).some((value) => value !== null && value !== undefined);
-    });
-    if (hasGroupValue) return 'answered';
-    const totals = objectOrNull(result['totals']);
-    const totalsMetrics = totals === null ? null : objectOrNull(totals['metrics']);
-    const hasTotalValue = totalsMetrics !== null
-      && Object.values(totalsMetrics).some((value) => value !== null && value !== undefined);
-    return hasTotalValue ? 'answered' : 'no_evidence';
-  }
-  if (kind === 'search') {
-    return Number(result['matched_count'] ?? 0) === 0 ? 'empty' : 'answered';
-  }
-  if (kind === 'suggest') {
-    return arrayOf(result['suggestions']).length === 0 ? 'empty' : 'answered';
-  }
-  return Number(result['returned'] ?? 0) === 0 ? 'empty' : 'answered';
-}
-
-function groupLabel(group: Record<string, unknown>): string {
-  const dimensions = objectOrNull(group['group']);
-  if (dimensions === null) return '所选分组';
-  const values = Object.values(dimensions).map((value) => (value === null ? '未分类' : String(value)));
-  return values.length === 0 ? '所选分组' : values.join(' / ');
-}
-
-/** One part whose result the narrative may cite, and the Product it is cited under. */
-interface NarratablePart {
-  name: string;
-  result: Record<string, unknown>;
-  release: Record<string, unknown>;
-}
-
-/** Reads one governed metric value as a number the narrative may cite, if it is numeric. */
-function numericFact(value: unknown): number | null {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  // A monetary or decimal metric is a JSON string, so its arithmetic value is
-  // what the narrative may restate; the governed rendering stays in the result.
-  if (typeof value === 'string' && /^-?\d+(?:\.\d+)?$/u.test(value)) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-/**
- * The evidence the narrative is allowed to state: only numbers the deterministic
- * engine computed for the parts that actually answered, laid out as records so
- * the shared grounding check applies. No cross-product number is computed here.
- */
-function narrationFacts(
-  parts: NarratablePart[],
-  question: string,
-): {
-  question: string;
-  records: Array<Record<string, unknown>>;
-  filters: unknown[];
-  windows: unknown[];
-  comparison_windows: unknown[];
-  partial_period: boolean;
-  parts: Array<Record<string, unknown>>;
-} {
-  const records: Array<Record<string, unknown>> = [];
-  const filters: unknown[] = [];
-  const windows: unknown[] = [];
-  const comparisonWindows: unknown[] = [];
-  let partial = false;
-  const named = parts.length > 1;
-  for (const part of parts) {
-    const result = part.result;
-    const metrics = arrayOf(result['metrics']).filter(isRecord);
-    const groups = arrayOf(result['groups']).filter(isRecord);
-    for (const group of groups) {
-      const values = objectOrNull(group['metrics']) ?? {};
-      const groupName = groupLabel(group);
-      for (const metric of metrics) {
-        const name = metric['name'];
-        const value = typeof name === 'string' ? numericFact(values[name]) : null;
-        if (value !== null) {
-          records.push({
-            label: named ? `${part.name} ${groupName}` : groupName,
-            value,
-            metric: name,
-            group: groupName,
-            ...(named ? { product: part.name } : {}),
-          });
-        }
-      }
-    }
-    if (groups.length === 0) {
-      const totals = objectOrNull(result['totals']);
-      const totalsMetrics = totals === null ? null : objectOrNull(totals['metrics']);
-      for (const metric of metrics) {
-        const name = metric['name'];
-        const value = typeof name === 'string' && totalsMetrics !== null ? numericFact(totalsMetrics[name]) : null;
-        if (value !== null) {
-          records.push({
-            label: named ? `${part.name} 合计 ${String(name)}` : `合计 ${String(name)}`,
-            value,
-            metric: name,
-            group: '合计',
-            ...(named ? { product: part.name } : {}),
-          });
-        }
-      }
-    }
-    filters.push(...arrayOf(result['query']));
-    windows.push(result['window'] ?? null);
-    comparisonWindows.push(result['comparison_window'] ?? null);
-    if (objectOrNull(result['window'])?.['partial'] === true) partial = true;
-  }
-  return {
-    question,
-    records,
-    filters,
-    windows,
-    comparison_windows: comparisonWindows,
-    partial_period: partial,
-    parts: parts.map((part) => ({ ...part.release })),
-  };
-}
-
-/** A narrative may state no cause, no invented relationship, and no ungoverned number. */
-function narrativeViolation(narrative: string, facts: unknown): string | null {
-  if (CAUSAL.test(narrative)) return 'NARRATIVE_CAUSAL_CLAIM';
-  if (RELATIONAL.test(narrative)) return 'NARRATIVE_INVENTED_RELATIONSHIP';
-  const governed = new Set(normalizedNumbers(JSON.stringify(facts)));
-  for (const token of normalizedNumbers(narrative)) {
-    if (!governed.has(token)) return 'NARRATIVE_NUMBER_NOT_GOVERNED';
-  }
-  return null;
-}
-
 function summaryOf(
   outcome: NaturalLanguageOutcome,
   result: Record<string, unknown> | null,
@@ -621,17 +487,6 @@ function multiSummary(
   if (outcome === 'empty') return '查询已执行，但所选业务范围内没有记录。';
   if (outcome === 'no_evidence') return '查询已执行，但所选业务范围内没有可引用的数值证据。';
   return '查询已执行。';
-}
-
-function freshnessOf(provenance: Record<string, unknown> | null, window: Record<string, unknown> | null): Record<string, unknown> | null {
-  if (provenance === null) return null;
-  const coverage = window === null ? null : objectOrNull(window['coverage']);
-  return {
-    acquired_at: provenance['acquired_at'] ?? null,
-    integrated_at: provenance['integrated_at'] ?? null,
-    released_at: provenance['released_at'] ?? null,
-    data_through: coverage === null ? null : coverage['end'] ?? null,
-  };
 }
 
 function engineLimitation(code: string): string {
@@ -733,7 +588,7 @@ function executedPart(options: {
   result: Record<string, unknown>;
 }): Record<string, unknown> {
   const { target, result } = options;
-  const outcome = classify(result);
+  const outcome = classifyResult(result);
   const window = objectOrNull(result['window']);
   const comparisonWindow = objectOrNull(result['comparison_window']);
   const partial = window?.['partial'] === true;
@@ -846,6 +701,13 @@ function baseResponse(question: string, workspaceId: string): Record<string, unk
     question,
     normalized_question: question,
     follow_up: false,
+    /** Whether this turn generated its answer or reused a stocked Report. */
+    origin: 'generated' as 'stock' | 'generated',
+    stock: null as Record<string, unknown> | null,
+    refresh: null as Record<string, unknown> | null,
+    report: null as Record<string, unknown> | null,
+    template: null as Record<string, unknown> | null,
+    authorization: null as Record<string, unknown> | null,
     reason_code: null,
     executed: false,
     summary: '当前无法完成该自然语言查询，平台未执行查询。',
@@ -869,6 +731,144 @@ function baseResponse(question: string, workspaceId: string): Record<string, unk
     freshness: null,
     conversation: null as string | null,
   };
+}
+
+/** The structured reason code one stocked or freshly generated Report reports. */
+function reportReasonCode(report: ReportRecord): string | null {
+  if (report.completion.status === 'incomplete') return 'REPORT_INCOMPLETE';
+  if (report.completion.outcome === 'empty') return 'REPORT_EMPTY_RESULT';
+  if (report.completion.outcome === 'no_evidence') return 'REPORT_NO_EVIDENCE';
+  return null;
+}
+
+/**
+ * Shapes one turn answered from a Template. A stock answer discloses that no
+ * query ran and no model was called; a generated answer discloses that a new
+ * Report was stored. Both disclose the exact Template, Releases, Provenance,
+ * freshness, completion status, and current effective authorization.
+ */
+function reportTurnResponse(
+  response: Record<string, unknown>,
+  reuse: Exclude<ReportReuse, { kind: 'none' }>,
+  authorization: Record<string, unknown>,
+  conversation: string,
+): Record<string, unknown> {
+  const report = reuse.report;
+  const result = report.result;
+  const window = objectOrNull(result['window']);
+  const comparisonWindow = objectOrNull(result['comparison_window']);
+  const partial = report.completion.partial_period;
+  const executed = reuse.kind === 'generated';
+  const metrics = arrayOf(result['metrics'])
+    .filter(isRecord)
+    .map((metric) => metric['name'])
+    .filter((name): name is string => typeof name === 'string');
+  const reasonCode = reportReasonCode(report);
+  const dataProduct = { ...report.data_product, contract_version: { ...report.data_product.contract_version } };
+  const part = {
+    name: report.data_product.name,
+    data_product: dataProduct,
+    status: report.completion.outcome,
+    outcome: report.completion.outcome,
+    executed,
+    reason_code: reasonCode,
+    interpretation: report.interpretation,
+    query: { ...report.query },
+    resolved: {
+      interpretation: report.interpretation,
+      metrics,
+      dimensions: stringsOf(result['grouped_by']),
+      filters: arrayOf(report.query['filters']).map((filter) => (isRecord(filter) ? { ...filter } : filter)),
+      window,
+      comparison_window: comparisonWindow,
+      partial_period: partial,
+      defaults_applied: [] as AppliedDefault[],
+    },
+    result,
+    window,
+    comparison_window: comparisonWindow,
+    partial_period: partial,
+    defaults_applied: [] as AppliedDefault[],
+    provenance: report.provenance,
+    freshness: report.freshness,
+    evidence: {
+      query: { ...report.query },
+      provenance: report.provenance,
+      release: dataProduct,
+      template: { ...report.template },
+    },
+    limitations: [...report.completion.limitations],
+  };
+  const limitations = [...report.completion.limitations];
+  if (report.completion.status === 'incomplete') {
+    limitations.push('报告为不完整结果，请结合限制说明阅读。');
+  }
+  const summary = reuse.kind === 'stock'
+    ? `本次回答直接复用已入库的报告（模板第 ${report.template.version} 版），未重新执行查询，也未调用模型。`
+    : reuse.superseded === null
+      ? `平台已按模板第 ${report.template.version} 版生成新的报告。`
+      : `原报告已过期或不再满足当前发布与授权，平台已按模板第 ${report.template.version} 版生成新的报告。`;
+  if (reuse.kind === 'stock') {
+    limitations.push('该报告仍处于模板允许的有效期内，已直接复用。');
+  }
+  Object.assign(response, {
+    outcome: report.completion.outcome,
+    status: report.completion.status,
+    origin: reuse.kind,
+    stock: reuse.kind === 'stock'
+      ? {
+        report_id: report.report_id,
+        reused: true,
+        generated_at: report.generated_at,
+        age_minutes: Math.round(reuse.ageMinutes * 1000) / 1000,
+        max_age_minutes: report.freshness_policy.max_age_minutes,
+      }
+      : null,
+    refresh: reuse.kind === 'generated'
+      ? {
+        reason: reuse.superseded === null ? 'initial' : 'stale',
+        superseded_report_id: reuse.superseded === null ? null : reuse.superseded.report_id,
+      }
+      : null,
+    executed,
+    reason_code: reasonCode,
+    summary,
+    limitations,
+    data_product: dataProduct,
+    interpretation: report.interpretation,
+    resolved: part.resolved,
+    query: { ...report.query },
+    result,
+    answer: report.narrative === null
+      ? null
+      : {
+        narrative: report.narrative.narrative,
+        evidence_refs: report.narrative.evidence_refs.map((entry) => ({ ...entry })),
+        model: { ...report.narrative.model },
+      },
+    window,
+    comparison_window: comparisonWindow,
+    partial_period: partial,
+    defaults_applied: [] as AppliedDefault[],
+    provenance: report.provenance,
+    freshness: report.freshness,
+    parts: [part],
+    as_of: [{
+      name: report.data_product.name,
+      data_product_id: report.data_product.data_product_id,
+      data_product_release: report.data_product.data_product_release,
+      executed,
+      released_at: report.freshness === null ? null : report.freshness['released_at'] ?? null,
+      data_through: report.freshness === null ? null : report.freshness['data_through'] ?? null,
+    }],
+    report: reportView(report),
+    template: { ...report.template },
+    authorization,
+    binding: null,
+    model: null,
+    conversation,
+  });
+  return response;
 }
 
 /** The Data Products one Workspace turn may query, in a stable order. */
@@ -912,6 +912,7 @@ function targetFor(
     product,
     version,
     release,
+    scope,
     authorized: authorizedContract(version.contract, scope),
     identity: productIdentity(product, version, release),
   };
@@ -926,6 +927,8 @@ interface TurnOptions {
   clarification?: string;
   bindingId?: string;
   conversation?: string;
+  /** The instant freshness is evaluated at; absent reads the current clock. */
+  now?: string;
   /** The one Product a single-product turn reads, or nothing for a Workspace turn. */
   dataProductId?: string;
   workspaceId?: string;
@@ -957,6 +960,10 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
   if (question.length === 0) {
     reject(session, actorLabel(actor.user), entry, 'NLQ_QUESTION_REQUIRED', 'A Natural-Language Query must state a question.');
   }
+  const now = options.now === undefined ? new Date() : new Date(options.now);
+  if (Number.isNaN(now.getTime())) {
+    reject(session, actorLabel(actor.user), entry, 'NLQ_AT_INVALID', 'A Natural-Language Query freshness instant must be an ISO 8601 instant.');
+  }
 
   const requestedProduct = options.dataProductId === undefined
     ? null
@@ -979,6 +986,7 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
     ...(requestedProduct === null ? {} : { target: requestedProduct.data_product_id }),
   };
   const response = baseResponse(question, workspaceId);
+  response['authorization'] = authorizationView(workspaceId, role, []);
 
   let prior: ConversationPayload = { workspaceId, userId: actor.user.user_id, questions: [], productIds: [] };
   if (options.conversation !== undefined) {
@@ -1011,6 +1019,46 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
   }
   response['data_product'] = identity;
 
+  // Stock reuse is attempted before any Data Product Query or model call. Only
+  // an exact normalized question that names a published Template Version can
+  // match; a matched Template whose Report is absent, stale, pinned to an older
+  // Release, or generated under another authorization produces a fresh Report
+  // under exactly this reader. A Template that cannot produce one falls through
+  // to the settled Natural-Language Query path below.
+  if (options.clarification === undefined) {
+    const reuse = await reuseReport({
+      session,
+      actor,
+      reader,
+      workspaceId,
+      role,
+      question,
+      now,
+      ...(requestedProduct === null ? {} : { dataProductId: requestedProduct.data_product_id }),
+    });
+    if (reuse.kind !== 'none') {
+      const conversation = encodeConversation(session.dataKey, {
+        workspaceId,
+        userId: actor.user.user_id,
+        questions: [...prior.questions, question],
+        productIds: [reuse.report.data_product.data_product_id],
+      });
+      return finishTurn(
+        session,
+        scoped,
+        reader,
+        reportTurnResponse(
+          response,
+          reuse,
+          authorizationView(workspaceId, role, [reuse.authorization]),
+          conversation,
+        ),
+        question,
+        prior,
+      );
+    }
+  }
+
   let targets: PartTarget[];
   if (requestedProduct !== null) {
     const version = latestDataProductVersion(requestedProduct);
@@ -1037,6 +1085,7 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
       product: requestedProduct,
       version,
       release,
+      scope,
       authorized: authorizedContract(version.contract, scope),
       identity: productIdentity(requestedProduct, version, release),
     }];
@@ -1050,6 +1099,11 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
     }
   }
   const byHandle = new Map(targets.map((target) => [target.handle, target]));
+  response['authorization'] = authorizationView(
+    workspaceId,
+    role,
+    targets.map((target) => scopeAuthorization(target.product.data_product_id, target.scope)),
+  );
 
   const model = resolveModel(session, workspaceId, options.bindingId);
   if (model === null) {
@@ -1449,6 +1503,8 @@ function finishTurn(
   const outcome = response['outcome'] as NaturalLanguageOutcome;
   const binding = objectOrNull(response['binding']);
   const model = objectOrNull(response['model']);
+  const template = objectOrNull(response['template']);
+  const report = objectOrNull(response['report']);
   session.audit({
     ...scoped,
     actor: reader.label,
@@ -1456,12 +1512,22 @@ function finishTurn(
     detail: {
       nlq_outcome: outcome,
       nlq_status: String(response['status'] ?? 'incomplete'),
+      nlq_origin: String(response['origin'] ?? 'generated'),
       executed: response['executed'] === true,
       parts: arrayOf(response['parts']).length,
       parts_executed: arrayOf(response['parts']).filter((part) => isRecord(part) && part['executed'] === true).length,
       follow_up: prior.questions.length > 0,
       normalized_question: question,
       reason_code: String(response['reason_code'] ?? 'none'),
+      ...(report === null || typeof report['report_id'] !== 'string'
+        ? {}
+        : { report_id: report['report_id'] }),
+      ...(template === null || typeof template['report_template_id'] !== 'string'
+        ? {}
+        : { report_template_id: template['report_template_id'] }),
+      ...(template === null || typeof template['version'] !== 'number'
+        ? {}
+        : { report_template_version: template['version'] }),
       ...(binding === null || typeof binding['binding_id'] !== 'string'
         ? {}
         : { binding_id: binding['binding_id'] }),
@@ -1487,6 +1553,7 @@ export async function askDataProduct(options: {
   clarification?: string;
   bindingId?: string;
   conversation?: string;
+  now?: string;
 }): Promise<Record<string, unknown>> {
   return askNaturalLanguageQuery({
     root: options.root,
@@ -1497,6 +1564,7 @@ export async function askDataProduct(options: {
     ...(options.clarification === undefined ? {} : { clarification: options.clarification }),
     ...(options.bindingId === undefined ? {} : { bindingId: options.bindingId }),
     ...(options.conversation === undefined ? {} : { conversation: options.conversation }),
+    ...(options.now === undefined ? {} : { now: options.now }),
   });
 }
 
@@ -1514,6 +1582,7 @@ export async function askWorkspaceQuery(options: {
   clarification?: string;
   bindingId?: string;
   conversation?: string;
+  now?: string;
 }): Promise<Record<string, unknown>> {
   return askNaturalLanguageQuery({
     root: options.root,
@@ -1524,5 +1593,6 @@ export async function askWorkspaceQuery(options: {
     ...(options.clarification === undefined ? {} : { clarification: options.clarification }),
     ...(options.bindingId === undefined ? {} : { bindingId: options.bindingId }),
     ...(options.conversation === undefined ? {} : { conversation: options.conversation }),
+    ...(options.now === undefined ? {} : { now: options.now }),
   });
 }
