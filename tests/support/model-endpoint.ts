@@ -130,7 +130,102 @@ function outputFor(purpose: string, body: Record<string, unknown>, behaviour: Mo
   if (purpose === 'grounded_narration') return narration(body, behaviour);
   if (purpose === 'clarification') return clarification(body, behaviour);
   if (purpose === 'data_product_proposal') return productContract(body, behaviour);
+  if (purpose === 'scraper_repair') return repairedOutput(body, behaviour);
   return integrationConfiguration(body, behaviour);
+}
+
+/** One leaf element and the visible text it carries, in document order. */
+interface MockElement {
+  tag: string;
+  className: string | null;
+  text: string;
+}
+
+function elementsOf(html: string): MockElement[] {
+  const pattern = /<([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>([^<]*)<\/\1>/gu;
+  const elements: MockElement[] = [];
+  for (const match of html.matchAll(pattern)) {
+    const className = /class\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/iu.exec(match[2] ?? '');
+    elements.push({
+      tag: String(match[1]),
+      className: className === null ? null : (className[2] ?? className[3] ?? className[4] ?? '').trim(),
+      text: String(match[3]).trim(),
+    });
+  }
+  return elements;
+}
+
+/**
+ * The selector whose visible values answer one column's pinned records, or null
+ * when no element carries them. It reads only the fixtures it was given, which
+ * is exactly the isolation the repair generation promises.
+ */
+function selectorFor(html: string, expected: string[]): string | null {
+  const groups = new Map<string, string[]>();
+  for (const element of elementsOf(html)) {
+    if (element.className === null || element.className.length === 0) continue;
+    const selector = `${element.tag}.${element.className}`;
+    groups.set(selector, [...(groups.get(selector) ?? []), element.text]);
+  }
+  for (const [selector, values] of groups) {
+    if (values.length === expected.length && values.every((value, index) => value === expected[index])) {
+      return selector;
+    }
+  }
+  return null;
+}
+
+/** The record container around the first matched cell, as a selector. */
+function containerFor(html: string, cellSelector: string): string {
+  const parsed = /^([a-zA-Z][a-zA-Z0-9-]*)\.([A-Za-z0-9_-]+)$/u.exec(cellSelector);
+  const cellTag = parsed?.[1] ?? '';
+  const openings = [...html.matchAll(/<([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>/gu)];
+  const cellIndex = openings.findIndex((opening) => opening[1] === cellTag);
+  for (let index = cellIndex - 1; index >= 0; index -= 1) {
+    const opening = openings[index]!;
+    const className = /class\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/iu.exec(opening[2] ?? '');
+    if (opening[1] === cellTag || className === null) continue;
+    const value = (className[2] ?? className[3] ?? className[4] ?? '').trim().split(/\s+/u)[0];
+    if (value !== undefined && value.length > 0) return `${opening[1]}.${value}`;
+  }
+  return cellTag.length === 0 ? 'tr' : cellTag;
+}
+
+/**
+ * Composes the repaired output contract from the fixture pages the repair was
+ * given: each declared column keeps its name and takes the selector whose values
+ * equal the records the fixtures pin. It is deliberately mechanical, so
+ * certification needs a frozen answer rather than a model.
+ */
+function repairedOutput(body: Record<string, unknown>, behaviour: MockBehaviour): Record<string, unknown> {
+  const input = isRecord(body['input']) ? body['input'] : {};
+  const task = isRecord(input['task']) ? input['task'] : {};
+  const output = isRecord(task['output']) ? task['output'] : {};
+  const fixtures = isRecord(task['fixtures']) ? task['fixtures'] : {};
+  const pages = recordsOf(fixtures['pages']).filter(
+    (page) => Array.isArray(page['expected_records']) && recordsOf(page['expected_records']).length > 0,
+  );
+  const fields: Array<{ name: string; selector: string }> = [];
+  let sample = '';
+  for (const field of recordsOf(output['fields'])) {
+    const name = String(field['name'] ?? '');
+    let selector = String(field['selector'] ?? '');
+    for (const page of pages) {
+      const expected = recordsOf(page['expected_records']).map((record) => String(record[name] ?? ''));
+      const found = expected.length === 0 ? null : selectorFor(String(page['body'] ?? ''), expected);
+      if (found !== null) {
+        selector = found;
+        sample = String(page['body'] ?? '');
+        break;
+      }
+    }
+    fields.push({ name, selector });
+  }
+  if (behaviour === 'malformed_structured_output') {
+    return { output: { record_selector: 'tr', fields: [] } };
+  }
+  const recordSelector = fields.length === 0 ? 'tr' : containerFor(sample, fields[0]!.selector);
+  return { output: { record_selector: recordSelector, fields } };
 }
 
 /**

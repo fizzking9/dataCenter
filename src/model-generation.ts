@@ -16,6 +16,7 @@ import { REFUSED_KEYS } from './product-query-document.js';
 export const MODEL_PURPOSES: ModelPurpose[] = [
   'integration_proposal',
   'data_product_proposal',
+  'scraper_repair',
   'grounded_narration',
   'clarification',
   'query_plan',
@@ -28,12 +29,14 @@ export const MODEL_DATA_CATEGORIES: ModelDataCategory[] = [
   'source_mapping',
   'sample_records',
   'product_contract',
+  'scraper_diagnostics',
 ];
 
 /** The data categories a purpose's pinned input actually carries. */
 export const PURPOSE_CATEGORIES: Record<ModelPurpose, ModelDataCategory[]> = {
   integration_proposal: ['dataset_schema', 'cleaning_rules', 'source_mapping'],
   data_product_proposal: ['dataset_schema'],
+  scraper_repair: ['scraper_diagnostics'],
   grounded_narration: ['sample_records'],
   clarification: [],
   query_plan: ['product_contract'],
@@ -43,6 +46,7 @@ export const PURPOSE_CATEGORIES: Record<ModelPurpose, ModelDataCategory[]> = {
 export const STRUCTURED_OUTPUT: Record<ModelPurpose, string> = {
   integration_proposal: 'integration_configuration_candidate',
   data_product_proposal: 'data_product_contract_candidate',
+  scraper_repair: 'scraper_service_repair_candidate',
   grounded_narration: 'grounded_narrative',
   clarification: 'clarification_question',
   query_plan: 'data_product_query_plan',
@@ -52,6 +56,7 @@ export const STRUCTURED_OUTPUT: Record<ModelPurpose, string> = {
 const PURPOSE_TOOLS: Record<ModelPurpose, string[]> = {
   integration_proposal: ['read_data_dictionary'],
   data_product_proposal: [],
+  scraper_repair: [],
   grounded_narration: ['read_governed_result'],
   clarification: [],
   query_plan: [],
@@ -328,8 +333,52 @@ export async function generateProductCandidate(
   return output;
 }
 
-/** Runs one grounded-narration generation and refuses ungrounded or English prose. */
-export async function generateGroundedNarration(
+/** The repaired output contract one scraper repair answer must state. */
+export interface RepairedScraperOutput {
+  record_selector: string;
+  fields: Array<{ name: string; selector: string }>;
+}
+
+/**
+ * Runs one Scraper Service repair under the exact pinned Version. The caller
+ * supplies only the Task, the base Version, sanitized diagnostics, and fixtures;
+ * the answer may state nothing but the output contract, so it can neither widen
+ * the network scope nor choose another Task Version.
+ */
+export async function generateScraperRepairCandidate(
+  profile: PinnedModelProfile,
+  input: unknown,
+  fail: AdapterFailure,
+): Promise<RepairedScraperOutput> {
+  const result = await generateForPurpose(profile, 'scraper_repair', input, fail);
+  if (result.tool_calls.length > 0) {
+    // Every input a repair needs is supplied, so a tool call means the endpoint
+    // looked somewhere the platform did not expose.
+    fail('MODEL_STRUCTURED_OUTPUT_INVALID', 'The Model Profile answer used a tool the Scraper Service repair did not need.');
+  }
+  const answer = isRecord(result.output['output']) ? result.output['output'] : result.output;
+  const recordSelector = answer['record_selector'];
+  if (typeof recordSelector !== 'string' || recordSelector.trim().length === 0) {
+    fail('MODEL_STRUCTURED_OUTPUT_INVALID', 'The Scraper Service repair answer did not state a record selector.');
+  }
+  const rawFields = answer['fields'];
+  if (!Array.isArray(rawFields) || rawFields.length === 0) {
+    fail('MODEL_STRUCTURED_OUTPUT_INVALID', 'The Scraper Service repair answer did not state its output fields.');
+  }
+  const fields: Array<{ name: string; selector: string }> = [];
+  for (const candidate of rawFields) {
+    if (!isRecord(candidate) || typeof candidate['name'] !== 'string' || typeof candidate['selector'] !== 'string') {
+      fail('MODEL_STRUCTURED_OUTPUT_INVALID', 'Each repaired output field states a name and a selector.');
+    }
+    if (fields.some((field) => field.name === candidate['name'])) {
+      fail('MODEL_STRUCTURED_OUTPUT_INVALID', 'Each repaired output field name appears once.');
+    }
+    fields.push({ name: candidate['name'], selector: candidate['selector'] });
+  }
+  return { record_selector: recordSelector, fields };
+}
+
+/** Runs one grounded-narration generation and refuses ungrounded or English prose. */export async function generateGroundedNarration(
   profile: PinnedModelProfile,
   input: unknown,
   fail: AdapterFailure,
@@ -394,6 +443,66 @@ export const EVALUATION_INPUTS = {
       { key: 'handled_count_total', value: '处理量合计', unit: '次' },
     ],
     business_context: { common_version: 1, workspace_version: 1 },
+  },
+  scraper_repair: {
+    task: {
+      scraper_task_version: 2,
+      content_hash: '0'.repeat(64),
+      target: {
+        base_url: 'https://reports.example.invalid',
+        path: '/reports/{month}',
+        page_parameter: 'page',
+        first_page: 1,
+        page_size: null,
+        page_size_parameter: null,
+        max_pages: 3,
+      },
+      network_scope: { origins: ['https://reports.example.invalid'], paths: ['/reports'] },
+      output: {
+        record_selector: 'tr.record',
+        fields: [
+          { name: 'sn', selector: 'td.sn' },
+          { name: 'handled_count', selector: 'td.count' },
+        ],
+      },
+      parameters: [{ name: 'month', type: 'string', required: false, default: '2026-01' }],
+      constraints: { timeout_ms: 5_000, max_bytes: 1_048_576, max_records: 1_000 },
+      credential_refs: [],
+      fixtures: {
+        version: 2,
+        hash: '1'.repeat(64),
+        pages: [
+          {
+            name: '改版后第一页',
+            path: '/reports/2026-01?page=1',
+            content_type: 'text/html',
+            body: '<table><tr class="row"><td class="serial">dev-9</td><td class="count">7</td></tr></table>',
+            expected_record_count: 1,
+            expected_records: [{ sn: 'dev-9', handled_count: '7' }],
+          },
+        ],
+      },
+    },
+    base: {
+      scraper_service_version: 1,
+      content_hash: '2'.repeat(64),
+      content: {
+        output: {
+          record_selector: 'tr.record',
+          fields: [
+            { name: 'sn', selector: 'td.sn' },
+            { name: 'handled_count', selector: 'td.count' },
+          ],
+        },
+      },
+    },
+    failure: {
+      diagnostics_id: 'evaluation-diagnostics',
+      evidence_hash: '3'.repeat(64),
+      failure_code: 'SCRAPER_FIELD_EMPTY',
+      stage: 'extraction',
+      category: 'field_missing',
+    },
   },
   clarification: {
     question: '处理量',

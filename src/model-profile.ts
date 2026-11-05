@@ -453,6 +453,17 @@ export async function evaluateModelProfile(options: {
       return STRUCTURED_OUTPUT.data_product_proposal;
     });
   }
+  if (version.purposes.includes('scraper_repair')) {
+    await record('structured_output:scraper_repair', async () => {
+      const answer = await generateForPurpose(pinned, 'scraper_repair', EVALUATION_INPUTS.scraper_repair, failure);
+      const repaired = isRecord(answer.output['output']) ? answer.output['output'] : answer.output;
+      const fields = repaired['fields'];
+      if (!Array.isArray(fields) || fields.length === 0 || typeof repaired['record_selector'] !== 'string') {
+        throw new OperatorError('MODEL_STRUCTURED_OUTPUT_INVALID', 'The answer did not honour the declared structured output.');
+      }
+      return STRUCTURED_OUTPUT.scraper_repair;
+    });
+  }
   await record('constrained_tools', async () => {
     // The request exposes only the tools its purpose declares, so any tool call
     // in the answer is the endpoint reaching outside what it was given.

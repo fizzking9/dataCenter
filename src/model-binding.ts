@@ -100,6 +100,16 @@ async function preflight(
         return 'data_product_contract_candidate';
       });
     }
+    if (purpose === 'scraper_repair') {
+      await record('structured_output', async () => {
+        const answer = await generateForPurpose(pinned, purpose, EVALUATION_INPUTS[purpose], failure);
+        const repaired = isRecord(answer.output['output']) ? answer.output['output'] : answer.output;
+        if (!Array.isArray(repaired['fields']) || repaired['fields'].length === 0) {
+          throw new OperatorError('MODEL_STRUCTURED_OUTPUT_INVALID', 'The answer did not honour the declared structured output.');
+        }
+        return 'scraper_service_repair_candidate';
+      });
+    }
     if (purpose === 'grounded_narration') {
       await record('grounded_narration', async () => {
         const answer = await generateForPurpose(pinned, purpose, EVALUATION_INPUTS[purpose], failure);
