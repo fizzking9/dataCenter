@@ -889,3 +889,33 @@ body {
 .timeline li {
   margin: 2px 0;
 }
+
+/* Natural-Language Query: the grounded answer, its limits, and expandable evidence. */
+.context__body {
+  margin: 8px 0;
+  line-height: 1.7;
+}
+
+.nlq-limitations {
+  margin: 8px 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.nlq-provenance {
+  margin-top: 12px;
+}
+
+.nlq-provenance__summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.nlq-provenance__query {
+  overflow-x: auto;
+  padding: 12px;
+  border-radius: 6px;
+  background: var(--surface-sunken, #f4f5f7);
+  font-size: 12px;
+}

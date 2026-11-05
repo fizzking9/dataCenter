@@ -45,8 +45,8 @@ function hrefOf(key: string, workspaceId: string | null): string | undefined {
   if (key === 'deployment.retention') return '/app/deployment/retention';
   if (workspaceId === null || !key.startsWith('workspace.')) return undefined;
   const view = key.slice('workspace.'.length);
-  if (view !== 'overview' && view !== 'sources' && view !== 'scrapers' && view !== 'products' && view !== 'context'
-    && view !== 'members' && view !== 'audit' && view !== 'models' && view !== 'proposals'
+  if (view !== 'overview' && view !== 'sources' && view !== 'scrapers' && view !== 'products' && view !== 'nlq'
+    && view !== 'context' && view !== 'members' && view !== 'audit' && view !== 'models' && view !== 'proposals'
     && view !== 'productProposals' && view !== 'productGovernance' && view !== 'agents' && view !== 'retention') return undefined;
   if (view === 'productProposals') {
     return `/app/w/${encodeURIComponent(workspaceId)}/product-proposals`;

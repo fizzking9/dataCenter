@@ -22,6 +22,7 @@ export type MockBehaviour =
   | 'malformed_structured_output'
   | 'identity_mismatch'
   | 'sql_plan'
+  | 'part_sql_plan'
   | 'unknown_key_plan'
   | 'clarify_metric'
   | 'clarify_dimension'
@@ -339,6 +340,17 @@ function multiProductPlan(
       compiled: {
         interpretation: second.compiled.interpretation,
         query: { ...(second.compiled.query as Record<string, unknown>), metrics: ['not_published_metric'] },
+      },
+    };
+  }
+  if (behaviour === 'part_sql_plan' && parts.length > 0) {
+    // One part carrying executable database code, which no plan may ever express.
+    const first = parts[0]!;
+    parts[0] = {
+      ref: first.ref,
+      compiled: {
+        interpretation: first.compiled.interpretation,
+        query: { kind: 'records', sql: 'SELECT * FROM device_ledger', limit: 10 },
       },
     };
   }
