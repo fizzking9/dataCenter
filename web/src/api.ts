@@ -198,6 +198,103 @@ export interface ServiceIdentityList {
   service_identities: ServiceIdentityView[];
 }
 
+/** What an Agent Identity may do; it consumes governed data and nothing else. */
+export interface AgentIdentityCapabilities {
+  consumes_data_products: boolean;
+  administrative_authority: boolean;
+  raw_data_access: boolean;
+  owns_artifacts: boolean;
+}
+
+/** One pre-registered OAuth client; its secret is never part of any view. */
+export interface AgentClientView {
+  client_id: string;
+  client_name: string;
+  redirect_uris: string[];
+  created_at: string;
+  revoked_at: string | null;
+}
+
+/** One delegated consent, with the role that bounds it right now. */
+export interface AgentDelegationView {
+  delegation_id: string;
+  workspace_id: string;
+  workspace_name: string | null;
+  user_id: string;
+  username: string | null;
+  role: WorkspaceRoleValue | null;
+  status: 'active' | 'inactive';
+  created_at: string;
+  revoked_at: string | null;
+}
+
+export interface AgentIdentityView {
+  agent_identity_id: string;
+  name: string;
+  workspace_ids: string[];
+  workspaces: Array<{ workspace_id: string; name: string }>;
+  scopes: string[];
+  status: 'active' | 'revoked';
+  created_at: string;
+  revoked_at: string | null;
+  capabilities: AgentIdentityCapabilities;
+  active_grant_count: number;
+  clients: AgentClientView[];
+  delegations: AgentDelegationView[];
+}
+
+export interface AgentIdentityList {
+  agent_identities: AgentIdentityView[];
+}
+
+/** One client registration answers its secret exactly once. */
+export interface AgentClientCreated {
+  client_id: string;
+  client_name: string;
+  client_secret: string;
+  redirect_uris: string[];
+  agent_identity_id: string;
+  created_at: string;
+}
+
+/** One Data Product Grant narrowing an Agent Identity inside a Workspace. */
+export interface AgentGrantView {
+  grant_id: string;
+  data_product_id: string;
+  data_product_name: string;
+  columns: string[] | null;
+  row_filters: Array<{ field: string; op: string; value: string | number | null }>;
+  created_at: string;
+}
+
+/** One Agent Identity as the active Workspace administers its access. */
+export interface WorkspaceAgentView {
+  agent_identity_id: string;
+  name: string;
+  scopes: string[];
+  status: 'active' | 'revoked';
+  created_at: string;
+  grants: AgentGrantView[];
+  delegations: AgentDelegationView[];
+}
+
+export interface WorkspaceAgentAccessView {
+  workspace_id: string;
+  workspace_name: string;
+  agents: WorkspaceAgentView[];
+  data_products: Array<{ data_product_id: string; name: string }>;
+}
+
+export interface WorkspaceAgentDelegationRecorded {
+  delegation_id: string;
+  workspace_id: string;
+  agent_identity_id: string;
+  user: { user_id: string; username: string | null };
+  created_at: string;
+  revoked_at: string | null;
+  already_existing?: boolean;
+}
+
 /** One Workspace membership, in the shape the administered Workspace lists it. */
 export interface WorkspaceMemberView {
   username: string;
@@ -257,6 +354,8 @@ export interface WorkspaceAuditEventView {
   event_id: string;
   occurred_at: string;
   actor: string;
+  /** The delegated User beside the Actor, when the operation acted under consent. */
+  delegated_user: string | null;
   action: string;
   scope: string;
   target: string | null;
@@ -1876,6 +1975,30 @@ export const platformApi = {
       `/api/deployment/service-identities/${encodeURIComponent(serviceIdentityId)}/revoke`,
       { method: 'POST' },
     ),
+  agentIdentities: () => request<AgentIdentityList>('/api/deployment/agent-identities'),
+  createAgentIdentity: (name: string, workspaceIds: string[], scopes: string[]) =>
+    request<AgentIdentityView>('/api/deployment/agent-identities', {
+      method: 'POST',
+      body: JSON.stringify({ name, workspace_ids: workspaceIds, scopes }),
+    }),
+  revokeAgentIdentity: (agentIdentityId: string) =>
+    request<{ agent_identity_id: string; status: string; revoked_at: string | null; already_revoked?: boolean }>(
+      `/api/deployment/agent-identities/${encodeURIComponent(agentIdentityId)}/revoke`,
+      { method: 'POST' },
+    ),
+  registerAgentClient: (
+    agentIdentityId: string,
+    body: { client_id: string; client_name: string; redirect_uris: string[] },
+  ) =>
+    request<AgentClientCreated>(
+      `/api/deployment/agent-identities/${encodeURIComponent(agentIdentityId)}/clients`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  revokeAgentClient: (clientId: string) =>
+    request<{ client_id: string; revoked_at: string | null; already_revoked?: boolean }>(
+      `/api/deployment/oauth-clients/${encodeURIComponent(clientId)}/revoke`,
+      { method: 'POST' },
+    ),
   dataProducts: (workspaceId: string) =>
     request<DataProductList>(`/api/workspace/data-products${workspaceQuery(workspaceId)}`),
   context: (workspaceId: string) =>
@@ -1901,6 +2024,38 @@ export const platformApi = {
     }),
   workspaceAudit: (workspaceId: string) =>
     request<WorkspaceAuditView>(`/api/workspace/audit${workspaceQuery(workspaceId)}`),
+  workspaceAgents: (workspaceId: string) =>
+    request<WorkspaceAgentAccessView>(`/api/workspace/agents${workspaceQuery(workspaceId)}`),
+  publishAgentGrant: (
+    agentIdentityId: string,
+    dataProductId: string,
+    columns: string,
+    rowFilters: string,
+  ) =>
+    request<{ grant_id: string; data_product_id: string }>('/api/workspace/agent-grants', {
+      method: 'POST',
+      body: JSON.stringify({
+        agent_identity_id: agentIdentityId,
+        data_product_id: dataProductId,
+        columns,
+        ...(rowFilters.trim() === '' ? {} : { row_filters: rowFilters }),
+      }),
+    }),
+  revokeAgentGrant: (grantId: string) =>
+    request<{ grant_id: string; revoked_at: string | null }>(
+      `/api/workspace/agent-grants/${encodeURIComponent(grantId)}/revoke`,
+      { method: 'POST' },
+    ),
+  recordAgentDelegation: (workspaceId: string, agentIdentityId: string) =>
+    request<WorkspaceAgentDelegationRecorded>('/api/workspace/agent-delegations', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, agent_identity_id: agentIdentityId }),
+    }),
+  revokeAgentDelegation: (delegationId: string) =>
+    request<{ delegation_id: string; revoked_at: string | null }>(
+      `/api/workspace/agent-delegations/${encodeURIComponent(delegationId)}/revoke`,
+      { method: 'POST' },
+    ),
   sources: (workspaceId: string) =>
     request<SourceList>(`/api/workspace/sources${workspaceQuery(workspaceId)}`),
   createSource: (workspaceId: string, name: string, type: SourceSummary['type']) =>

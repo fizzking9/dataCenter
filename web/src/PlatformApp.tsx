@@ -11,6 +11,7 @@ import { WorkspaceAudit, WorkspaceMembers } from './screens/PlatformWorkspaceAdm
 import { WorkspaceContext, WorkspaceOverview, WorkspaceProducts } from './screens/PlatformWorkspaceScreen.js';
 import { WorkspaceProductProposals } from './screens/PlatformProductProposalScreen.js';
 import { WorkspaceProposals } from './screens/PlatformProposalScreen.js';
+import { WorkspaceAgents } from './screens/PlatformAgentScreen.js';
 import { WorkspaceScrapers } from './screens/PlatformScraperScreen.js';
 import { WorkspaceSources } from './screens/PlatformSourceScreen.js';
 import { Alert, Panel } from './ui/Panel.js';
@@ -18,7 +19,7 @@ import { Shell } from './ui/Shell.js';
 
 const VIEWS = [
   'overview', 'sources', 'scrapers', 'products', 'productProposals', 'context', 'members', 'audit',
-  'models', 'proposals', 'modelProfiles', 'users',
+  'models', 'proposals', 'agents', 'modelProfiles', 'users',
 ] as const;
 type View = (typeof VIEWS)[number];
 
@@ -50,6 +51,7 @@ function viewOf(value: string | undefined): View {
     case 'audit':
     case 'models':
     case 'proposals':
+    case 'agents':
     case 'users':
       return value;
     case 'product-proposals':
@@ -327,6 +329,8 @@ export function PlatformApp() {
     <WorkspaceContext workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'members' ? (
     <WorkspaceMembers workspaceId={activeId} onSessionLost={sessionLost} />
+  ) : route.view === 'agents' ? (
+    <WorkspaceAgents workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'audit' ? (
     <WorkspaceAudit workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'models' ? (
