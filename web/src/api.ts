@@ -3,6 +3,9 @@ export interface ApiError {
   code: string;
   message?: string;
   next_step?: string;
+  /** A governed upload that was retained although integration refused it. */
+  current_release?: number;
+  raw_acquisition_saved?: boolean;
 }
 
 export type ApiResult<T> = { ok: true; data: T } | { ok: false; status: number; error: ApiError };
@@ -300,6 +303,164 @@ export interface ContextView {
   entries: ContextEntryView[];
 }
 
+/** One Source the active Workspace administers, named without any raw content. */
+export interface SourceSummary {
+  source_id: string;
+  name: string;
+  type: 'file' | 'document' | 'http_json';
+  created_at: string;
+}
+
+export interface SourceList {
+  workspace_id: string;
+  sources: SourceSummary[];
+}
+
+export interface SourceSchemaField {
+  name: string;
+  type: 'string' | 'integer' | 'number' | 'date' | 'timestamp';
+}
+
+export interface SourceCleaningRule {
+  rule: 'trim' | 'uppercase' | 'lowercase' | 'default' | 'require_non_empty';
+  field: string;
+  value?: string;
+}
+
+export interface SourceDocumentLimits {
+  max_bytes: number;
+  max_documents: number;
+  max_text_chars: number;
+  max_metadata_fields: number;
+  max_worker_ms: number;
+  max_heap_mb: number;
+}
+
+/** The exact declarative Configuration the guided form reviews and publishes. */
+export interface IntegrationDeclaration {
+  identity: string[];
+  schema: SourceSchemaField[];
+  cleaning: SourceCleaningRule[];
+  mapping: Record<string, string>;
+  document_limits: SourceDocumentLimits;
+}
+
+export interface SourceConfigurationVersionView {
+  version: number;
+  published_at: string;
+  content_hash: string;
+  schema: SourceSchemaField[];
+  identity_fields: string[];
+  cleaning: SourceCleaningRule[];
+  mapping: Record<string, string>;
+  document_limits: SourceDocumentLimits;
+}
+
+export interface SourceRejectionView {
+  raw_id: string;
+  row: number;
+  field: string | null;
+  rule: string;
+  reason: string;
+  integration_configuration_version: number;
+}
+
+export interface SourceDocumentProcessingView {
+  parser: { name: string; version: number };
+  limits: SourceDocumentLimits;
+}
+
+export interface SourceReleaseView {
+  release: number;
+  created_at: string;
+  record_count: number;
+  record_rejection_count: number;
+  records_hash: string;
+  integration_configuration_version: number;
+  provenance: {
+    batch_ids: string[];
+    acquisition_run_ids: string[];
+    raw_acquisition_ids: string[];
+    acquired_at: string;
+    integrated_at: string;
+  };
+  document_processing?: SourceDocumentProcessingView;
+  record_rejections?: SourceRejectionView[];
+}
+
+export interface SourceRunView {
+  acquisition_run_id: string;
+  status: string;
+  queued_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  integration_configuration_version: number | null;
+}
+
+export interface SourceLatestAcquisitionView {
+  batch_id: string;
+  acquisition_run_id: string;
+  raw_acquisition_ids: string[];
+  created_at: string;
+  quarantined: boolean;
+}
+
+export interface SourceDetailView {
+  source: SourceSummary & { workspace_id: string };
+  configuration: {
+    adopted_version: number | null;
+    versions: SourceConfigurationVersionView[];
+  };
+  dataset: {
+    releases: SourceReleaseView[];
+    latest?: SourceReleaseView;
+  };
+  runs: SourceRunView[];
+  latest_acquisition: SourceLatestAcquisitionView | null;
+}
+
+export interface SourceConfigurationPreview {
+  valid: boolean;
+  declaration?: IntegrationDeclaration;
+  content_hash?: string;
+  errors: Array<{ code: string; message?: string }>;
+}
+
+export interface SourceConfigurationPublicationView {
+  source_id: string;
+  integration_configuration_version: number;
+  content_hash: string;
+  adopted_version: number | null;
+  declaration?: IntegrationDeclaration;
+}
+
+export interface SourceAcquisitionView {
+  source_id: string;
+  acquisition_run_id: string;
+  status: string;
+  raw_acquisition: {
+    raw_id: string;
+    content_hash: string;
+    byte_length: number;
+    received_at: string;
+  };
+  integration_batch: {
+    batch_id: string;
+    acquisition_run_id: string;
+    integration_configuration_version: number;
+    raw_acquisition_ids: string[];
+    created_at: string;
+  };
+  integration: {
+    dataset_release: number;
+    reused: boolean;
+    record_count: number;
+    record_rejection_count: number;
+    accepted_records: number;
+    rejected_records: number;
+  } | null;
+}
+
 
 /** One pinned Model Profile Version as the browser reads it, never its credential. */
 export interface ModelPromptView {
@@ -433,6 +594,41 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<ApiResu
         code: typeof payload.code === 'string' ? payload.code : 'UNKNOWN',
         ...(typeof payload.message === 'string' ? { message: payload.message } : {}),
         ...(typeof payload.next_step === 'string' ? { next_step: payload.next_step } : {}),
+        ...(typeof payload.current_release === 'number' ? { current_release: payload.current_release } : {}),
+        ...(payload.raw_acquisition_saved === true ? { raw_acquisition_saved: true } : {}),
+      },
+    };
+  }
+  return { ok: true, data: payload as T };
+}
+
+/**
+ * Sends one governed upload as raw bytes. The browser never parses, curates, or
+ * validates the file; it only hands the bytes to the server that does.
+ */
+async function requestUpload<T>(path: string, file: Blob): Promise<ApiResult<T>> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { accept: 'application/json', 'content-type': 'application/octet-stream' },
+      body: file,
+    });
+  } catch {
+    return { ok: false, status: 0, error: { code: 'NETWORK_UNAVAILABLE' } };
+  }
+  const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      error: {
+        code: typeof payload.code === 'string' ? payload.code : 'UNKNOWN',
+        ...(typeof payload.message === 'string' ? { message: payload.message } : {}),
+        ...(typeof payload.next_step === 'string' ? { next_step: payload.next_step } : {}),
+        ...(typeof payload.current_release === 'number' ? { current_release: payload.current_release } : {}),
+        ...(payload.raw_acquisition_saved === true ? { raw_acquisition_saved: true } : {}),
       },
     };
   }
@@ -531,6 +727,35 @@ export const platformApi = {
     }),
   workspaceAudit: (workspaceId: string) =>
     request<WorkspaceAuditView>(`/api/workspace/audit${workspaceQuery(workspaceId)}`),
+  sources: (workspaceId: string) =>
+    request<SourceList>(`/api/workspace/sources${workspaceQuery(workspaceId)}`),
+  createSource: (workspaceId: string, name: string, type: SourceSummary['type']) =>
+    request<SourceSummary>('/api/workspace/sources', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, name, type }),
+    }),
+  source: (sourceId: string) =>
+    request<SourceDetailView>(`/api/workspace/sources/${encodeURIComponent(sourceId)}`),
+  previewSourceConfiguration: (sourceId: string, declaration: Record<string, unknown>) =>
+    request<SourceConfigurationPreview>(
+      `/api/workspace/sources/${encodeURIComponent(sourceId)}/configuration/preview`,
+      { method: 'POST', body: JSON.stringify({ declaration }) },
+    ),
+  publishSourceConfiguration: (sourceId: string, declaration: Record<string, unknown>) =>
+    request<SourceConfigurationPublicationView>(
+      `/api/workspace/sources/${encodeURIComponent(sourceId)}/configuration/publish`,
+      { method: 'POST', body: JSON.stringify({ declaration }) },
+    ),
+  adoptSourceConfiguration: (sourceId: string, version: number) =>
+    request<SourceConfigurationPublicationView>(
+      `/api/workspace/sources/${encodeURIComponent(sourceId)}/configuration/adopt`,
+      { method: 'POST', body: JSON.stringify({ version }) },
+    ),
+  uploadSourceAcquisition: (sourceId: string, file: Blob) =>
+    requestUpload<SourceAcquisitionView>(
+      `/api/workspace/sources/${encodeURIComponent(sourceId)}/acquisitions`,
+      file,
+    ),
   modelProfiles: () => request<ModelProfileList>('/api/deployment/model-profiles'),
   publishModelProfile: (body: Record<string, unknown>) =>
     request<{ model_profile_id: string }>('/api/deployment/model-profiles', {

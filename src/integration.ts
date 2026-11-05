@@ -15,6 +15,7 @@ import {
 } from './catalog.js';
 import { canonicalDigest } from './crypto.js';
 import type { Fail } from './errors.js';
+import { OperatorError } from './errors.js';
 import { isRecord, readJsonDocument } from './documents.js';
 import { DEPLOYMENT_CONTEXT_ARTIFACT, latestVersion, findContextArtifact, workspaceContextArtifact } from './platform.js';
 import { openPlatform, type PlatformSession } from './session.js';
@@ -375,6 +376,102 @@ export function adoptIntegrationConfiguration(options: {
   return {
     ...view(artifact, version),
     previous_adopted_version: previous,
+  };
+}
+
+/**
+ * The canonical declarative document a guided form reviews. It is the exact
+ * content a Version hashes, so a preview and a publication never disagree:
+ * unstated document limits are stated at their default rather than left out.
+ */
+function declarativeDocument(configuration: IntegrationConfigurationInput): Record<string, unknown> {
+  return {
+    identity: [...configuration.identity],
+    schema: configuration.schema.map((field) => ({ ...field })),
+    cleaning: configuration.cleaning.map((rule) => ({ ...rule })),
+    mapping: { ...configuration.mapping },
+    document_limits: { ...configuration.documentLimits },
+  };
+}
+
+/**
+ * Validates one guided Integration Configuration without writing anything.
+ * A candidate that fails reports the exact refusal the publication would answer,
+ * so the form never invents a rule of its own; the refusal is audited.
+ */
+export function previewIntegrationConfiguration(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  sourceId: string;
+  declaration: unknown;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'integration_configuration_preview', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const source = requireAdministeredSource(session, actor, context, options.sourceId);
+  const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
+
+  try {
+    const configuration = parseIntegrationConfiguration(
+      options.declaration,
+      (code, message) => reject(session, actorLabel(actor.user), scoped, code, message),
+    );
+    const document = declarativeDocument(configuration);
+    session.audit({ ...scoped, actor: actorLabel(actor.user), outcome: 'succeeded' });
+    return {
+      valid: true,
+      declaration: document,
+      content_hash: canonicalDigest(document),
+      errors: [],
+    };
+  } catch (error) {
+    if (!(error instanceof OperatorError)) throw error;
+    // The refusal is already audited by reject(); the caller reads the reason.
+    return {
+      valid: false,
+      errors: [{ code: error.code, message: error.message }],
+    };
+  }
+}
+
+/**
+ * Publishes one guided declarative Configuration as the next immutable Version.
+ * The declaration arrives as structured configuration, never as executable code
+ * and never as a file the browser wrote.
+ */
+export function publishIntegrationDeclaration(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  sourceId: string;
+  declaration: unknown;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'integration_configuration_publication', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const source = requireAdministeredSource(session, actor, context, options.sourceId);
+  const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
+
+  const configuration = parseIntegrationConfiguration(
+    options.declaration,
+    (code, message) => reject(session, actorLabel(actor.user), scoped, code, message),
+  );
+  const { artifact, version } = appendIntegrationConfigurationVersion(session, actor, source, configuration);
+  session.audit({
+    ...scoped,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: {
+      integration_configuration_version: version.version,
+      common_business_context_version: version.pins.common_business_context_version,
+      workspace_business_context_version: version.pins.workspace_business_context_version,
+    },
+  });
+  session.save();
+  return {
+    ...view(artifact, version),
+    declaration: declarativeDocument(configuration),
   };
 }
 
