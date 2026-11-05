@@ -17,6 +17,7 @@ export type MockBehaviour =
   | 'ungrounded_narration'
   | 'causal_narration'
   | 'fabricated_narration'
+  | 'invented_relationship_narration'
   | 'undeclared_tool'
   | 'malformed_structured_output'
   | 'identity_mismatch'
@@ -24,8 +25,12 @@ export type MockBehaviour =
   | 'unknown_key_plan'
   | 'clarify_metric'
   | 'clarify_dimension'
+  | 'clarify_second_part'
   | 'omitted_metrics_plan'
   | 'unpublished_metric_plan'
+  | 'unpublished_metric_one_part'
+  | 'cross_product_join_plan'
+  | 'foreign_product_plan'
   | 'english_plan'
   | 'unauthorized_field'
   | 'unauthorized_dimension'
@@ -183,15 +188,98 @@ function queryPlan(body: Record<string, unknown>, behaviour: MockBehaviour): Rec
   }
 
   const input = isRecord(body['input']) ? body['input'] : {};
+  const asked = [input['question'], input['clarification']]
+    .filter((part): part is string => typeof part === 'string')
+    .join(' ');
+  if (Array.isArray(input['products'])) return multiProductPlan(input, asked, behaviour);
   const contract = isRecord(input['contract']) ? input['contract'] : {};
-  const parts = [input['question'], input['clarification']]
-    .filter((part): part is string => typeof part === 'string');
-  const question = parts.join(' ');
+  const compiled = compilePlanQuery(asked, contract, behaviour);
+  return {
+    action: 'query',
+    interpretation: compiled.interpretation,
+    query: compiled.query,
+  };
+}
+
+/**
+ * Compiles one compound question into one independent part per visible Data
+ * Product. Each part is planned from that Product's own authorized Contract, so
+ * no part can reach across the products it was not given.
+ */
+function multiProductPlan(
+  input: Record<string, unknown>,
+  asked: string,
+  behaviour: MockBehaviour,
+): Record<string, unknown> {
+  const products = recordsOf(input['products']);
+  const sentences = asked.split(/[。；;？?！!\n]/u).map((sentence) => sentence.trim()).filter(Boolean);
+  const named = products.filter((product) => {
+    const name = String(product['name'] ?? '');
+    const title = String(product['title'] ?? '');
+    return (name !== '' && asked.includes(name)) || (title !== '' && asked.includes(title));
+  });
+  const planned = named.length > 0 ? named : products;
+  const sharedWindow = rangesIn(asked)[0];
+  const parts = planned.map((product) => {
+    const name = String(product['name'] ?? '');
+    const title = String(product['title'] ?? '');
+    const own = sentences.filter((sentence) => (name !== '' && sentence.includes(name))
+      || (title !== '' && sentence.includes(title)));
+    const scoped = own.length > 0 ? own.join(' ') : asked;
+    return {
+      ref: String(product['ref'] ?? ''),
+      compiled: compilePlanQuery(scoped, product, behaviour, sharedWindow),
+    };
+  });
+  if (behaviour === 'foreign_product_plan' && parts.length > 0) {
+    parts[0] = {
+      ref: 'forged-product-handle',
+      compiled: parts[0]!.compiled,
+    };
+  }
+  if (behaviour === 'unpublished_metric_one_part' && parts.length > 1) {
+    const second = parts[1]!;
+    parts[1] = {
+      ref: second.ref,
+      compiled: {
+        interpretation: second.compiled.interpretation,
+        query: { ...(second.compiled.query as Record<string, unknown>), metrics: ['not_published_metric'] },
+      },
+    };
+  }
+  if (behaviour === 'clarify_second_part' && parts.length > 1) {
+    const second = parts[1]!;
+    const withoutWindow = { ...(second.compiled.query as Record<string, unknown>) };
+    delete withoutWindow['window'];
+    parts[1] = {
+      ref: second.ref,
+      compiled: { interpretation: second.compiled.interpretation, query: withoutWindow },
+    };
+  }
+  const plan: Record<string, unknown> = {
+    action: 'query',
+    interpretation: '本次问题按每个数据产品各自的已发布受治理契约拆分为独立查询，不跨产品合并数据。',
+    parts: parts.map((part) => ({ product: part.ref, query: part.compiled.query })),
+  };
+  if (behaviour === 'cross_product_join_plan') {
+    // A join is exactly the cross-product composition the platform never accepts.
+    plan['join'] = { left: parts[0]?.ref ?? '', right: parts[1]?.ref ?? '', on: 'city' };
+  }
+  return plan;
+}
+
+/** Plans one part from the Contract that part is authorized over. */
+function compilePlanQuery(
+  question: string,
+  contract: Record<string, unknown>,
+  behaviour: MockBehaviour,
+  fallbackWindow?: { start: string; end: string },
+): { interpretation: string; query: Record<string, unknown> } {
   const metrics = recordsOf(contract['metrics']).map((metric) => String(metric['name'] ?? '')).filter(Boolean);
   const dimensions = stringsOf(contract['dimensions']);
   const filters = stringsOf(contract['filters']);
   const ranges = rangesIn(question);
-  const window = ranges[0];
+  const window = ranges[0] ?? fallbackWindow;
   const comparison = /相比|对比|环比|同比/u.test(question) ? ranges[1] : undefined;
   const metric = pickMetric(question, metrics);
   const filter = filterIn(question, filters);
@@ -202,7 +290,6 @@ function queryPlan(body: Record<string, unknown>, behaviour: MockBehaviour): Rec
 
   if (!aggregate) {
     return {
-      action: 'query',
       interpretation: '按已发布的受治理契约读取记录，并限定所选业务范围。',
       query: {
         kind: 'records',
@@ -213,7 +300,6 @@ function queryPlan(body: Record<string, unknown>, behaviour: MockBehaviour): Rec
     };
   }
   return {
-    action: 'query',
     interpretation: planInterpretation(metric, groupBy, filter, window !== undefined),
     query: {
       kind: 'aggregate',
@@ -242,6 +328,7 @@ function planInterpretation(
 }
 
 function pickMetric(question: string, metrics: string[]): string | null {
+  if (/退款金额|退款/u.test(question) && metrics.includes('refund_total')) return 'refund_total';
   if (/平均结算|平均金额/u.test(question) && metrics.includes('settled_average')) return 'settled_average';
   if (/结算|金额/u.test(question) && metrics.includes('settled_total')) return 'settled_total';
   if (/多少条|条数|记录数|设备数/u.test(question) && metrics.includes('device_count')) return 'device_count';
@@ -339,6 +426,14 @@ function narration(body: Record<string, unknown>, behaviour: MockBehaviour): Rec
   if (behaviour === 'fabricated_narration') {
     return {
       narrative: `根据证据，受治理合计为 ${String(value)}，比上期增加 999。`,
+      evidence_refs: [{ field: key ?? 'value', value }],
+    };
+  }
+  if (behaviour === 'invented_relationship_narration') {
+    // It restates one governed number, then invents a relationship between two
+    // independently governed products that no evidence establishes.
+    return {
+      narrative: `根据证据，受治理合计为 ${String(value)}，它与另一个数据产品的合计同步变化。`,
       evidence_refs: [{ field: key ?? 'value', value }],
     };
   }
