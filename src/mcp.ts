@@ -26,6 +26,8 @@ export interface McpSurfaceOptions {
   root: string;
   masterKey: string;
   identity: McpServerIdentity;
+  /** The instant admission runs at, so a test can advance the clock deterministically. */
+  clock?: () => string;
 }
 
 /** One structured failure of the transport, before or beside a JSON-RPC message. */
@@ -302,7 +304,13 @@ async function resolveAuthenticated(
       { required: [...tool.scopes] },
     );
   }
-  return callTool(session, grant, tool, context.params['arguments']);
+  return callTool(
+    session,
+    grant,
+    tool,
+    context.params['arguments'],
+    options.clock === undefined ? {} : { at: options.clock() },
+  );
 }
 
 /** Reads the Bearer credential a request presents, or nothing at all. */

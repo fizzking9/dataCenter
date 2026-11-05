@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { acquireOperation, releaseOperation } from './admission.js';
 import { resolveActor } from './auth.js';
 import { actorLabel, deny, reject, type ActionContext } from './authz.js';
 import {
@@ -978,6 +979,8 @@ interface TurnOptions {
   conversation?: string;
   /** The instant freshness is evaluated at; absent reads the current clock. */
   now?: string;
+  /** The instant admission is decided at, so a serving surface can inject its clock. */
+  admissionAt?: string;
   /** The one Product a single-product turn reads, or nothing for a Workspace turn. */
   dataProductId?: string;
   workspaceId?: string;
@@ -1714,25 +1717,46 @@ export interface AgentTurnOptions extends TurnRequest {
   generatedBy: string;
   workspaceId: string;
   dataProductId?: string;
+  /** The Agent Identity whose own direct and LLM-backed limits the turn consumes. */
+  agentIdentityId?: string | null;
+  /** The instant admission is decided at, so the MCP surface can inject its clock. */
+  admissionAt?: string;
 }
 
 export async function askNaturalLanguageQueryForAgent(
   options: AgentTurnOptions,
 ): Promise<Record<string, unknown>> {
-  return runTurn(
-    {
-      session: options.session,
-      reader: options.reader,
-      role: options.role,
-      subject: options.subject,
-      attributedUserId: options.attributedUserId,
-      generatedBy: options.generatedBy,
-      auditDetail: options.reader.auditDetail,
-      workspaceId: options.workspaceId,
-      dataProductId: options.dataProductId ?? null,
-    },
-    options,
-  );
+  const leaseId = acquireOperation({
+    root: options.session.root,
+    operation: 'nlq',
+    class: 'llm',
+    workspace_id: options.workspaceId,
+    agent_identity_id: options.agentIdentityId ?? null,
+    user_id: options.attributedUserId,
+    ...(options.admissionAt === undefined ? {} : { at: options.admissionAt }),
+  });
+  try {
+    return await runTurn(
+      {
+        session: options.session,
+        reader: options.reader,
+        role: options.role,
+        subject: options.subject,
+        attributedUserId: options.attributedUserId,
+        generatedBy: options.generatedBy,
+        auditDetail: options.reader.auditDetail,
+        workspaceId: options.workspaceId,
+        dataProductId: options.dataProductId ?? null,
+      },
+      options,
+    );
+  } finally {
+    releaseOperation({
+      root: options.session.root,
+      leaseId,
+      ...(options.admissionAt === undefined ? {} : { at: options.admissionAt }),
+    });
+  }
 }
 
 /**
@@ -1764,20 +1788,36 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
       'The Workspace is not available to this actor.',
     );
   }
-  return runTurn(
-    {
-      session,
-      reader: memberReader(session, actor.user, role),
-      role,
-      subject: actor.user.user_id,
-      attributedUserId: actor.user.user_id,
-      generatedBy: actor.user.user_id,
-      auditDetail: {},
-      workspaceId,
-      dataProductId: requestedProduct?.data_product_id ?? null,
-    },
-    options,
-  );
+  const leaseId = acquireOperation({
+    root: options.root,
+    operation: 'nlq',
+    class: 'llm',
+    workspace_id: workspaceId,
+    user_id: actor.user.user_id,
+    ...(options.admissionAt === undefined ? {} : { at: options.admissionAt }),
+  });
+  try {
+    return await runTurn(
+      {
+        session,
+        reader: memberReader(session, actor.user, role),
+        role,
+        subject: actor.user.user_id,
+        attributedUserId: actor.user.user_id,
+        generatedBy: actor.user.user_id,
+        auditDetail: {},
+        workspaceId,
+        dataProductId: requestedProduct?.data_product_id ?? null,
+      },
+      options,
+    );
+  } finally {
+    releaseOperation({
+      root: options.root,
+      leaseId,
+      ...(options.admissionAt === undefined ? {} : { at: options.admissionAt }),
+    });
+  }
 }
 
 /**
@@ -1795,6 +1835,7 @@ export async function askDataProduct(options: {
   bindingId?: string;
   conversation?: string;
   now?: string;
+  admissionAt?: string;
 }): Promise<Record<string, unknown>> {
   return askNaturalLanguageQuery({
     root: options.root,
@@ -1806,6 +1847,7 @@ export async function askDataProduct(options: {
     ...(options.bindingId === undefined ? {} : { bindingId: options.bindingId }),
     ...(options.conversation === undefined ? {} : { conversation: options.conversation }),
     ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.admissionAt === undefined ? {} : { admissionAt: options.admissionAt }),
   });
 }
 
@@ -1824,6 +1866,7 @@ export async function askWorkspaceQuery(options: {
   bindingId?: string;
   conversation?: string;
   now?: string;
+  admissionAt?: string;
 }): Promise<Record<string, unknown>> {
   return askNaturalLanguageQuery({
     root: options.root,
@@ -1835,5 +1878,6 @@ export async function askWorkspaceQuery(options: {
     ...(options.bindingId === undefined ? {} : { bindingId: options.bindingId }),
     ...(options.conversation === undefined ? {} : { conversation: options.conversation }),
     ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.admissionAt === undefined ? {} : { admissionAt: options.admissionAt }),
   });
 }
