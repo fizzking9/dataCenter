@@ -2,6 +2,8 @@ import { resolveActor } from './auth.js';
 import { actorLabel, reject, type ActionContext } from './authz.js';
 import {
   HTTP_JSON_CONNECTOR,
+  ISO_TIMESTAMP,
+  type AcquisitionWindowPolicy,
   type PaginationCompletion,
   type SourceAcquisitionArtifact,
   type SourceAcquisitionVersion,
@@ -33,6 +35,74 @@ function readCompletion(session: PlatformSession, actor: string, context: Action
     reject(session, actor, context, 'ACQUISITION_CONFIGURATION_INVALID', 'A last_page_flag completion must name the flag and the value that ends the read.');
   }
   return { kind: 'last_page_flag', flag, done_value: doneValue };
+}
+
+function readWindow(session: PlatformSession, actor: string, context: ActionContext, raw: unknown): AcquisitionWindowPolicy | null {
+  if (raw === undefined || raw === null) return null;
+  if (!isRecord(raw)) {
+    reject(session, actor, context, 'ACQUISITION_CONFIGURATION_INVALID', 'A planner window must be a JSON object.');
+  }
+  const mode = raw['mode'] ?? 'incremental';
+  const startParameter = raw['start_parameter'] ?? 'from';
+  const endParameter = raw['end_parameter'] ?? 'to';
+  const initialStart = raw['initial_start'];
+  const initialEnd = raw['initial_end'] ?? null;
+  const maximumSpan = raw['maximum_span_minutes'] ?? 1440;
+  const lookback = raw['lookback_minutes'] ?? 0;
+  const timeZone = raw['time_zone'] ?? 'UTC';
+  const endInclusive = raw['end_inclusive'] ?? false;
+  if (mode !== 'fixed' && mode !== 'incremental') {
+    reject(session, actor, context, 'ACQUISITION_CONFIGURATION_INVALID', 'A planner window is fixed or incremental.');
+  }
+  for (const [label, value] of [['start', startParameter], ['end', endParameter]] as const) {
+    if (typeof value !== 'string' || !/^[a-z][a-z0-9_]{0,31}$/u.test(value)) {
+      reject(session, actor, context, 'ACQUISITION_CONFIGURATION_INVALID', `The window ${label} parameter must be a lowercase identifier.`);
+    }
+  }
+  if (typeof initialStart !== 'string' || !ISO_TIMESTAMP.test(initialStart) || !Number.isFinite(Date.parse(initialStart))) {
+    reject(session, actor, context, 'ACQUISITION_CONFIGURATION_INVALID', 'The window must state an ISO initial start.');
+  }
+  if (mode === 'fixed') {
+    if (typeof initialEnd !== 'string' || !ISO_TIMESTAMP.test(initialEnd) || !Number.isFinite(Date.parse(initialEnd))) {
+      reject(session, actor, context, 'ACQUISITION_CONFIGURATION_INVALID', 'A fixed window must state an ISO end.');
+    }
+    if (Date.parse(initialEnd) <= Date.parse(initialStart)) {
+      reject(session, actor, context, 'ACQUISITION_CONFIGURATION_INVALID', 'A fixed window must end after it starts.');
+    }
+  } else if (initialEnd !== null) {
+    reject(session, actor, context, 'ACQUISITION_CONFIGURATION_INVALID', 'An incremental window captures its own upper bound.');
+  }
+  if (!Number.isInteger(maximumSpan) || (maximumSpan as number) < 1 || (maximumSpan as number) > 44_640) {
+    reject(session, actor, context, 'ACQUISITION_CONFIGURATION_INVALID', 'The maximum span must be a whole number of minutes from 1 to 44640.');
+  }
+  if (!Number.isInteger(lookback) || (lookback as number) < 0 || (lookback as number) > 44_640) {
+    reject(session, actor, context, 'ACQUISITION_CONFIGURATION_INVALID', 'The lookback must be a whole number of minutes from 0 to 44640.');
+  }
+  if (typeof timeZone !== 'string' || timeZone.length === 0) {
+    reject(session, actor, context, 'ACQUISITION_CONFIGURATION_INVALID', 'The window time zone must be a non-empty string.');
+  }
+  if (typeof endInclusive !== 'boolean') {
+    reject(session, actor, context, 'ACQUISITION_CONFIGURATION_INVALID', 'The window end is either inclusive or half-open.');
+  }
+  return {
+    mode,
+    start_parameter: startParameter as string,
+    end_parameter: endParameter as string,
+    initial_start: initialStart,
+    initial_end: initialEnd as string | null,
+    maximum_span_minutes: maximumSpan as number,
+    lookback_minutes: lookback as number,
+    time_zone: timeZone,
+    end_inclusive: endInclusive,
+  };
+}
+
+function readContentType(session: PlatformSession, actor: string, context: ActionContext, raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'string' || !/^[a-z]+\/[a-z0-9.+*-]+$/u.test(raw)) {
+    reject(session, actor, context, 'ACQUISITION_CONFIGURATION_INVALID', 'The expected content type must be a media type such as application/json.');
+  }
+  return raw;
 }
 
 /**
@@ -85,6 +155,8 @@ export function publishSourceAcquisition(options: {
     fail('ACQUISITION_CONFIGURATION_INVALID', 'The record path must name where the records array sits in the response.');
   }
   const completion = readCompletion(session, actorLabel(actor.user), scoped, config['completion']);
+  const window = readWindow(session, actorLabel(actor.user), scoped, config['window']);
+  const contentType = readContentType(session, actorLabel(actor.user), scoped, config['content_type']);
 
   let artifact = session.state.source_acquisitions.find((candidate) => candidate.source_id === source.source_id);
   if (!artifact) {
@@ -94,6 +166,7 @@ export function publishSourceAcquisition(options: {
       owner_user_id: actor.user.user_id,
       adopted_version: null,
       versions: [],
+      checkpoint: null,
     } satisfies SourceAcquisitionArtifact;
     session.state.source_acquisitions.push(artifact);
   }
@@ -107,6 +180,8 @@ export function publishSourceAcquisition(options: {
     path,
     record_path: recordPath as string | null,
     completion,
+    window,
+    content_type: contentType,
   };
   const version: SourceAcquisitionVersion = {
     ...content,
@@ -131,6 +206,8 @@ export function publishSourceAcquisition(options: {
     connection_id: connection.connection_id,
     connection_version: connectionVersion.version,
     connector: { ...HTTP_JSON_CONNECTOR },
+    window,
+    content_type: contentType,
     content_hash: version.content_hash,
   };
 }

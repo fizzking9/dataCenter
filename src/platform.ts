@@ -4,6 +4,8 @@ import type {
   AcquisitionConnectionArtifact,
   AcquisitionPlanRecord,
   AcquisitionRunRecord,
+  ConnectionPacingRecord,
+  ConnectionSessionRecord,
   DataProductArtifact,
   DataProductGrantRecord,
   DatasetArtifact,
@@ -156,6 +158,8 @@ export interface PlatformState {
   raw_acquisitions: RawAcquisitionRecord[];
   acquisition_runs: AcquisitionRunRecord[];
   integration_batches: IntegrationBatchRecord[];
+  connection_sessions: ConnectionSessionRecord[];
+  connection_pacing: ConnectionPacingRecord[];
   datasets: DatasetArtifact[];
   data_products: DataProductArtifact[];
   data_product_grants: DataProductGrantRecord[];
@@ -201,6 +205,8 @@ export function readPlatform(root: string): PlatformState {
         raw_acquisitions: [],
         acquisition_runs: [],
         integration_batches: [],
+        connection_sessions: [],
+        connection_pacing: [],
         datasets: [],
         data_products: [],
         data_product_grants: [],
@@ -220,6 +226,8 @@ export function readPlatform(root: string): PlatformState {
   state.raw_acquisitions ??= [];
   state.acquisition_runs ??= [];
   state.integration_batches ??= [];
+  state.connection_sessions ??= [];
+  state.connection_pacing ??= [];
   state.datasets ??= [];
   state.data_products ??= [];
   state.data_product_grants ??= [];
@@ -229,6 +237,49 @@ export function readPlatform(root: string): PlatformState {
   for (const run of state.acquisition_runs) {
     run.trigger ??= 'manual';
     run.queued_at ??= run.started_at ?? new Date().toISOString();
+    run.backfill ??= null;
+  }
+  // A Connection published before authentication, retries, and pacing were
+  // declarative keeps authenticating exactly as it did: bearer when it holds a
+  // credential, nothing when it does not.
+  for (const connection of state.acquisition_connections) {
+    for (const version of connection.versions) {
+      version.auth ??= version.credential === null ? { scheme: 'none' } : { scheme: 'bearer' };
+      version.retry ??= { max_attempts: 1, base_delay_ms: 250, max_delay_ms: 30_000, retry_on: [429, 500, 502, 503, 504] };
+      version.pacing ??= {
+        serialization: false,
+        minimum_interval_seconds: 0,
+        maximum_requests_per_minute: null,
+        maximum_concurrent_runs: 1,
+      };
+      version.pagination.mode ??= 'page_number';
+      version.pagination.cursor_path ??= null;
+      version.pagination.initial_cursor ??= null;
+    }
+  }
+  // A Source acquired before planner windows existed simply has no checkpoint,
+  // and an attempt recorded before replay attempts existed has one attempt.
+  for (const artifact of state.source_acquisitions) {
+    artifact.checkpoint ??= null;
+    for (const version of artifact.versions) {
+      version.window ??= null;
+      version.content_type ??= null;
+    }
+  }
+  for (const plan of state.acquisition_plans) {
+    plan.window ??= null;
+    plan.start_cursor ??= null;
+    plan.checkpoint_before ??= null;
+    plan.checkpoint_after ??= null;
+    plan.end_cursor ??= null;
+    for (const page of plan.pages) {
+      page.attempts ??= 1;
+      page.failed_attempts ??= [];
+    }
+  }
+  for (const batch of state.integration_batches) {
+    batch.quarantined_at ??= null;
+    batch.quarantine_error_code ??= null;
   }
   // A Data Product published before Contract lines existed belongs to the single
   // line its oldest Contract states, so an older Deployment keeps serving it.

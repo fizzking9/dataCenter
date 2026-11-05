@@ -5,16 +5,27 @@ import {
   adoptedIntegrationVersion,
   findIntegrationConfiguration,
   HTTP_JSON_CONNECTOR,
+  ISO_TIMESTAMP,
+  type AcquisitionCheckpointState,
+  type AcquisitionConnectionArtifact,
   type AcquisitionConnectionVersion,
   type AcquisitionPlanRecord,
+  type AcquisitionPlanWindow,
   type AcquisitionRunRecord,
   type IntegrationBatchRecord,
+  type SourceAcquisitionArtifact,
   type SourceAcquisitionVersion,
   type SourceRecord,
 } from './catalog.js';
+import {
+  admitRun,
+  enrolRun,
+  releaseRun,
+  requeueRun,
+} from './connection-session.js';
 import { runConnector } from './connector.js';
-import { releaseDataset } from './datasets.js';
-import type { Fail } from './errors.js';
+import { releaseDatasetFor } from './datasets.js';
+import { OperatorError, type Fail } from './errors.js';
 import { isDeploymentAdministrator, workspaceRoleOf } from './platform.js';
 import { openPlatform, type PlatformSession } from './session.js';
 import { requireAdministeredSource } from './sources.js';
@@ -47,6 +58,21 @@ function queuedRunFor(
   );
 }
 
+function adoptedAcquisition(session: PlatformSession, sourceId: string): SourceAcquisitionVersion | undefined {
+  const artifact = session.state.source_acquisitions.find((candidate) => candidate.source_id === sourceId);
+  if (!artifact || artifact.adopted_version === null) return undefined;
+  return artifact.versions.find((candidate) => candidate.version === artifact.adopted_version);
+}
+
+function connectionVersionOf(
+  session: PlatformSession,
+  acquisition: SourceAcquisitionVersion,
+): AcquisitionConnectionVersion | undefined {
+  return session.state.acquisition_connections
+    .find((candidate) => candidate.connection_id === acquisition.connection_id)
+    ?.versions.find((candidate) => candidate.version === acquisition.connection_version);
+}
+
 /**
  * Queues one Acquisition Run. A trigger never acquires inline and never
  * replaces pending work: a Run is a durable request the worker picks up in order.
@@ -58,6 +84,7 @@ function queueRun(
   context: ActionContext,
   trigger: 'manual' | 'scheduled',
   queuedAt: string,
+  backfill: { start: string; end: string } | null,
 ): AcquisitionRunRecord {
   const run: AcquisitionRunRecord = {
     acquisition_run_id: randomUUID(),
@@ -65,6 +92,7 @@ function queueRun(
     source_id: source.source_id,
     mode: 'connector',
     trigger,
+    backfill,
     integration_configuration_version: adoptedIntegrationVersion(
       findIntegrationConfiguration(session.state.integration_configurations, source.source_id),
     )?.version ?? null,
@@ -77,6 +105,15 @@ function queueRun(
     error_code: null,
   };
   session.state.acquisition_runs.push(run);
+  // The Connection's durable queue is the one order every Source and worker
+  // shares, so the Run takes its place at the instant it was requested.
+  const acquisition = adoptedAcquisition(session, source.source_id);
+  const connection = acquisition === undefined
+    ? undefined
+    : session.state.acquisition_connections.find(
+      (candidate) => candidate.connection_id === acquisition.connection_id,
+    );
+  if (connection !== undefined) enrolRun(session, connection, run);
   session.audit({
     ...context,
     actor,
@@ -86,11 +123,33 @@ function queueRun(
   return run;
 }
 
+function readBackfill(
+  session: PlatformSession,
+  actor: string,
+  context: ActionContext,
+  from: string | undefined,
+  to: string | undefined,
+): { start: string; end: string } | null {
+  if (from === undefined && to === undefined) return null;
+  if (from === undefined || to === undefined) {
+    reject(session, actor, context, 'ACQUISITION_BACKFILL_INVALID', 'A manual backfill states both the start and the end of its window.');
+  }
+  if (!ISO_TIMESTAMP.test(from) || !Number.isFinite(Date.parse(from)) || !ISO_TIMESTAMP.test(to) || !Number.isFinite(Date.parse(to))) {
+    reject(session, actor, context, 'ACQUISITION_BACKFILL_INVALID', 'A manual backfill states two ISO instants.');
+  }
+  if (Date.parse(to) <= Date.parse(from)) {
+    reject(session, actor, context, 'ACQUISITION_BACKFILL_INVALID', 'A manual backfill must end after it starts.');
+  }
+  return { start: from, end: to };
+}
+
 export function enqueueAcquisition(options: {
   root: string;
   masterKey: string;
   token: string;
   sourceId: string;
+  from?: string;
+  to?: string;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'acquisition_enqueue', scope: 'workspace' };
@@ -98,14 +157,75 @@ export function enqueueAcquisition(options: {
   const source = requireAdministeredSource(session, actor, context, options.sourceId);
   const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
   requireConnectorSource(session, actorLabel(actor.user), scoped, source);
-  const run = queueRun(session, source, actorLabel(actor.user), scoped, 'manual', new Date().toISOString());
+  const backfill = readBackfill(session, actorLabel(actor.user), scoped, options.from, options.to);
+  const run = queueRun(session, source, actorLabel(actor.user), scoped, 'manual', new Date().toISOString(), backfill);
   session.save();
   return {
     source_id: source.source_id,
     acquisition_run_id: run.acquisition_run_id,
     status: run.status,
     trigger: run.trigger,
+    backfill: run.backfill,
     queued_at: run.queued_at,
+  };
+}
+
+/**
+ * Cancels one Run that has not started reading.
+ *
+ * A cancelled Run leaves its Connection's durable queue immediately, emits no
+ * Plan, no Integration Batch, and no Dataset Release, and reads nothing from the
+ * endpoint. It stays in the Run ledger as the reason the work never happened.
+ */
+export function cancelAcquisition(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  runId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'acquisition_cancel', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const run = session.state.acquisition_runs.find(
+    (candidate) => candidate.acquisition_run_id === options.runId,
+  );
+  if (!run) {
+    reject(session, actorLabel(actor.user), context, 'ACQUISITION_RUN_NOT_FOUND', 'No Acquisition Run has this identifier.');
+  }
+  const source = requireAdministeredSource(session, actor, context, run.source_id);
+  const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
+  if (run.status !== 'queued') {
+    reject(
+      session,
+      actorLabel(actor.user),
+      scoped,
+      'ACQUISITION_RUN_NOT_CANCELLABLE',
+      'Only a Run that has not started reading may be cancelled.',
+      'Inspect the Run; a started attempt either completes its Plan or fails on its own.',
+    );
+  }
+  const acquisition = adoptedAcquisition(session, source.source_id);
+  const connection = acquisition === undefined
+    ? undefined
+    : session.state.acquisition_connections.find((candidate) => candidate.connection_id === acquisition.connection_id);
+  if (connection !== undefined) {
+    releaseRun({ session, connection, run, at: new Date().toISOString() });
+  }
+  run.status = 'cancelled';
+  run.error_code = 'ACQUISITION_RUN_CANCELLED';
+  run.completed_at = new Date().toISOString();
+  session.audit({
+    ...scoped,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: { acquisition_run_id: run.acquisition_run_id, status: run.status },
+  });
+  session.save();
+  return {
+    acquisition_run_id: run.acquisition_run_id,
+    source_id: source.source_id,
+    status: run.status,
+    error_code: run.error_code,
   };
 }
 
@@ -139,10 +259,58 @@ export function acquisitionQueue(options: {
   };
 }
 
-function adoptedAcquisition(session: PlatformSession, sourceId: string): SourceAcquisitionVersion | undefined {
-  const artifact = session.state.source_acquisitions.find((candidate) => candidate.source_id === sourceId);
-  if (!artifact || artifact.adopted_version === null) return undefined;
-  return artifact.versions.find((candidate) => candidate.version === artifact.adopted_version);
+/**
+ * Captures the one half-open interval this attempt reads.
+ *
+ * The upper bound is read once, here, and stored on the Plan. A later clock
+ * reading therefore cannot extend a Plan that is already durable, and a Run
+ * that catches up over a long gap is split into consecutive bounded windows
+ * rather than one unbounded read.
+ */
+function captureWindow(
+  acquisition: SourceAcquisitionVersion,
+  checkpoint: AcquisitionCheckpointState | null,
+  backfill: { start: string; end: string } | null,
+  at: string,
+): AcquisitionPlanWindow | null {
+  if (backfill !== null) {
+    return {
+      mode: 'backfill',
+      start: backfill.start,
+      end: backfill.end,
+      lookback_minutes: 0,
+      end_inclusive: false,
+      captured_at: at,
+    };
+  }
+  const policy = acquisition.window;
+  if (policy === null) return null;
+  if (policy.mode === 'fixed') {
+    return {
+      mode: 'fixed',
+      start: policy.initial_start,
+      end: policy.initial_end ?? policy.initial_start,
+      lookback_minutes: policy.lookback_minutes,
+      end_inclusive: policy.end_inclusive,
+      captured_at: at,
+    };
+  }
+  const watermark = checkpoint?.watermark ?? policy.initial_start;
+  const start = new Date(Date.parse(watermark) - policy.lookback_minutes * 60_000).toISOString();
+  const ceiling = Date.parse(start) + policy.maximum_span_minutes * 60_000;
+  const captured = Math.min(Date.parse(at), ceiling);
+  return {
+    mode: 'incremental',
+    start,
+    end: new Date(Math.max(Date.parse(start), captured)).toISOString(),
+    lookback_minutes: policy.lookback_minutes,
+    end_inclusive: policy.end_inclusive,
+    captured_at: at,
+  };
+}
+
+function checkpointView(checkpoint: AcquisitionCheckpointState | null): { watermark: string | null; cursor: string | null } {
+  return { watermark: checkpoint?.watermark ?? null, cursor: checkpoint?.cursor ?? null };
 }
 
 /**
@@ -150,14 +318,15 @@ function adoptedAcquisition(session: PlatformSession, sourceId: string): SourceA
  *
  * The Plan is durable before the first request. Only a Plan whose every page
  * completed hands over an Integration Batch and releases a Dataset; a failed or
- * partial attempt keeps its diagnostic Raw Acquisitions and leaves the current
- * governed data exactly where it was.
+ * partial attempt keeps its diagnostic Raw Acquisitions, leaves the current
+ * governed data exactly where it was, and never advances the checkpoint.
  */
 export async function workAcquisition(options: {
   root: string;
   masterKey: string;
   token: string;
   sourceId: string;
+  at?: string;
 }): Promise<Record<string, unknown>> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'acquisition_work', scope: 'workspace' };
@@ -181,10 +350,10 @@ export async function workAcquisition(options: {
       'Publish an acquisition configuration for the Source and adopt the exact version.',
     );
   }
-  const connectionVersion: AcquisitionConnectionVersion | undefined = session.state.acquisition_connections
-    .find((candidate) => candidate.connection_id === acquisition.connection_id)
-    ?.versions.find((candidate) => candidate.version === acquisition.connection_version);
-  if (!connectionVersion) {
+  const connection: AcquisitionConnectionArtifact | undefined = session.state.acquisition_connections
+    .find((candidate) => candidate.connection_id === acquisition.connection_id);
+  const connectionVersion = connectionVersionOf(session, acquisition);
+  if (!connection || !connectionVersion) {
     fail(
       'CONNECTION_VERSION_NOT_FOUND',
       'The Connection Version this acquisition configuration pins is not available.',
@@ -202,6 +371,60 @@ export async function workAcquisition(options: {
     );
   }
 
+  const at = options.at ?? new Date().toISOString();
+  if (!ISO_TIMESTAMP.test(at) || !Number.isFinite(Date.parse(at))) {
+    fail('ACQUISITION_WORK_AT_INVALID', 'The worker clock must be an ISO instant.');
+  }
+
+  // Admission is decided before anything is read, so a paced Run stays queued
+  // rather than failing, and its place in the Connection's queue is durable.
+  const admission = admitRun({
+    session,
+    connection,
+    policy: connectionVersion.pacing,
+    run,
+    at,
+  });
+  if (!admission.admitted) {
+    if (admission.dirty) session.save();
+    session.audit({
+      ...scoped,
+      actor: actorLabel(actor.user),
+      outcome: 'succeeded',
+      detail: {
+        acquisition_run_id: run.acquisition_run_id,
+        paced: admission.reason ?? 'none',
+        queue_position: admission.position,
+      },
+    });
+    return {
+      acquisition_run_id: run.acquisition_run_id,
+      status: 'queued',
+      trigger: run.trigger,
+      paced: true,
+      pacing_reason: admission.reason,
+      queue_position: admission.position,
+      not_before: admission.not_before,
+      plan: null,
+      raw_acquisition_count: 0,
+      raw_acquisition_ids: [],
+      batch_raw_acquisition_count: null,
+      integration_batch_id: null,
+      dataset_release: null,
+      records: null,
+      error_code: null,
+    };
+  }
+
+  const artifact: SourceAcquisitionArtifact | undefined = session.state.source_acquisitions
+    .find((candidate) => candidate.source_id === source.source_id);
+  const checkpointBefore = artifact?.checkpoint ?? null;
+  const window = captureWindow(acquisition, checkpointBefore, run.backfill, at);
+  const useCursor = connectionVersion.pagination.mode === 'cursor';
+  const startCursor = useCursor && checkpointBefore?.cursor_state !== 'invalid'
+    ? checkpointBefore?.cursor ?? null
+    : null;
+
   const plan: AcquisitionPlanRecord = {
     plan_id: randomUUID(),
     workspace_id: source.workspace_id,
@@ -214,19 +437,25 @@ export async function workAcquisition(options: {
     acquisition_configuration_version: acquisition.version,
     integration_configuration_version: integration.version,
     pages: [],
+    window,
+    start_cursor: startCursor,
+    checkpoint_before: checkpointView(checkpointBefore),
+    checkpoint_after: checkpointView(checkpointBefore),
+    end_cursor: null,
     status: 'planned',
-    created_at: new Date().toISOString(),
+    created_at: at,
     completed_at: null,
   };
   session.state.acquisition_plans.push(plan);
   run.status = 'running';
   run.attempts += 1;
-  run.started_at = new Date().toISOString();
+  run.started_at = at;
   session.save();
 
   const outcome = await runConnector({
     session,
     plan,
+    connection,
     connectionVersion,
     acquisition,
   });
@@ -235,9 +464,36 @@ export async function workAcquisition(options: {
   plan.completed_at = run.completed_at;
 
   if (!outcome.complete) {
-    run.status = 'failed';
-    run.error_code = outcome.errorCode;
     plan.status = 'partial';
+    if (outcome.errorCode === 'ACQUISITION_PACING_RATE_EXCEEDED') {
+      // A rate refusal is not a failure of the attempt: the Run returns to the
+      // front of the queue and its next attempt plans again rather than
+      // continuing a Plan whose fragments are already known to be incomplete.
+      run.status = 'queued';
+      run.completed_at = null;
+      plan.status = 'partial';
+      requeueRun({
+        session,
+        connection,
+        run,
+        at: new Date().toISOString(),
+        notBefore: null,
+      });
+    } else {
+      run.status = 'failed';
+      run.error_code = outcome.errorCode;
+      releaseRun({ session, connection, run, at: new Date().toISOString() });
+      if (outcome.errorCode === 'ACQUISITION_CHECKPOINT_CURSOR_INVALID' && artifact !== undefined) {
+        artifact.checkpoint = {
+          watermark: artifact.checkpoint?.watermark ?? null,
+          cursor: artifact.checkpoint?.cursor ?? null,
+          cursor_state: 'invalid',
+          updated_at: new Date().toISOString(),
+          generation: (artifact.checkpoint?.generation ?? 0) + 1,
+        };
+        plan.checkpoint_after = checkpointView(artifact.checkpoint);
+      }
+    }
     session.audit({
       ...scoped,
       actor: actorLabel(actor.user),
@@ -254,8 +510,10 @@ export async function workAcquisition(options: {
       acquisition_run_id: run.acquisition_run_id,
       status: run.status,
       trigger: run.trigger,
-      plan: { ...plan, pages: plan.pages.map((page) => ({ ...page })) },
+      plan: { ...plan, pages: plan.pages.map((page) => ({ ...page, failed_attempts: page.failed_attempts.map((entry) => ({ ...entry })) })) },
       raw_acquisition_count: outcome.rawIds.length,
+      raw_acquisition_ids: outcome.rawIds,
+      batch_raw_acquisition_count: null,
       integration_batch_id: null,
       dataset_release: null,
       records: null,
@@ -270,14 +528,78 @@ export async function workAcquisition(options: {
     acquisition_run_id: run.acquisition_run_id,
     integration_configuration_version: integration.version,
     integration_configuration_content_hash: integration.content_hash,
-    raw_acquisition_ids: outcome.rawIds,
+    raw_acquisition_ids: outcome.batchIds,
     created_at: new Date().toISOString(),
+    quarantined_at: null,
+    quarantine_error_code: null,
   };
   session.state.integration_batches.push(batch);
   run.status = 'complete';
   run.error_code = null;
   run.integration_configuration_version = integration.version;
   plan.status = 'complete';
+  session.save();
+
+  // A complete Plan is the only thing that advances governed data, and it does so
+  // through the same Dataset Release path a manual acquisition uses.
+  let released: Record<string, unknown>;
+  try {
+    released = releaseDatasetFor(session, actor, source);
+  } catch (error) {
+    // Integration refused the Batch: it is quarantined so it never governs a
+    // Release, the checkpoint stays exactly where it was, and the operator sees
+    // the drift as a failed Run rather than a silently missing column.
+    const code = error instanceof OperatorError ? error.code : 'ACQUISITION_SCHEMA_DRIFT';
+    batch.quarantined_at = new Date().toISOString();
+    batch.quarantine_error_code = code;
+    run.status = 'failed';
+    run.error_code = 'ACQUISITION_SCHEMA_DRIFT';
+    plan.status = 'failed';
+    plan.checkpoint_after = checkpointView(artifact?.checkpoint ?? null);
+    releaseRun({ session, connection, run, at: new Date().toISOString() });
+    session.audit({
+      ...scoped,
+      actor: actorLabel(actor.user),
+      outcome: 'failed',
+      detail: {
+        acquisition_run_id: run.acquisition_run_id,
+        plan_id: plan.plan_id,
+        integration_batch_id: batch.batch_id,
+        error_code: 'ACQUISITION_SCHEMA_DRIFT',
+        integration_error_code: code,
+      },
+    });
+    session.save();
+    throw error;
+  }
+
+  // The checkpoint advances only after the Release the attempt produced exists,
+  // so an interrupted Run either governs a whole Plan or nothing at all.
+  if (artifact !== undefined) {
+    const previous = artifact.checkpoint;
+    let next: AcquisitionCheckpointState | null = previous;
+    if (window !== null && window.mode === 'incremental') {
+      next = {
+        watermark: window.end,
+        cursor: useCursor ? plan.end_cursor : previous?.cursor ?? null,
+        cursor_state: 'valid',
+        updated_at: new Date().toISOString(),
+        generation: (previous?.generation ?? 0) + 1,
+      };
+    } else if (useCursor) {
+      next = {
+        watermark: previous?.watermark ?? null,
+        cursor: plan.end_cursor,
+        cursor_state: 'valid',
+        updated_at: new Date().toISOString(),
+        generation: (previous?.generation ?? 0) + 1,
+      };
+    }
+    artifact.checkpoint = next;
+    plan.checkpoint_after = checkpointView(next);
+  }
+
+  releaseRun({ session, connection, run, at: new Date().toISOString() });
   session.audit({
     ...scoped,
     actor: actorLabel(actor.user),
@@ -287,25 +609,19 @@ export async function workAcquisition(options: {
       plan_id: plan.plan_id,
       integration_batch_id: batch.batch_id,
       raw_acquisition_count: outcome.rawIds.length,
+      batch_raw_acquisition_count: outcome.batchIds.length,
       connector_version: plan.connector.version,
     },
   });
   session.save();
-
-  // A complete Plan is the only thing that advances governed data, and it does so
-  // through the same Dataset Release path a manual acquisition uses.
-  const released = releaseDataset({
-    root: options.root,
-    masterKey: options.masterKey,
-    token: options.token,
-    sourceId: source.source_id,
-  });
   return {
     acquisition_run_id: run.acquisition_run_id,
     status: run.status,
     trigger: run.trigger,
-    plan: { ...plan, pages: plan.pages.map((page) => ({ ...page })) },
+    plan: { ...plan, pages: plan.pages.map((page) => ({ ...page, failed_attempts: page.failed_attempts.map((entry) => ({ ...entry })) })) },
     raw_acquisition_count: outcome.rawIds.length,
+    raw_acquisition_ids: outcome.rawIds,
+    batch_raw_acquisition_count: batch.raw_acquisition_ids.length,
     integration_batch_id: batch.batch_id,
     dataset_release: released['dataset_release'] ?? null,
     records: released['record_count'] ?? null,
@@ -342,9 +658,7 @@ export function tickSchedules(options: {
 
     const acquisition = adoptedAcquisition(session, source.source_id);
     if (!acquisition) continue;
-    const connectionVersion = session.state.acquisition_connections
-      .find((candidate) => candidate.connection_id === acquisition.connection_id)
-      ?.versions.find((candidate) => candidate.version === acquisition.connection_version);
+    const connectionVersion = connectionVersionOf(session, acquisition);
     const schedule = connectionVersion?.schedule ?? null;
     if (schedule === null) continue;
 
@@ -357,7 +671,7 @@ export function tickSchedules(options: {
     if (atMs < dueAt) continue;
 
     const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
-    const run = queueRun(session, source, actorLabel(actor.user), scoped, 'scheduled', at);
+    const run = queueRun(session, source, actorLabel(actor.user), scoped, 'scheduled', at, null);
     enqueued.push({
       source_id: source.source_id,
       acquisition_run_id: run.acquisition_run_id,
@@ -372,6 +686,76 @@ export function tickSchedules(options: {
   });
   session.save();
   return { at, enqueued };
+}
+
+/** Reads the durable resume point of one Source. */
+export function acquisitionCheckpoint(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  sourceId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'acquisition_checkpoint_read', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const source = requireAdministeredSource(session, actor, context, options.sourceId);
+  const artifact = session.state.source_acquisitions.find((candidate) => candidate.source_id === source.source_id);
+  session.audit({
+    ...context,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: {
+      watermark: artifact?.checkpoint?.watermark ?? '',
+      cursor_state: artifact?.checkpoint?.cursor_state ?? '',
+    },
+  });
+  return {
+    source_id: source.source_id,
+    checkpoint: artifact?.checkpoint === undefined || artifact.checkpoint === null
+      ? null
+      : { ...artifact.checkpoint },
+  };
+}
+
+/**
+ * Clears the cursor of one Source so a refused cursor stops blocking it.
+ *
+ * The watermark is kept: recovering from a cursor the endpoint no longer
+ * honours must not re-read everything the Source already governed.
+ */
+export function resetAcquisitionCheckpoint(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  sourceId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'acquisition_checkpoint_reset', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const source = requireAdministeredSource(session, actor, context, options.sourceId);
+  const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
+  const artifact = session.state.source_acquisitions.find((candidate) => candidate.source_id === source.source_id);
+  if (!artifact) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      scoped,
+      'ACQUISITION_CONFIGURATION_NOT_ADOPTED',
+      'The Source has no acquisition configuration Artifact to hold a checkpoint.',
+      'Publish an acquisition configuration for the Source.',
+    );
+  }
+  const previous = artifact.checkpoint;
+  artifact.checkpoint = {
+    watermark: previous?.watermark ?? null,
+    cursor: null,
+    cursor_state: 'valid',
+    updated_at: new Date().toISOString(),
+    generation: (previous?.generation ?? 0) + 1,
+  };
+  session.audit({ ...scoped, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { checkpoint_reset: true } });
+  session.save();
+  return { source_id: source.source_id, checkpoint: { ...artifact.checkpoint } };
 }
 
 /** The Sources of a Workspace and the acquisition state each one holds. */
@@ -402,6 +786,9 @@ export function listSourceAcquisition(options: {
         type: source.type,
         connector: source.type === 'http_json' ? { ...HTTP_JSON_CONNECTOR } : null,
         adopted_acquisition_configuration_version: acquisition?.adopted_version ?? null,
+        checkpoint: acquisition?.checkpoint === undefined || acquisition.checkpoint === null
+          ? null
+          : { ...acquisition.checkpoint },
         queued: runs.filter((run) => run.status === 'queued').length,
         last_run: runs.length === 0
           ? null

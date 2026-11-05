@@ -95,14 +95,49 @@ export interface AcquisitionRunRecord {
   source_id: string;
   mode: 'manual_upload' | 'connector';
   trigger: 'manual' | 'scheduled';
+  /** The window a manual backfill states; null for a normal Run. */
+  backfill: { start: string; end: string } | null;
   integration_configuration_version: number | null;
   attempts: number;
-  status: 'queued' | 'running' | 'complete' | 'failed';
+  status: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled';
   queued_at: string;
   started_at: string | null;
   completed_at: string | null;
   raw_acquisition_ids: string[];
   error_code?: string | null;
+}
+
+/** How one Connection authenticates every request its Sources make. */
+export type ConnectionAuth =
+  | { scheme: 'none' }
+  | { scheme: 'basic'; username: string }
+  | { scheme: 'bearer' }
+  | { scheme: 'api_key'; header: string; prefix: string | null }
+  | { scheme: 'oauth_client_credentials'; token_url: string; client_id: string; scope: string | null }
+  | {
+    scheme: 'login';
+    login_path: string;
+    username: string;
+    /** Where a bearer token sits in the login response; null when the login yields a cookie only. */
+    token_path: string | null;
+    /** The cookie a login session is carried in; null when the login yields a bearer token only. */
+    cookie_name: string | null;
+  };
+
+/** How many times one request is attempted and how long the connector waits between attempts. */
+export interface ConnectionRetryPolicy {
+  max_attempts: number;
+  base_delay_ms: number;
+  max_delay_ms: number;
+  retry_on: number[];
+}
+
+/** The collective pacing one Connection imposes on every Source and worker that uses it. */
+export interface ConnectionPacingPolicy {
+  serialization: boolean;
+  minimum_interval_seconds: number;
+  maximum_requests_per_minute: number | null;
+  maximum_concurrent_runs: number;
 }
 
 /** How a paginated endpoint signals that the last page has been read. */
@@ -118,6 +153,35 @@ export interface ConnectionPagination {
   start: number;
   size: number;
   max_pages: number;
+  /** Page-number paging by default; cursor paging hands back an opaque next cursor. */
+  mode: 'page_number' | 'cursor';
+  /** Where the next cursor sits in a cursor-paged response. */
+  cursor_path: string | null;
+  /** The cursor a fresh cursor traversal starts from; null starts without one. */
+  initial_cursor: string | null;
+}
+
+/** The declared planner window of a time-windowed Source. */
+export interface AcquisitionWindowPolicy {
+  mode: 'fixed' | 'incremental';
+  start_parameter: string;
+  end_parameter: string;
+  initial_start: string;
+  /** The end of a fixed window; incremental windows capture their own upper bound. */
+  initial_end: string | null;
+  maximum_span_minutes: number;
+  lookback_minutes: number;
+  time_zone: string;
+  end_inclusive: boolean;
+}
+
+/** The durable resume point of one Source: a watermark and, when relevant, a cursor. */
+export interface AcquisitionCheckpointState {
+  watermark: string | null;
+  cursor: string | null;
+  cursor_state: 'valid' | 'invalid';
+  updated_at: string | null;
+  generation: number;
 }
 
 /** One immutable Acquisition Connection Version: endpoint, auth scheme, and policy. */
@@ -130,6 +194,9 @@ export interface AcquisitionConnectionVersion {
   credential_ref: string;
   /** The sealed credential itself; a later Version never rewrites this one's. */
   credential: SealedSecret | null;
+  auth: ConnectionAuth;
+  retry: ConnectionRetryPolicy;
+  pacing: ConnectionPacingPolicy;
   pagination: ConnectionPagination;
   schedule: { every_minutes: number } | null;
   content_hash: string;
@@ -157,6 +224,10 @@ export interface SourceAcquisitionVersion {
   path: string;
   record_path: string | null;
   completion: PaginationCompletion;
+  /** The planner window this Source reads; null when it is read page by page only. */
+  window: AcquisitionWindowPolicy | null;
+  /** The response content type the endpoint must state; null keeps the connector's default. */
+  content_type: string | null;
   content_hash: string;
 }
 
@@ -167,15 +238,26 @@ export interface SourceAcquisitionArtifact {
   owner_user_id: string;
   adopted_version: number | null;
   versions: SourceAcquisitionVersion[];
+  /** The durable resume point a completed attempt advances and a failure leaves alone. */
+  checkpoint: AcquisitionCheckpointState | null;
 }
 
 /** One page a Plan must complete, and what became of it. */
 export interface AcquisitionPlanPage {
   page: number;
+  /** The accepted fragment of this page; a replayed attempt replaces the rejected one. */
   raw_id: string | null;
   outcome: 'received' | 'empty' | 'failed';
   record_count: number | null;
   error_code: string | null;
+  attempts: number;
+  /** Rejected responses kept as diagnostics; they never enter an Integration Batch. */
+  failed_attempts: Array<{
+    raw_id: string | null;
+    status: number | null;
+    error_code: string;
+    retry_after_ms: number | null;
+  }>;
 }
 
 /**
@@ -195,9 +277,27 @@ export interface AcquisitionPlanRecord {
   acquisition_configuration_version: number;
   integration_configuration_version: number;
   pages: AcquisitionPlanPage[];
+  /** The half-open window captured at plan time, so no later clock reading extends it. */
+  window: AcquisitionPlanWindow | null;
+  /** The cursor the first request starts from. */
+  start_cursor: string | null;
+  checkpoint_before: { watermark: string | null; cursor: string | null } | null;
+  checkpoint_after: { watermark: string | null; cursor: string | null } | null;
+  /** The last cursor the endpoint handed back, when it is the resume point. */
+  end_cursor: string | null;
   status: 'planned' | 'complete' | 'partial' | 'failed';
   created_at: string;
   completed_at: string | null;
+}
+
+/** One immutable logical half-open interval one attempt reads. */
+export interface AcquisitionPlanWindow {
+  mode: 'fixed' | 'incremental' | 'backfill';
+  start: string;
+  end: string;
+  lookback_minutes: number;
+  end_inclusive: boolean;
+  captured_at: string;
 }
 
 /** The complete handoff from one successful Acquisition Run to integration. */
@@ -210,6 +310,40 @@ export interface IntegrationBatchRecord {
   integration_configuration_content_hash: string;
   raw_acquisition_ids: string[];
   created_at: string;
+  /** Set when integration refused the Batch for drift; it never governs a Release. */
+  quarantined_at: string | null;
+  quarantine_error_code: string | null;
+}
+
+/** The durable authentication session one exact Connection Version established. */
+export interface ConnectionSessionRecord {
+  connection_id: string;
+  workspace_id: string;
+  connection_version: number;
+  credential_ref: string;
+  access_token: SealedSecret | null;
+  cookie: { name: string; value: SealedSecret } | null;
+  issued_at: string | null;
+  expires_at: string | null;
+  generation: number;
+  state: 'active' | 'intervention_required';
+  updated_at: string;
+}
+
+/** One Connection's durable FIFO admission queue and its request history. */
+export interface ConnectionPacingRecord {
+  connection_id: string;
+  workspace_id: string;
+  queue: Array<{
+    acquisition_run_id: string;
+    source_id: string;
+    enqueued_at: string;
+    not_before: string | null;
+  }>;
+  active: Array<{ acquisition_run_id: string; source_id: string; started_at: string }>;
+  last_finished_at: string | null;
+  requests: string[];
+  updated_at: string;
 }
 
 /** One canonical record; the values are already cleaned and type-coerced. */
@@ -461,14 +595,14 @@ export function adoptedIntegrationVersion(
   return artifact.versions.find((version) => version.version === artifact.adopted_version);
 }
 
-/** The latest Batch a Source has handed to integration. */
+/** The latest Batch a Source has handed to integration, skipping quarantined ones. */
 export function latestIntegrationBatch(
   batches: IntegrationBatchRecord[],
   sourceId: string,
 ): IntegrationBatchRecord | undefined {
   for (let index = batches.length - 1; index >= 0; index -= 1) {
     const batch = batches[index];
-    if (batch?.source_id === sourceId) return batch;
+    if (batch?.source_id === sourceId && batch.quarantined_at === null) return batch;
   }
   return undefined;
 }

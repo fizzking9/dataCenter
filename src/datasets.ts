@@ -17,6 +17,7 @@ import {
   type IntegrationConfigurationVersion,
   type RawAcquisitionRecord,
   type RecordRejection,
+  type SourceRecord,
 } from './catalog.js';
 import { parseCsv } from './csv.js';
 import { canonicalDigest } from './crypto.js';
@@ -272,6 +273,22 @@ export function releaseDataset(options: {
   const context: ActionContext = { action: 'dataset_release', scope: 'workspace' };
   const actor = resolveActor(session, options.token, context);
   const source = requireAdministeredSource(session, actor, context, options.sourceId);
+  const released = releaseDatasetFor(session, actor, source);
+  session.save();
+  return released;
+}
+
+/**
+ * Produces the next Dataset Release inside a session the caller already holds,
+ * so an Acquisition Run persists the Release and its checkpoint in one save.
+ * The caller owns the save; this never persists on its own.
+ */
+export function releaseDatasetFor(
+  session: PlatformSession,
+  actor: Actor,
+  source: SourceRecord,
+): Record<string, unknown> {
+  const context: ActionContext = { action: 'dataset_release', scope: 'workspace' };
   const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
 
   const latestBatch = latestIntegrationBatch(session.state.integration_batches, source.source_id);
@@ -294,7 +311,8 @@ export function releaseDataset(options: {
   }
   const batches = session.state.integration_batches.filter(
     (candidate) => candidate.source_id === source.source_id
-      && candidate.integration_configuration_version === version.version,
+      && candidate.integration_configuration_version === version.version
+      && candidate.quarantined_at === null,
   );
   const fragments = batches.flatMap((batch) => batch.raw_acquisition_ids.flatMap((rawId) => {
     const raw = session.state.raw_acquisitions.find((candidate) => candidate.raw_id === rawId);
@@ -363,7 +381,6 @@ export function releaseDataset(options: {
       integration_configuration_version: release.integration_configuration_version,
     },
   });
-  session.save();
   return { ...view(dataset, release), reused: false };
 }
 

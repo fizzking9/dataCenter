@@ -5,20 +5,40 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export interface SourceRequest {
+  /** Epoch milliseconds at which the fixture received the request. */
+  at: number;
+  method: string;
   path: string;
   query: Record<string, string>;
   authorization: string | null;
+  cookie: string | null;
+  api_key: string | null;
+  content_type: string | null;
+  body: string;
 }
 
 export interface SourceReply {
   status?: number;
   body: string;
+  headers?: Record<string, string>;
+  content_type?: string | null;
+  delay_ms?: number;
+}
+
+export interface HttpSourceAuth {
+  token_path?: string;
+  login_path?: string;
+  issued?: string[];
+  cookie_name?: string | null;
+  rejected_tokens?: string[];
+  expire_after_uses?: number;
 }
 
 export interface HttpSourceScenario {
   /** One reply per request; the last one repeats unless `repeat_last` is false. */
   replies: SourceReply[];
   repeat_last?: boolean;
+  auth?: HttpSourceAuth;
 }
 
 /**
