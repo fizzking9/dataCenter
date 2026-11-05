@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { assertAuditLogAvailable } from './audit.js';
 import { resolveActor } from './auth.js';
 import { actorLabel, reject, type ActionContext } from './authz.js';
 import {
@@ -173,6 +174,9 @@ function storeAcquisition(
   const batchId = randomUUID();
   const objectPath = objectPathOf(rawId);
   const absolute = join(session.root, objectPath);
+  // The bytes are stored only once the Deployment can record their Audit Event,
+  // so an unavailable log leaves neither an orphan object nor an unaudited fact.
+  assertAuditLogAvailable(session.root, session.dataKey);
   mkdirSync(dirname(absolute), { recursive: true, mode: 0o700 });
   // `wx` keeps a Raw Acquisition write-once: no later attempt can rewrite it.
   writeFileSync(absolute, bytes, { flag: 'wx', mode: 0o600 });
@@ -308,6 +312,9 @@ export function acquireUpload(options: {
     };
   } catch (error) {
     if (!(error instanceof OperatorError)) throw error;
+    // An Audit Event refusal is not integration drift: the attempt stops with
+    // nothing persisted rather than being quarantined and saved unaudited.
+    if (error.code === 'AUDIT_INTEGRITY_FAILED' || error.code === 'AUDIT_LOG_UNAVAILABLE') throw error;
     // The attempt is quarantined as one Batch: its fragments never join a later
     // Release, and the Run states why it ended, so the gap is never silent.
     const now = new Date().toISOString();

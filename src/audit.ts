@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalJson } from './crypto.js';
 import { OperatorError } from './errors.js';
@@ -69,10 +69,53 @@ export function readAuditCheckpoint(root: string): AuditCheckpoint | undefined {
   return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) as AuditCheckpoint : undefined;
 }
 
+function unavailable(): OperatorError {
+  return new OperatorError(
+    'AUDIT_LOG_UNAVAILABLE',
+    'The Audit Event log cannot be written, so the protected operation stops.',
+    'Restore write access to the Deployment audit log before retrying.',
+  );
+}
+
+function integrityFailure(): OperatorError {
+  return new OperatorError(
+    'AUDIT_INTEGRITY_FAILED',
+    'The Audit Event chain does not match its signed checkpoint.',
+    'Stop governed writes and investigate the tampered Audit Event log.',
+  );
+}
+
+/**
+ * Proves the Audit Event log is writable and still matches its signed checkpoint
+ * before a protected operation changes anything. An unavailable log or a forged
+ * tail therefore stops the operation rather than letting it act unaudited.
+ */
+export function assertAuditLogAvailable(root: string, checkpointKey: Buffer): void {
+  let previous: AuditEvent | undefined;
+  let checkpoint: AuditCheckpoint | undefined;
+  try {
+    mkdirSync(auditDirectory(root), { recursive: true, mode: 0o700 });
+    // Opening for append proves writability; reading the tail proves the log is
+    // still the log its checkpoint signed.
+    const probe = openSync(eventsPath(root), 'a', 0o600);
+    closeSync(probe);
+    previous = lastEvent(root);
+    checkpoint = readAuditCheckpoint(root);
+  } catch {
+    throw unavailable();
+  }
+  if (!checkpointMatchesHead(previous, checkpoint, checkpointKey)) throw integrityFailure();
+}
+
 export function appendAuditEvent(root: string, input: AuditInput, checkpointKey: Buffer): AuditEvent {
-  const previous = lastEvent(root);
+  let previous: AuditEvent | undefined;
+  try {
+    previous = lastEvent(root);
+  } catch {
+    throw unavailable();
+  }
   if (!checkpointMatchesHead(previous, readAuditCheckpoint(root), checkpointKey)) {
-    throw new OperatorError('AUDIT_INTEGRITY_FAILED', 'The Audit Event chain does not match its signed checkpoint.', 'Stop governed writes and investigate the tampered Audit Event log.');
+    throw integrityFailure();
   }
   const draft = {
     ...input,
@@ -82,14 +125,20 @@ export function appendAuditEvent(root: string, input: AuditInput, checkpointKey:
     previous_hash: previous?.hash ?? GENESIS,
   };
   const event: AuditEvent = { ...draft, hash: eventHash(draft) };
-  mkdirSync(auditDirectory(root), { recursive: true, mode: 0o700 });
-  appendFileSync(eventsPath(root), `${JSON.stringify(event)}\n`, { mode: 0o600 });
   const checkpoint: AuditCheckpoint = {
     sequence: event.sequence,
     head_hash: event.hash,
     mac: checkpointMac(checkpointKey, event.sequence, event.hash),
   };
-  writeAtomic(checkpointPath(root), `${JSON.stringify(checkpoint)}\n`);
+  try {
+    mkdirSync(auditDirectory(root), { recursive: true, mode: 0o700 });
+    appendFileSync(eventsPath(root), `${JSON.stringify(event)}\n`, { mode: 0o600 });
+    // The checkpoint is written in the same protected step, so a log that cannot
+    // be extended never leaves a recorded event the Deployment cannot prove.
+    writeAtomic(checkpointPath(root), `${JSON.stringify(checkpoint)}\n`);
+  } catch {
+    throw unavailable();
+  }
   return event;
 }
 

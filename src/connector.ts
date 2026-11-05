@@ -17,6 +17,7 @@ import {
   recordRequest,
 } from './connection-session.js';
 import { valueAtPath } from './documents.js';
+import { egressRefusal } from './egress.js';
 import type { PlatformSession } from './session.js';
 
 /** How long one page request may take before the attempt is a failed attempt. */
@@ -122,6 +123,12 @@ export async function runConnector(options: {
   const { session, plan, connection, connectionVersion, acquisition } = options;
   // A restored Deployment has no route to a Source until an Operator opens one.
   assertConnectivityEnabled(session.root);
+  // The configured endpoint is judged before any credential is presented or any
+  // byte is requested, so a metadata or link-local target is never read.
+  const refusedTarget = await egressRefusal(`${connectionVersion.base_url}${acquisition.path}`);
+  if (refusedTarget !== null) {
+    return { complete: false, errorCode: refusedTarget, rawIds: [], batchIds: [] };
+  }
   const rawIds: string[] = [];
   const batchIds: string[] = [];
   const retry = connectionVersion.retry;

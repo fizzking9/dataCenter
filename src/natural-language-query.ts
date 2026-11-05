@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { resolveActor } from './auth.js';
 import { actorLabel, deny, reject, type ActionContext } from './authz.js';
 import {
@@ -1653,7 +1654,9 @@ function finishTurn(
       parts: arrayOf(response['parts']).length,
       parts_executed: arrayOf(response['parts']).filter((part) => isRecord(part) && part['executed'] === true).length,
       follow_up: prior.questions.length > 0,
-      normalized_question: question,
+      // The question is Workspace business payload: the deployment-wide audit
+      // view keeps only a digest, never the normalized text itself.
+      normalized_question_hash: createHash('sha256').update(question, 'utf8').digest('hex'),
       reason_code: String(response['reason_code'] ?? 'none'),
       ...(report === null || typeof report['report_id'] !== 'string'
         ? {}

@@ -16,6 +16,7 @@ import type {
   ScraperServiceContent,
   ScraperTarget,
 } from './catalog.js';
+import { egressRefusal } from './egress.js';
 
 /** One element the selector matched, with its opening tag so attributes are readable. */
 interface MatchedElement {
@@ -294,6 +295,19 @@ export async function readPage(options: {
         code: 'SCRAPER_NETWORK_SCOPE_REFUSED',
         page: options.page,
         message: 'The page URL is outside the approved network scope of this Scraper Service.',
+      },
+    };
+  }
+  // A page is judged by address as well as by approved origin, so a target that
+  // resolves into link-local or metadata space is never read.
+  if (await egressRefusal(options.url) !== null) {
+    return {
+      reply: null,
+      reading: emptyReading(),
+      diagnostic: {
+        code: 'SCRAPER_NETWORK_SCOPE_REFUSED',
+        page: options.page,
+        message: 'The page URL is a link-local or metadata target, which the approved network scope never covers.',
       },
     };
   }

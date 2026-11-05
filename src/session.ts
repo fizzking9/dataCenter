@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { appendAuditEvent, type AuditInput } from './audit.js';
+import { assertAuditLogAvailable, appendAuditEvent, type AuditInput } from './audit.js';
 import { OperatorError, assertCondition } from './errors.js';
 import { readMountedMasterKey, unwrapDataKey, type WrappedDataKey } from './keys.js';
 import { assessLicense, type LicenseWarning } from './license.js';
@@ -77,6 +77,10 @@ export function openPlatform(
       appendAuditEvent(root, { ...input, correlation_id: correlationId }, dataKey);
     },
     save() {
+      // A state change is never persisted onto a Deployment whose audit log is
+      // unavailable or no longer matches its checkpoint: the operation stops
+      // instead of leaving a governed fact with no account of itself.
+      assertAuditLogAvailable(root, dataKey);
       writePlatform(root, state);
     },
   };
