@@ -534,6 +534,59 @@ test('a follow-up normalizes and reauthorizes every turn, and never carries auth
   assert.equal(resumed.follow_up, true);
 });
 
+test('a follow-up re-resolves the Grant, so a narrowed column and row scope never widens authority', async (t) => {
+  const s = await readySurface();
+  t.after(() => s.endpoint.close());
+
+  const first = asOutput(await askWorkspace(s, ['--question', '设备维修台账 2026-01-05 至 2026-01-20 杭州的结算金额合计是多少？']));
+  assert.equal(first.outcome, 'answered', JSON.stringify(first));
+  const conversation = String(first.conversation);
+  const firstTotals = asRecord(asRecord(asRecord(first.parts[0]!['result'])['totals'])['metrics']);
+  assert.equal(firstTotals['settled_total'], '120.50');
+
+  // The Workspace Administrator narrows the Consumer's Grant between turns:
+  // the amount column disappears and rows are limited to another city.
+  const narrowed = command(
+    s.fixture,
+    [
+      'grant', 'publish',
+      '--product', s.ledgerId,
+      '--username', 'analyst@example.invalid',
+      '--request', jsonFile(s.fixture, 'nlq-follow-up-grant', {
+        columns: ['sn', 'city', 'handled_count', 'reported_on'],
+        row_filters: [{ field: 'city', op: 'equals', value: '上海' }],
+      }),
+    ],
+    { token: s.workspaceAdministratorToken },
+  );
+  assert.equal(narrowed.status, 0, narrowed.stderr);
+
+  const followUp = asOutput(await askWorkspace(s, [
+    '--question', '那 2026-01-05 至 2026-01-20 杭州的设备维修台账处理量合计是多少？',
+    '--conversation', conversation,
+  ]));
+  assert.equal(followUp.outcome, 'empty', JSON.stringify(followUp));
+  assert.equal(followUp.follow_up, true);
+  assert.equal(followUp.parts.length, 1);
+
+  // The plan is rebuilt from the narrowed Contract: the hidden field and metric
+  // never reach the model, and the answer never cites the hidden amount.
+  const planCall = s.endpoint.calls.filter((call) => call['purpose'] === 'query_plan').at(-1);
+  const products = asRecord(planCall!['input'])['products'] as Array<Record<string, unknown>>;
+  const ledger = products.find((product) => product['name'] === '设备维修台账');
+  assert.ok(ledger, 'the follow-up plans against the still-visible product');
+  const serialized = JSON.stringify(ledger);
+  assert.equal(serialized.includes('settled_amount'), false, 'a Grant-hidden field never reaches the model');
+  assert.equal(serialized.includes('settled_total'), false, 'a Grant-hidden metric never reaches the model');
+
+  const part = followUp.parts[0]!;
+  assert.equal(part['executed'], true, 'the follow-up still runs under the narrowed Grant');
+  assert.equal(JSON.stringify(part).includes('settled_total'), false, 'the answer never cites the hidden metric');
+  const result = asRecord(part['result']);
+  assert.equal(result['groups_total'], 0, 'the row filter resolves against the current Grant, not the prior turn');
+  assert.ok(followUp.limitations.some((line) => line.includes('没有记录')));
+});
+
 test('a compound Chinese question with a mixed SN identifier keeps every governed value deterministic', async (t) => {
   const s = await readySurface();
   t.after(() => s.endpoint.close());
