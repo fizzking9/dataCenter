@@ -1134,8 +1134,21 @@ export interface ReportScheduleRecord {
 // Governed generation: Model Profiles, Workspace Model Bindings, and Proposals.
 // ---------------------------------------------------------------------------
 
-/** How a Model Profile Version speaks to its administrator-supplied endpoint. */
-export type ModelAdapterKind = 'hosted' | 'generic_local';
+/**
+ * How a Model Profile Version speaks to its administrator-supplied endpoint.
+ *
+ * `alibaba_qwen` is the DashScope-style Qwen native protocol, `deepseek` the
+ * DeepSeek native chat protocol, and `openai_compatible` the generic OpenAI
+ * Chat Completions protocol a customer-operated local service can expose.
+ * `hosted` and `generic_local` remain the platform's own declarative contract,
+ * so a Version published before the provider adapters keeps its behavior.
+ */
+export type ModelAdapterKind =
+  | 'hosted'
+  | 'generic_local'
+  | 'alibaba_qwen'
+  | 'deepseek'
+  | 'openai_compatible';
 
 /** The generation purposes a Model Profile Version supports. */
 export type ModelPurpose =
