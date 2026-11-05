@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { resolveActor } from './auth.js';
 import { actorLabel, deny, reject, type ActionContext } from './authz.js';
 import {
@@ -44,6 +44,7 @@ import {
   normalizeQuestion,
   type ConversationPayload,
 } from './nlq-handles.js';
+import type { GenerationMetering } from './operations.js';
 import { workspaceRoleOf } from './platform.js';
 import { executeDataProductQuery } from './product-query.js';
 import { contractView, productIdentity } from './products.js';
@@ -1051,6 +1052,16 @@ async function runTurn(principal: TurnPrincipal, options: TurnRequest): Promise<
   }
   const workspaceId = principal.workspaceId;
   const role = principal.role;
+  // Every generation of one turn is metered under the turn, so a Natural-
+  // Language Query's plan, narration, and clarification are costed together and
+  // its per-operation average is the average of the whole turn.
+  const metering: GenerationMetering = {
+    root: session.root,
+    class: 'nlq',
+    operation: 'natural_language_query',
+    operation_id: randomUUID(),
+    workspace_id: workspaceId,
+  };
   const scoped: ActionContext = {
     ...entry,
     workspace_id: workspaceId,
@@ -1219,14 +1230,19 @@ async function runTurn(principal: TurnPrincipal, options: TurnRequest): Promise<
 
   let plan: Record<string, unknown>;
   try {
-    const answer = await generateForPurpose(model.pin, 'query_plan', planInput, adapterFail);
+    const answer = await generateForPurpose(model.pin, 'query_plan', planInput, adapterFail, metering);
     plan = answer.output;
     if (answer.tool_calls.length > 0) {
       throw new NaturalLanguageFailure('QUERY_PLAN_TOOL_NOT_PERMITTED', 'The plan used a tool the purpose does not expose.');
     }
   } catch (error) {
     const code = errorCodeOf(error);
-    response['outcome'] = code.startsWith('QUERY_PLAN_') ? 'refused' : 'unavailable';
+    // A plan the platform will not send, or an answer past the settled token
+    // ceiling, is a refused request: no query runs and nothing is published.
+    const refused = code.startsWith('QUERY_PLAN_')
+      || code === 'MODEL_INPUT_CEILING_EXCEEDED'
+      || code === 'MODEL_OUTPUT_CEILING_EXCEEDED';
+    response['outcome'] = refused ? 'refused' : 'unavailable';
     response['reason_code'] = code;
     response['limitations'] = [generationLimitation(error)];
     return finishTurn(session, scoped, reader, response, question, prior);
@@ -1267,6 +1283,7 @@ async function runTurn(principal: TurnPrincipal, options: TurnRequest): Promise<
       null,
       targets.length,
       adapterFail,
+      metering,
     );
     response['outcome'] = 'clarification';
     response['reason_code'] = 'NLQ_CLARIFICATION_REQUIRED';
@@ -1335,6 +1352,7 @@ async function runTurn(principal: TurnPrincipal, options: TurnRequest): Promise<
       ambiguity.part,
       targets.length,
       adapterFail,
+      metering,
     );
     response['outcome'] = 'clarification';
     response['reason_code'] = 'NLQ_CLARIFICATION_REQUIRED';
@@ -1481,7 +1499,7 @@ async function runTurn(principal: TurnPrincipal, options: TurnRequest): Promise<
       const facts = narrationFacts(narratable, question);
       if (facts.records.length > 0) {
         try {
-          const narrativeAnswer = await generateGroundedNarration(model.pin, facts, adapterFail);
+          const narrativeAnswer = await generateGroundedNarration(model.pin, facts, adapterFail, metering);
           const narrative = String(narrativeAnswer['narrative'] ?? '');
           const violation = narrativeViolation(narrative, facts);
           if (violation !== null) {
@@ -1581,6 +1599,7 @@ async function askClarification(
   part: PartTarget | null,
   targetCount: number,
   adapterFail: (code: string, message: string) => never,
+  metering: GenerationMetering,
 ): Promise<Record<string, unknown>> {
   let asked = fallbackClarification(ambiguity.missing);
   if (model.clarification) {
@@ -1595,6 +1614,7 @@ async function askClarification(
           product: part === null ? null : { name: part.product.name, title: part.authorized['title'] ?? null },
         },
         adapterFail,
+        metering,
       );
       asked = String(answer['question']);
     } catch {

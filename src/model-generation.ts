@@ -10,6 +10,7 @@ import {
   type ModelPromptPin,
   type PinnedModelProfile,
 } from './model-adapter.js';
+import { beginGeneration, type GenerationMetering } from './operations.js';
 import { REFUSED_KEYS } from './product-query-document.js';
 
 /** The purposes a Model Profile Version may declare, in evaluation order. */
@@ -113,6 +114,7 @@ export async function generateForPurpose(
   purpose: ModelPurpose,
   input: unknown,
   fail: AdapterFailure,
+  metering?: GenerationMetering,
 ): Promise<GenerationResult> {
   // A pinned permission set is the ceiling for every purpose, on every path: a
   // generation whose evidence is outside it is refused before the endpoint sees it.
@@ -132,7 +134,19 @@ export async function generateForPurpose(
     tools: toolsFor(profile, purpose),
     input,
   };
-  return modelAdapter(profile.adapter).generate(profile, request, fail);
+  // Every metered generation passes the class's token ceilings and is costed at
+  // the operator's prices, whether or not its caller records anything else.
+  const meter = metering === undefined
+    ? null
+    : beginGeneration(metering, {
+        prompt_body: request.prompt.body,
+        input,
+        tools: request.tools,
+        structured_output: request.structured_output,
+      }, fail);
+  const result = await modelAdapter(profile.adapter).generate(profile, request, fail);
+  meter?.settle(result);
+  return result;
 }
 
 export interface GeneratedCandidate {
@@ -298,8 +312,9 @@ export async function generateIntegrationCandidate(
   profile: PinnedModelProfile,
   input: unknown,
   fail: AdapterFailure,
+  metering?: GenerationMetering,
 ): Promise<GeneratedCandidate> {
-  const result = await generateForPurpose(profile, 'integration_proposal', input, fail);
+  const result = await generateForPurpose(profile, 'integration_proposal', input, fail, metering);
   if (result.tool_calls.length > 0) {
     // The data dictionary is already supplied, so a tool call would mean the
     // endpoint looked somewhere the platform did not expose.
@@ -319,8 +334,9 @@ export async function generateProductCandidate(
   profile: PinnedModelProfile,
   input: unknown,
   fail: AdapterFailure,
+  metering?: GenerationMetering,
 ): Promise<Record<string, unknown>> {
-  const result = await generateForPurpose(profile, 'data_product_proposal', input, fail);
+  const result = await generateForPurpose(profile, 'data_product_proposal', input, fail, metering);
   if (result.tool_calls.length > 0) {
     // The authorized schema and Business Context are already supplied, so a
     // tool call would mean the endpoint looked somewhere it was not given.
@@ -349,8 +365,9 @@ export async function generateScraperRepairCandidate(
   profile: PinnedModelProfile,
   input: unknown,
   fail: AdapterFailure,
+  metering?: GenerationMetering,
 ): Promise<RepairedScraperOutput> {
-  const result = await generateForPurpose(profile, 'scraper_repair', input, fail);
+  const result = await generateForPurpose(profile, 'scraper_repair', input, fail, metering);
   if (result.tool_calls.length > 0) {
     // Every input a repair needs is supplied, so a tool call means the endpoint
     // looked somewhere the platform did not expose.
@@ -382,8 +399,9 @@ export async function generateScraperRepairCandidate(
   profile: PinnedModelProfile,
   input: unknown,
   fail: AdapterFailure,
+  metering?: GenerationMetering,
 ): Promise<Record<string, unknown>> {
-  const result = await generateForPurpose(profile, 'grounded_narration', input, fail);
+  const result = await generateForPurpose(profile, 'grounded_narration', input, fail, metering);
   const failure = narrationFailure(result.output, input);
   if (failure !== null) {
     fail('NARRATION_NOT_GROUNDED', `The Model Profile answer is not grounded in the supplied evidence (${failure}).`);
@@ -400,8 +418,9 @@ export async function generateClarification(
   profile: PinnedModelProfile,
   input: unknown,
   fail: AdapterFailure,
+  metering?: GenerationMetering,
 ): Promise<Record<string, unknown>> {
-  const result = await generateForPurpose(profile, 'clarification', input, fail);
+  const result = await generateForPurpose(profile, 'clarification', input, fail, metering);
   const question = result.output['question'];
   if (typeof question !== 'string' || !isSimplifiedChinese(question)) {
     fail('CLARIFICATION_NOT_SIMPLIFIED_CHINESE', 'The Model Profile answer is not a Simplified Chinese clarification.');
