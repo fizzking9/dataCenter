@@ -293,7 +293,7 @@ export function WorkspaceExplore({ workspaceId, onSessionLost }: WorkspaceViewPr
   }
 
   function recordsRequest(): Record<string, unknown> {
-    const request: Record<string, unknown> = { kind: 'records', limit: pageLimit() };
+    const request: Record<string, unknown> = { kind: 'records', limit: pageLimit(), include_totals: true };
     const stated = filterRequest();
     if (stated.length > 0) request['filters'] = stated;
     if (recordStart !== '' || recordEnd !== '') request['window'] = { start: recordStart, end: recordEnd };
@@ -301,7 +301,7 @@ export function WorkspaceExplore({ workspaceId, onSessionLost }: WorkspaceViewPr
   }
 
   function documentsRequest(): Record<string, unknown> {
-    return withRelease({ kind: 'search', q: query, limit: pageLimit() });
+    return withRelease({ kind: 'search', q: query, limit: pageLimit(), include_totals: true });
   }
 
   function aggregateRequest(): Record<string, unknown> {

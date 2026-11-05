@@ -210,7 +210,7 @@ function readProjection(world: ChannelWorld): Record<string, unknown> {
 }
 
 function statusProjection(status: Record<string, unknown>): Record<string, unknown> {
-  const window = asRecord(status['rollback_window'] ?? {});
+  const window = asRecord(status['application_rollback_window'] ?? {});
   return {
     state: status['state'],
     health: status['health'],
@@ -431,7 +431,7 @@ function runLifecycle(options: {
   };
 
   const upgraded = ok(command(world, ['upgrade', ...signedArguments(world, options.nextBundle, options.upgradeBundlePath)]), 'upgrade');
-  const window = asRecord(upgraded['rollback_window'] ?? {});
+  const window = asRecord(upgraded['application_rollback_window'] ?? {});
   const migrations = asRecord(upgraded['migrations'] ?? {});
   observations['upgrade'] = {
     status: upgraded['status'],
@@ -446,7 +446,7 @@ function runLifecycle(options: {
       applied_steps: migrations['applied_steps'],
       skipped_steps: migrations['skipped_steps'],
     },
-    rollback_window: {
+    application_rollback_window: {
       open: window['open'],
       eligible: window['eligible'],
       from_release: window['from_release'],
@@ -462,7 +462,7 @@ function runLifecycle(options: {
   renameSync(options.upgradeBundlePath, `${options.upgradeBundlePath}-withdrawn`);
   writeFileSync(world.dockerLogPath, '');
   const rolledBack = ok(command(world, ['rollback', '--operator', OPERATOR]), 'rollback');
-  const closedWindow = asRecord(rolledBack['rollback_window'] ?? {});
+  const closedWindow = asRecord(rolledBack['application_rollback_window'] ?? {});
   observations['rollback'] = {
     from_release: rolledBack['from_release'],
     to_release: rolledBack['to_release'],
@@ -473,7 +473,7 @@ function runLifecycle(options: {
     data_unchanged: rolledBack['data_unchanged'],
     offline: rolledBack['offline'],
     records_after_upgrade: rolledBack['records_after_upgrade'],
-    rollback_window: {
+    application_rollback_window: {
       open: closedWindow['open'],
       eligible: closedWindow['eligible'],
       closed_by: closedWindow['closed_by'],

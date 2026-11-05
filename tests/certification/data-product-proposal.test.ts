@@ -467,7 +467,7 @@ test('validation resolves every Contract name and a preview exposes the API shap
       include_totals: true,
       limit: 10,
     });
-    assert.deepEqual(queries[1], { kind: 'records', limit: 10 });
+    assert.deepEqual(queries[1], { kind: 'records', include_totals: true, limit: 10 });
     const aggregate = asRecord(asArray(preview['representative_results'])[0]);
     assert.equal(aggregate['kind'], 'aggregate');
     assert.equal(aggregate['groups_total'], 3);

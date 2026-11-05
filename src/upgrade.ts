@@ -67,7 +67,12 @@ interface MigrationLedger {
   updated_at: string;
 }
 
-export interface RollbackWindow {
+/**
+ * The Application Rollback window one upgrade opens until finalization or
+ * Application Rollback closes it; deliberately distinct from an Artifact
+ * Rollback, which returns governed use to an earlier Artifact Version.
+ */
+export interface ApplicationRollbackWindow {
   open: boolean;
   eligible: boolean;
   from_release: string;
@@ -94,7 +99,7 @@ export interface UpgradeRecord {
   migrations: string[];
   store_schema_version: number;
   previous_images: { release: string; images: number };
-  rollback_window: RollbackWindow | null;
+  application_rollback_window: ApplicationRollbackWindow | null;
   verification: { passed: true; verified_at: string; evidence_id: string; checks: string[] } | null;
   finalization: { finalized_at: string; previous_release_removed: boolean; evidence_id: string } | null;
   rollback: {
@@ -201,9 +206,9 @@ function writeLedger(root: string, ledger: MigrationLedger): void {
   writeJsonFile(ledgerPath(root), ledger);
 }
 
-/** The rollback window a status answer states, or null when none ever opened. */
-export function rollbackWindow(root: string): RollbackWindow | null {
-  return readUpgradeRecord(root)?.rollback_window ?? null;
+/** The Application Rollback window a status answer states, or null when none ever opened. */
+export function applicationRollbackWindow(root: string): ApplicationRollbackWindow | null {
+  return readUpgradeRecord(root)?.application_rollback_window ?? null;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -329,9 +334,9 @@ function evaluatePreflight(options: PreflightOptions): Record<string, unknown> {
   const deployment = readDeployment(options.root);
   const existing = readUpgradeRecord(options.root);
   assertCondition(
-    !(existing?.rollback_window?.open === true),
+    !(existing?.application_rollback_window?.open === true),
     'ROLLBACK_WINDOW_OPEN',
-    'The previous upgrade is still inside its rollback window.',
+    'The previous upgrade is still inside its Application Rollback window.',
     'Run verify and then finalize before starting another upgrade.',
   );
 
@@ -833,7 +838,7 @@ export function upgradeDeployment(options: PreflightOptions & { backupRoot?: str
       migrations: [],
       store_schema_version: readLedger(options.root).store_schema_version,
       previous_images: previousImages,
-      rollback_window: existing?.rollback_window?.open === true ? existing.rollback_window : null,
+      application_rollback_window: existing?.application_rollback_window?.open === true ? existing.application_rollback_window : null,
       verification: null,
       finalization: null,
       rollback: null,
@@ -855,7 +860,7 @@ export function upgradeDeployment(options: PreflightOptions & { backupRoot?: str
       };
       const services = startPinnedServices(options.root, running);
       writeDeployment(options.root, { ...running, service_open: true, runtime_services: services });
-      const window: RollbackWindow = {
+      const window: ApplicationRollbackWindow = {
         open: true,
         eligible: true,
         from_release: from,
@@ -871,7 +876,7 @@ export function upgradeDeployment(options: PreflightOptions & { backupRoot?: str
         updated_at: new Date().toISOString(),
         migrations: applied.migrations,
         store_schema_version: applied.state_schema_version,
-        rollback_window: window,
+        application_rollback_window: window,
         attempt,
       };
       writeUpgradeRecord(options.root, record);
@@ -903,7 +908,7 @@ export function upgradeDeployment(options: PreflightOptions & { backupRoot?: str
         service_open: true,
         runtime_services: services,
         migrations: applied,
-        rollback_window: window,
+        application_rollback_window: window,
         checkpoint_required: preflight['checkpoint_required'],
         evidence_id: evidenceId,
       };
@@ -1131,7 +1136,7 @@ export function verifyUpgrade(options: {
     record !== undefined && (record.status === 'upgraded' || record.status === 'verified'),
     'UPGRADE_NOT_READY',
     'No completed upgrade is waiting for verification.',
-    'Run upgrade first; verification covers exactly one open rollback window.',
+    'Run upgrade first; verification covers exactly one open Application Rollback window.',
   );
   assertCondition(deployment.service_open, 'DEPLOYMENT_NOT_OPEN', 'Verification requires an open Deployment.');
   assertCondition(
@@ -1267,7 +1272,7 @@ export function verifyUpgrade(options: {
     throw new OperatorError(
       'UPGRADE_VERIFICATION_FAILED',
       `Upgrade verification failed: ${failed.join(', ')}.`,
-      'Keep the rollback window open, inspect the named checks, and roll back if the new release cannot be trusted.',
+      'Keep the Application Rollback window open, inspect the named checks, and roll back if the new release cannot be trusted.',
     );
   }
 
@@ -1308,7 +1313,7 @@ export function verifyUpgrade(options: {
     },
     passed: true,
     checks,
-    rollback_window: record.rollback_window,
+    application_rollback_window: record.application_rollback_window,
     evidence_id: evidenceId,
   };
 }
@@ -1354,17 +1359,17 @@ export function finalizeUpgrade(options: { root: string; operator: string }): Re
     };
   }
   assertCondition(
-    record.rollback_window?.open === true,
+    record.application_rollback_window?.open === true,
     'ROLLBACK_NOT_ELIGIBLE',
-    'The rollback window is no longer open.',
+    'The Application Rollback window is no longer open.',
   );
   const closedAt = new Date().toISOString();
   const closed: UpgradeRecord = {
     ...record,
     status: 'finalized',
     updated_at: closedAt,
-    rollback_window: {
-      ...record.rollback_window,
+    application_rollback_window: {
+      ...record.application_rollback_window,
       open: false,
       eligible: false,
       closed_at: closedAt,
@@ -1397,7 +1402,7 @@ export function finalizeUpgrade(options: { root: string; operator: string }): Re
     to_release: record.to_release,
     rollback_eligible: false,
     changed: true,
-    rollback_window: closed.rollback_window,
+    application_rollback_window: closed.application_rollback_window,
     cleanup: { previous_release: record.from_release, removed },
     finalization,
     evidence_id: evidenceId,
@@ -1417,9 +1422,9 @@ export function rollbackDeployment(options: {
   const deployment = readDeployment(options.root);
   const record = readUpgradeRecord(options.root);
   assertCondition(
-    record !== undefined && record.rollback_window?.open === true && record.rollback_window.eligible,
+    record !== undefined && record.application_rollback_window?.open === true && record.application_rollback_window.eligible,
     'ROLLBACK_NOT_ELIGIBLE',
-    'The Deployment has no open, eligible rollback window.',
+    'The Deployment has no open, eligible Application Rollback window.',
     'Application Rollback is only available until explicit finalization.',
   );
   assertCondition(
@@ -1502,8 +1507,8 @@ export function rollbackDeployment(options: {
     secrets_included: false,
   });
   rollback.evidence_id = evidenceId;
-  const window: RollbackWindow = {
-    ...record.rollback_window,
+  const window: ApplicationRollbackWindow = {
+    ...record.application_rollback_window,
     open: false,
     eligible: false,
     closed_at: closedAt,
@@ -1513,7 +1518,7 @@ export function rollbackDeployment(options: {
     ...record,
     status: 'rolled_back',
     updated_at: closedAt,
-    rollback_window: window,
+    application_rollback_window: window,
     rollback,
   });
   return {
@@ -1530,7 +1535,7 @@ export function rollbackDeployment(options: {
     records_after_upgrade: recordsAfterUpgrade,
     previous_images: previousImages,
     offline: true,
-    rollback_window: window,
+    application_rollback_window: window,
     evidence_id: evidenceId,
   };
 }

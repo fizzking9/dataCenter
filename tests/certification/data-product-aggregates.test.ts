@@ -160,11 +160,11 @@ function query(
   fixture: PlatformFixture,
   token: string,
   productId: string,
-  request: unknown,
+  request: Record<string, unknown>,
 ): AggregateResponse {
   const result = command(
     fixture,
-    ['product', 'query', '--product', productId, '--request', jsonFile(fixture, 'aggregate-query', request)],
+    ['product', 'query', '--product', productId, '--request', jsonFile(fixture, 'aggregate-query', { include_totals: true, ...request })],
     { token },
   );
   assert.equal(result.status, 0, result.stderr);
@@ -633,7 +633,7 @@ test('declared complexity, execution-time, and result-size limits never return t
     sourceId,
     '设备台账扫描受限',
     'scan-limited',
-    { ...CONTRACT, title: '设备台账扫描受限', limits: { max_scanned_records: 2, max_groups: 10_000, max_execution_ms: 5_000 } },
+    { ...CONTRACT, title: '设备台账扫描受限', limits: { max_scanned_records: 2, max_groups: 5_000, max_execution_ms: 5_000 } },
   );
   const groupedProductId = publishOver(
     fixture,
@@ -649,7 +649,7 @@ test('declared complexity, execution-time, and result-size limits never return t
     sourceId,
     '设备台账无执行预算',
     'budgetless',
-    { ...CONTRACT, title: '设备台账无执行预算', limits: { max_scanned_records: 100_000, max_groups: 10_000, max_execution_ms: 0 } },
+    { ...CONTRACT, title: '设备台账无执行预算', limits: { max_scanned_records: 100_000, max_groups: 5_000, max_execution_ms: 0 } },
   );
 
   const tooComplex = refusal(
