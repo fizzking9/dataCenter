@@ -138,6 +138,45 @@ export function readUpgradeRecord(root: string): UpgradeRecord | undefined {
   return readJsonFile<UpgradeRecord>(path);
 }
 
+export interface MigrationLedgerView {
+  schema_version: 1;
+  store_schema_version: number;
+  updated_at: string;
+  migrations: Array<{
+    id: string;
+    from_release: string;
+    to_release: string;
+    state_schema_version: number;
+    expand_only: true;
+    applied_at: string;
+    steps: Array<{ name: string; applied_at: string }>;
+  }>;
+  secrets_included: false;
+}
+
+/**
+ * The durable, locked migration ledger as the Operator Console may read it:
+ * every applied migration and each completed step, with no free-form details.
+ */
+export function readMigrationLedger(root: string): MigrationLedgerView {
+  const ledger = readLedger(root);
+  return {
+    schema_version: 1,
+    store_schema_version: ledger.store_schema_version,
+    updated_at: ledger.updated_at,
+    migrations: ledger.migrations.map((entry) => ({
+      id: entry.id,
+      from_release: entry.from_release,
+      to_release: entry.to_release,
+      state_schema_version: entry.state_schema_version,
+      expand_only: entry.expand_only,
+      applied_at: entry.applied_at,
+      steps: entry.steps.map((step) => ({ name: step.name, applied_at: step.applied_at })),
+    })),
+    secrets_included: false,
+  };
+}
+
 function writeUpgradeRecord(root: string, record: UpgradeRecord): UpgradeRecord {
   mkdirSync(upgradesDirectory(root), { recursive: true, mode: 0o700 });
   writeJsonFile(recordPath(root), record);
