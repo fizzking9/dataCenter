@@ -562,19 +562,197 @@ export interface WorkspaceAuditView {
   events: WorkspaceAuditEventView[];
 }
 
+export interface DataProductMetricView {
+  name: string;
+  aggregation: string;
+  value_type: string;
+  field?: string;
+  unit: string | null;
+  currency: string | null;
+  definition?: string;
+  favorable_direction?: string | null;
+  dimensions: string[];
+}
+
+/** The search capability a Contract publishes to one reader, or null when a Grant hides it. */
+export interface DataProductSearchView {
+  text_field: string;
+  title_field?: string;
+  suggest_fields: string[];
+  ranking: { kind: string; title_weight: number; text_weight: number };
+  max_terms: number;
+  min_term_length: number;
+}
+
+export interface DataProductRelationshipView {
+  name: string;
+  description: string | null;
+  cardinality: 'one' | 'many';
+  on: Record<string, string>;
+  fields: Array<{ name: string; description?: string }>;
+  grain: string[];
+  filters: string[];
+  limit: number;
+}
+
+/** One authorized published Data Product and the Contract metadata a Consumer may see. */
 export interface DataProductSummary {
   data_product_id: string;
   name: string;
   api_path: string;
   title: string;
+  fields: string[];
+  dimensions: string[];
+  metrics: DataProductMetricView[];
+  grain: string[];
+  time: { field: string; precision: 'date' | 'timestamp'; time_zone: string } | null;
+  filters: string[];
+  field_types: Record<string, string>;
+  search: DataProductSearchView | null;
+  limits: { max_scanned_records: number; max_groups: number; max_execution_ms: number };
+  default_limit: number;
+  max_limit: number;
+  relationships: DataProductRelationshipView[];
   data_product_version: number;
-  data_product_release: string;
+  data_product_release: number;
+  dataset_release: number;
   contract_version: { major: number; minor: number };
 }
 
 export interface DataProductList {
   workspace_id: string;
   data_products: DataProductSummary[];
+}
+
+/** One exact Release a Consumer may read, and the Contract line it served. */
+export interface ProductReleaseView {
+  release: number;
+  data_product_version: number;
+  contract_version: { major: number; minor: number } | null;
+  withdrawn: boolean;
+  dataset_release: number;
+  relationships: Array<{ name: string; dataset_id: string; dataset_release: number }>;
+  created_at: string;
+  current: boolean;
+  retention_expired: boolean;
+}
+
+export interface ProductReleaseList {
+  data_product_id: string;
+  name: string;
+  api_path: string;
+  lines: Array<{
+    major: number;
+    current_version: number;
+    current_release: number;
+    opened_at: string;
+    withdrawn_at: string | null;
+  }>;
+  releases: ProductReleaseView[];
+}
+
+/** One scalar value exactly as the governed answer states it; missing values are null. */
+export type ProductScalar = string | number | null;
+
+/** One window the answer evaluated, with the coverage the pinned Release holds. */
+export interface ProductQueryWindowView {
+  field: string;
+  precision: 'date' | 'timestamp';
+  time_zone: string;
+  start: string;
+  end: string;
+  coverage: { start: string; end: string } | null;
+  partial: boolean;
+  period?: 'day' | 'week';
+  complete?: boolean;
+  same_elapsed_interval?: boolean;
+}
+
+/** One metric compared beside the window it was read against. */
+export interface ProductComparedMetric {
+  value: ProductScalar;
+  change: string | number | null;
+  change_percent: string | null;
+  change_percent_reason?: string;
+  direction?: 'up' | 'down' | 'flat';
+  judgment?: 'favorable' | 'adverse' | 'neutral';
+}
+
+export interface ProductQueryGroup {
+  group: Record<string, ProductScalar>;
+  null_dimensions: string[];
+  metrics: Record<string, ProductScalar>;
+  comparison?: Record<string, ProductComparedMetric>;
+}
+
+export interface ProductQueryProvenance {
+  source: { source_id: string; name: string | null };
+  dataset_release: number;
+  integration_configuration_version: number;
+  business_context: Record<string, number>;
+  record_count: number | null;
+  permitted_record_count?: number;
+  acquired_at: string;
+  integrated_at: string;
+  released_at: string;
+  relationships: Array<{
+    name: string;
+    cardinality: 'one' | 'many';
+    source: { source_id: string; name: string | null };
+    dataset_id: string;
+    dataset_release: number;
+    integration_configuration_version: number;
+    business_context: Record<string, number>;
+    record_count: number;
+    acquired_at: string;
+    integrated_at: string;
+    released_at: string;
+  }>;
+}
+
+/** One governed Data Product Query answer, whichever Contract kind it read. */
+export interface ProductQueryAnswer {
+  data_product_id: string;
+  name: string;
+  api_path: string;
+  data_product_version: number;
+  data_product_release: number;
+  contract_version: { major: number; minor: number };
+  contract_hash: string;
+  kind: 'records' | 'search' | 'suggest' | 'aggregate';
+  columns?: string[];
+  records?: Array<Record<string, unknown>>;
+  linked?: string[];
+  matched_count?: number;
+  suggestions?: Array<{ value: string; count: number }>;
+  grouped_by?: string[];
+  metrics?: DataProductMetricView[];
+  groups?: ProductQueryGroup[];
+  totals?: { metrics: Record<string, ProductScalar>; comparison?: Record<string, ProductComparedMetric> } | null;
+  groups_total?: number;
+  returned: number;
+  truncated?: boolean;
+  next_cursor: string | null;
+  limit: number;
+  scanned_records: number;
+  window: ProductQueryWindowView | null;
+  comparison_window?: ProductQueryWindowView | null;
+  provenance: ProductQueryProvenance;
+  cache?: { reused: boolean };
+}
+
+export interface ProductExportCreated {
+  export_id: string;
+  workspace_id: string;
+  data_product_id: string;
+  data_product_release: number;
+  content_type: string;
+  columns: string[];
+  row_count: number;
+  content_hash: string;
+  object_path: string;
+  created_at: string;
+  expires_at: string;
 }
 
 /** One Data Product Grant in force, narrowed to a member or an Agent Identity. */
@@ -2692,6 +2870,26 @@ export const platformApi = {
     ),
   dataProducts: (workspaceId: string) =>
     request<DataProductList>(`/api/workspace/data-products${workspaceQuery(workspaceId)}`),
+  productReleases: (dataProductId: string, workspaceId: string) =>
+    request<ProductReleaseList>(
+      `/api/workspace/products/${encodeURIComponent(dataProductId)}/releases${workspaceQuery(workspaceId)}`,
+    ),
+  queryProduct: (dataProductId: string, workspaceId: string, query: unknown) =>
+    request<ProductQueryAnswer>(
+      `/api/workspace/products/${encodeURIComponent(dataProductId)}/query${workspaceQuery(workspaceId)}`,
+      { method: 'POST', body: JSON.stringify({ request: query }) },
+    ),
+  createProductExport: (dataProductId: string, workspaceId: string, query: unknown) =>
+    request<ProductExportCreated>(
+      `/api/workspace/products/${encodeURIComponent(dataProductId)}/exports${workspaceQuery(workspaceId)}`,
+      { method: 'POST', body: JSON.stringify({ request: query }) },
+    ),
+  myExports: (workspaceId: string, dataProductId?: string) =>
+    request<WorkspaceExportList>(
+      `/api/workspace/my-exports${workspaceQuery(workspaceId)}${
+        dataProductId === undefined ? '' : `&data_product_id=${encodeURIComponent(dataProductId)}`
+      }`,
+    ),
   productGovernance: (dataProductId: string) =>
     request<ProductGovernanceView>(`/api/workspace/products/${encodeURIComponent(dataProductId)}/governance`),
   previewProductEvolution: (dataProductId: string, contract: unknown) =>

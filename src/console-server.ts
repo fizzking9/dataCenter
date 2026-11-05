@@ -23,7 +23,7 @@ import {
   revokeOAuthClient,
 } from './agents.js';
 import { publishGrant, revokeGrant } from './grants.js';
-import { createExport, downloadExport, listExports, revokeExport } from './export.js';
+import { createExport, downloadExport, listExports, listOwnExports, revokeExport } from './export.js';
 import { showDataProductGovernance } from './product-governance.js';
 import { showWorkspaceAudit } from './audit-view.js';
 import { login, logout, verifyStepUpAuthentication } from './auth.js';
@@ -48,7 +48,7 @@ import {
   publishIntegrationDeclaration,
 } from './integration.js';
 import { browserIdentity, browserNavigation } from './navigation.js';
-import { listDataProducts, previewDataProductEvolution, publishDataProductEvolution, rollbackDataProductVersion, withdrawDataProductVersion } from './products.js';
+import { listDataProductReleases, listDataProducts, previewDataProductEvolution, publishDataProductEvolution, rollbackDataProductVersion, withdrawDataProductVersion } from './products.js';
 import { publishModelBinding, revokeModelBinding, showModelBindingWorkspace } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, listModelProfiles, publishModelProfile } from './model-profile.js';
 import {
@@ -730,6 +730,68 @@ async function handleApi(
       masterKey: options.masterKey,
       token,
       workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  // Consumer exploration reads through the very same governed engine the
+  // published Data Product API and MCP answer with. The active Workspace is
+  // named on every request, so a Product reached from another Workspace answers
+  // exactly like one that does not exist.
+  const productQueryRoute = /^\/api\/workspace\/products\/([^/]+)\/query$/u.exec(pathname);
+  if (productQueryRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 200, queryDataProductApi({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+      dataProductId: decodeURIComponent(productQueryRoute[1]!),
+      request: jsonDocument(body, 'request'),
+    }));
+    return;
+  }
+
+  const productReleasesRoute = /^\/api\/workspace\/products\/([^/]+)\/releases$/u.exec(pathname);
+  if (productReleasesRoute !== null && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listDataProductReleases({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      dataProductId: decodeURIComponent(productReleasesRoute[1]!),
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  // A Consumer's curated export runs the same governed query, under the same
+  // Grants, Release pin, and short-lived reauthorized download.
+  const productExportRoute = /^\/api\/workspace\/products\/([^/]+)\/exports$/u.exec(pathname);
+  if (productExportRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, createExport({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+      dataProductId: decodeURIComponent(productExportRoute[1]!),
+      request: jsonDocument(body, 'request'),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/my-exports' && method === 'GET') {
+    const token = userSession(request);
+    const dataProductId = searchParam(request, 'data_product_id');
+    sendJson(response, 200, listOwnExports({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+      ...(dataProductId === null ? {} : { dataProductId }),
     }));
     return;
   }
@@ -2371,6 +2433,10 @@ const STATUS_BY_CODE: Record<string, number> = {
   DATA_PRODUCT_QUERY_TOO_COMPLEX: 422,
   DATA_PRODUCT_QUERY_RESULT_TOO_LARGE: 422,
   DATA_PRODUCT_QUERY_TIMEOUT: 504,
+  DATA_PRODUCT_QUERY_CURSOR_NOT_SUPPORTED: 400,
+  DATA_PRODUCT_QUERY_LIMIT_EXCEEDED: 400,
+  DATA_PRODUCT_RELEASE_INVALID: 409,
+  RETENTION_EXPIRED: 410,
   // Data Product governance lifecycle refusals.
   DATA_PRODUCT_VERSION_NOT_FOUND: 404,
   DATA_PRODUCT_VERSION_WITHDRAWN: 409,
