@@ -574,6 +574,8 @@ export function WorkspaceNlq({ workspaceId, onSessionLost }: WorkspaceViewProps)
               {' '}
               {message('workspace.nlq.origin.stockDetail', { report_id: answer.stock.report_id })}
             </p>
+          ) : answer.origin === 'generated' && answer.report !== null ? (
+            <p className="field__hint">{t('workspace.nlq.origin.generated')}</p>
           ) : null}
           {answer.answer === null ? null : (
             <>

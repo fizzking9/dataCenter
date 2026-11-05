@@ -515,7 +515,10 @@ export function publishReportTemplate(options: {
   workspaceId: string;
   productId: string;
   name: string;
-  configPath: string;
+  /** The configuration document the lifecycle CLI read from a file. */
+  configPath?: string;
+  /** An already-parsed configuration document, as the browser application sends it. */
+  config?: unknown;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = {
@@ -547,12 +550,22 @@ export function publishReportTemplate(options: {
     );
   }
   const fail: Fail = (code, message, nextStep) => reject(session, actorName, context, code, message, nextStep);
-  const config = readJsonDocument(
-    options.configPath,
-    fail,
-    'REPORT_TEMPLATE_CONFIGURATION_UNREADABLE',
-    'The Report Template configuration file must contain valid JSON.',
-  );
+  const config = options.config !== undefined
+    ? options.config
+    : options.configPath === undefined
+      ? reject(
+        session,
+        actorName,
+        context,
+        'REPORT_TEMPLATE_CONFIGURATION_UNREADABLE',
+        'A Report Template publication must carry one configuration document.',
+      )
+      : readJsonDocument(
+        options.configPath,
+        fail,
+        'REPORT_TEMPLATE_CONFIGURATION_UNREADABLE',
+        'The Report Template configuration file must contain valid JSON.',
+      );
   if (!isRecord(config)) {
     reject(session, actorName, context, 'REPORT_TEMPLATE_CONFIGURATION_INVALID', 'A Report Template configuration must be a JSON object.');
   }
@@ -705,9 +718,17 @@ export function listReportTemplates(options: {
           ? {}
           : {
             question: version.question,
+            normalized_question: version.normalized_question,
+            interpretation: version.interpretation,
+            parameters: copyParameters(version.parameters),
             data_product_id: version.data_product_id,
+            contract_major: version.contract_major,
+            query: { ...version.request },
+            grounded_prompt: { ...version.grounded_prompt },
             freshness_policy: { ...version.freshness_policy },
             content_hash: version.content_hash,
+            published_at: version.published_at,
+            withdrawn_at: version.withdrawn_at,
           }),
       };
     });
@@ -1226,6 +1247,8 @@ export async function generateTemplateReport(options: {
   masterKey: string;
   token: string;
   reportTemplateId: string;
+  /** The Workspace the browser named, so a Template of another Workspace never resolves. */
+  workspaceId?: string;
   now?: Date;
 }): Promise<Record<string, unknown>> {
   const session = openPlatform(options.root, options.masterKey);
@@ -1236,7 +1259,7 @@ export async function generateTemplateReport(options: {
   };
   const actor = resolveActor(session, options.token, context);
   const template = findReportTemplate(session.state.report_templates, options.reportTemplateId);
-  if (!template) {
+  if (!template || (options.workspaceId !== undefined && template.workspace_id !== options.workspaceId)) {
     deny(session, actorLabel(actor.user), context, 'REPORT_TEMPLATE_NOT_AVAILABLE', 'The Report Template is not available to this actor.');
   }
   if (workspaceRoleOf(session.state, actor.user.user_id, template.workspace_id) !== 'Workspace Administrator') {
@@ -1516,6 +1539,8 @@ export function showReport(options: {
   masterKey: string;
   token: string;
   reportId: string;
+  /** The Workspace the browser named, so a Report of another Workspace never resolves. */
+  workspaceId?: string;
   now?: Date;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey, 'allow');
@@ -1544,7 +1569,9 @@ export function showReport(options: {
   const role = report === undefined
     ? null
     : workspaceRoleOf(session.state, actor.user.user_id, report.workspace_id);
-  if (!report || role === null) {
+  if (!report
+    || role === null
+    || (options.workspaceId !== undefined && report.workspace_id !== options.workspaceId)) {
     deny(session, actorLabel(actor.user), context, 'REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
   }
   const reader = memberReader(session, actor.user, role);
@@ -1554,6 +1581,7 @@ export function showReport(options: {
       reader,
       role,
       reportId: options.reportId,
+      ...(options.workspaceId === undefined ? {} : { workspaceId: options.workspaceId }),
       ...(options.now === undefined ? {} : { now: options.now }),
     });
   } catch (error) {
