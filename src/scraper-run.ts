@@ -2,15 +2,17 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { resolveActor } from './auth.js';
-import { actorLabel, reject, type ActionContext, type Actor } from './authz.js';
+import { actorLabel, reject, requireWorkspaceAdministrator, type ActionContext, type Actor } from './authz.js';
 import {
   adoptedIntegrationVersion,
   adoptedScraperService,
+  findDataset,
   findIntegrationConfiguration,
   findScraperCredential,
   findScraperService,
   findScraperServiceVersion,
   findScraperTask,
+  findSource,
   type AcquisitionRunRecord,
   type IntegrationBatchRecord,
   type RawAcquisitionRecord,
@@ -325,6 +327,8 @@ export async function runScraperService(options: {
   token: string;
   sourceId: string;
   parametersPath?: string;
+  /** Run parameters a browser stated directly; the same resolver validates them. */
+  parameters?: unknown;
 }): Promise<Record<string, unknown>> {
   const session = openPlatform(options.root, options.masterKey);
   const context: ActionContext = { action: 'scraper_run', scope: 'workspace' };
@@ -356,7 +360,7 @@ export async function runScraperService(options: {
     );
   }
 
-  let supplied: unknown;
+  let supplied: unknown = options.parameters;
   if (options.parametersPath !== undefined) {
     try {
       supplied = JSON.parse(readFileSync(options.parametersPath, 'utf8')) as unknown;
@@ -543,6 +547,129 @@ export async function runScraperService(options: {
   });
   session.save();
   return viewRun(source, run, manifest, pinned, raws, batch, released, true, null);
+}
+
+/**
+ * The repeated Runs of one scraper Source as the browser reads them: each Run's
+ * manifest, pages, Raw Acquisition references, structured diagnostics, and
+ * Provenance, plus the exact Version the Source currently pins. It never opens a
+ * credential value and never returns stored bytes.
+ */
+export function listScraperRuns(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  workspaceId: string;
+  sourceId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'scraper_run_listing',
+    scope: 'workspace',
+    workspace_id: options.workspaceId,
+    target: options.sourceId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  requireWorkspaceAdministrator(session, actor, context, options.workspaceId);
+  const source = findSource(session.state.sources, options.sourceId);
+  if (!source || source.workspace_id !== options.workspaceId) {
+    reject(session, actorLabel(actor.user), context, 'SCRAPER_SOURCE_NOT_AVAILABLE', 'The Source is not available to this actor.');
+  }
+  if (source.type !== 'scraper') {
+    reject(
+      session,
+      actorLabel(actor.user),
+      context,
+      'SCRAPER_SOURCE_TYPE_UNSUPPORTED',
+      'Only a scraper Source records scraping Runs.',
+    );
+  }
+  const scoped: ActionContext = { ...context, target: source.source_id };
+
+  const pin = adoptedScraperService(session.state.source_scraper_services, source.source_id);
+  const runs = session.state.acquisition_runs
+    .filter((run) => run.workspace_id === options.workspaceId && run.source_id === source.source_id && run.mode === 'scraper')
+    .sort((left, right) => left.queued_at.localeCompare(right.queued_at))
+    .map((run) => {
+      const manifest = session.state.scraper_runs.find(
+        (candidate) => candidate.acquisition_run_id === run.acquisition_run_id,
+      );
+      const diagnostics = session.state.scraper_diagnostics
+        .filter((record) => record.acquisition_run_id === run.acquisition_run_id)
+        .sort((left, right) => left.recorded_at.localeCompare(right.recorded_at));
+      const diagnostic = diagnostics[diagnostics.length - 1];
+      const raws = run.raw_acquisition_ids.flatMap((rawId) => {
+        const raw = session.state.raw_acquisitions.find((candidate) => candidate.raw_id === rawId);
+        return raw === undefined
+          ? []
+          : [{
+            raw_id: raw.raw_id,
+            content_hash: raw.content_hash,
+            byte_length: raw.byte_length,
+            received_at: raw.received_at,
+          }];
+      });
+      const batch = session.state.integration_batches.find(
+        (candidate) => candidate.acquisition_run_id === run.acquisition_run_id,
+      );
+      const release = session.state.datasets
+        .filter((dataset) => dataset.workspace_id === options.workspaceId)
+        .flatMap((dataset) => dataset.releases)
+        .find((candidate) => candidate.provenance.acquisition_run_ids.includes(run.acquisition_run_id));
+      return {
+        acquisition_run_id: run.acquisition_run_id,
+        status: run.status,
+        error_code: run.error_code,
+        queued_at: run.queued_at,
+        started_at: run.started_at,
+        completed_at: run.completed_at,
+        integration_configuration_version: run.integration_configuration_version,
+        diagnostics_id: diagnostic?.diagnostics_id ?? null,
+        failure_code: diagnostic?.failure_code ?? null,
+        manifest: manifest === undefined
+          ? null
+          : {
+            manifest_id: manifest.manifest_id,
+            scraper_task_version: manifest.scraper_task_version,
+            scraper_service_version: manifest.scraper_service_version,
+            parameters: { ...manifest.parameters },
+            pages: manifest.pages.map((page) => ({ ...page })),
+            record_count: manifest.record_count,
+            status: manifest.status,
+            started_at: manifest.started_at,
+            completed_at: manifest.completed_at,
+            diagnostics: manifest.diagnostics.map((diagnostic) => ({ ...diagnostic })),
+          },
+        raw_acquisitions: raws,
+        integration_batch_id: batch?.batch_id ?? null,
+        dataset_release: release?.release ?? null,
+      };
+    });
+
+  const dataset = findDataset(session.state.datasets, source.source_id);
+  const latest = dataset?.releases[dataset.releases.length - 1];
+  session.audit({ ...scoped, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { runs: runs.length } });
+  return {
+    workspace_id: options.workspaceId,
+    source_id: source.source_id,
+    adopted: pin === undefined
+      ? null
+      : {
+        scraper_service_id: pin.scraper_service_id,
+        adopted_version: pin.adopted_version,
+        content_hash: pin.content_hash,
+        proposal_id: pin.proposal_id,
+        adopted_at: pin.adopted_at,
+      },
+    latest_release: latest === undefined
+      ? null
+      : {
+        release: latest.release,
+        record_count: latest.record_count,
+        created_at: latest.created_at,
+      },
+    runs,
+  };
 }
 
 /** One Run's Raw Acquisitions, manifest, diagnostics, and Provenance, never a credential. */
