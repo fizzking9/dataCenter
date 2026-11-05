@@ -14,6 +14,7 @@ import {
   type DataProductMajorLine,
   type DataProductRelationship,
   type DataProductRelease,
+  type DataProductRollbackRecord,
   type DataProductVersion,
   type DatasetArtifact,
   type DatasetReleaseRecord,
@@ -25,8 +26,8 @@ import { isRecord, readJsonDocument } from './documents.js';
 import type { Fail } from './errors.js';
 import { requireGovernedContract, pinnedMetricDefinitions } from './metric-definition.js';
 import { workspaceRoleOf } from './platform.js';
-import { readContract } from './product-contract.js';
-import { nextContractVersion } from './product-version.js';
+import { parseContract, readContract } from './product-contract.js';
+import { nextContractVersion, readContractChange, type ContractChange } from './product-version.js';
 import { readableGrantScope, type GrantReader, type GrantScope } from './grants.js';
 import { openPlatform, type PlatformSession } from './session.js';
 import { isPastRetention, purgeRevoked } from './retention.js';
@@ -796,5 +797,377 @@ export function withdrawDataProductVersion(options: {
     data_product_version: version.version,
     withdrawn_at: version.withdrawn_at,
     contract_version: { ...version.contract_version },
+  };
+}
+
+/**
+ * Rolls one major Contract line back to an exact earlier Release. The Rollback
+ * is a new audited lifecycle fact: no Version, Release, or intervening
+ * Publication is rewritten or deleted, and the line may advance again later.
+ */
+export function rollbackDataProductVersion(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  dataProductId: string;
+  version: number;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'data_product_rollback', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const product = requireAdministeredProduct(session, actor, context, options.dataProductId);
+  const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
+  const actorName = actorLabel(actor.user);
+  const version = findDataProductVersion(product, options.version);
+  if (!version) {
+    reject(
+      session,
+      actorName,
+      scoped,
+      'DATA_PRODUCT_VERSION_NOT_FOUND',
+      `This Data Product has no Version ${options.version}.`,
+      'Inspect the Versions the Data Product published before rolling one back.',
+    );
+  }
+  if (version.withdrawn_at !== null) {
+    reject(
+      session,
+      actorName,
+      scoped,
+      'DATA_PRODUCT_VERSION_WITHDRAWN',
+      'A withdrawn Version cannot be the target of a Rollback.',
+      'Roll back to an active earlier Version, or publish a new Version.',
+    );
+  }
+  const line = majorLine(product, version.contract_version.major);
+  if (!line || line.withdrawn_at !== null) {
+    reject(
+      session,
+      actorName,
+      scoped,
+      'DATA_PRODUCT_MAJOR_WITHDRAWN',
+      `Contract major ${version.contract_version.major} was withdrawn, so it serves no Rollback.`,
+      'Roll back to a Version on an active major line.',
+    );
+  }
+  const release = product.releases.find((candidate) => candidate.data_product_version === version.version);
+  if (!release) {
+    reject(
+      session,
+      actorName,
+      scoped,
+      'DATA_PRODUCT_RELEASE_NOT_FOUND',
+      'The Release this Version pinned is no longer available.',
+    );
+  }
+  if (line.current_version === version.version) {
+    return {
+      data_product_id: product.data_product_id,
+      data_product_version: version.version,
+      data_product_release: release.release,
+      contract_version: { ...version.contract_version },
+      already_current: true,
+    };
+  }
+  const fromVersion = line.current_version;
+  const fromRelease = line.current_release;
+  const rollback: DataProductRollbackRecord = {
+    rollback_id: randomUUID(),
+    major: line.major,
+    from_version: fromVersion,
+    from_release: fromRelease,
+    to_version: version.version,
+    to_release: release.release,
+    created_at: new Date().toISOString(),
+    created_by: actor.user.user_id,
+  };
+  product.rollbacks = [...(product.rollbacks ?? []), rollback];
+  line.current_version = version.version;
+  line.current_release = release.release;
+  session.audit({
+    ...scoped,
+    actor: actorName,
+    outcome: 'succeeded',
+    detail: {
+      rollback_id: rollback.rollback_id,
+      contract_major: line.major,
+      from_version: fromVersion,
+      from_release: fromRelease,
+      data_product_version: version.version,
+      data_product_release: release.release,
+      dataset_release: release.dataset_release,
+    },
+  });
+  session.save();
+  const active = product.lines
+    .filter((candidate) => candidate.withdrawn_at === null)
+    .sort((left, right) => right.major - left.major)[0];
+  return {
+    data_product_id: product.data_product_id,
+    rollback_id: rollback.rollback_id,
+    contract_major: line.major,
+    from_version: fromVersion,
+    from_release: fromRelease,
+    data_product_version: version.version,
+    data_product_release: release.release,
+    dataset_release: release.dataset_release,
+    contract_version: { ...version.contract_version },
+    rolled_back_at: rollback.created_at,
+    serves_default_queries: active?.major === line.major,
+  };
+}
+
+/** One planned Contract evolution, resolved against the exact current Release. */
+interface EvolutionPlan {
+  product: DataProductArtifact;
+  latest: DataProductVersion;
+  latestRelease: DataProductRelease;
+  dataset: DatasetArtifact;
+  datasetRelease: DatasetReleaseRecord;
+  source: SourceRecord;
+  contract: DataProductContract;
+  bindings: RelationshipBinding[];
+  change: ContractChange;
+  next: DataProductVersion['contract_version'];
+}
+
+/** The exact relationships a publication may bind: only those the candidate still declares. */
+function relatedSchemasOf(
+  session: PlatformSession,
+  actorName: string,
+  context: ActionContext,
+  release: DataProductRelease,
+  candidate: Record<string, unknown>,
+  fail: Fail,
+): { bindings: RelationshipBinding[]; schemas: Record<string, DatasetSchemaField[]> } {
+  const declared = Array.isArray(candidate['relationships'])
+    ? candidate['relationships']
+      .filter(isRecord)
+      .map((relationship) => relationship['name'])
+      .filter((name): name is string => typeof name === 'string')
+    : [];
+  const bindings: RelationshipBinding[] = [];
+  const schemas: Record<string, DatasetSchemaField[]> = {};
+  for (const binding of release.relationships ?? []) {
+    if (!declared.includes(binding.name)) continue;
+    const dataset = session.state.datasets.find((candidateDataset) => candidateDataset.dataset_id === binding.dataset_id);
+    const datasetRelease = dataset?.releases.find((candidateRelease) => candidateRelease.release === binding.dataset_release);
+    if (!dataset || !datasetRelease) {
+      fail(
+        'DATA_PRODUCT_NOT_AVAILABLE',
+        `The ${binding.name} relationship Release is no longer available.`,
+        'Publish the related Dataset before evolving this Contract.',
+      );
+    }
+    bindings.push({ name: binding.name, dataset, datasetRelease });
+    schemas[binding.name] = schemaOf(session, actorName, context, dataset.source_id, datasetRelease);
+  }
+  return { bindings, schemas };
+}
+
+/**
+ * Resolves what publishing a candidate Contract would do: the exact next
+ * Contract version, whether the change is additive or breaking, and which
+ * surfaces a Consumer would lose. Nothing is written.
+ */
+function planEvolution(
+  session: PlatformSession,
+  actor: Actor,
+  context: ActionContext,
+  product: DataProductArtifact,
+  candidate: unknown,
+): EvolutionPlan {
+  const actorName = actorLabel(actor.user);
+  const fail: Fail = (code, message, nextStep) => reject(session, actorName, context, code, message, nextStep);
+  const latest = latestDataProductVersion(product);
+  const latestRelease = latestDataProductRelease(product);
+  if (!latest || !latestRelease) {
+    fail('DATA_PRODUCT_NOT_PUBLISHED', 'The Data Product has no Publication to evolve.', 'Publish the Data Product first.');
+  }
+  if (!isRecord(candidate)) {
+    fail('DATA_PRODUCT_CONTRACT_INVALID', 'A Data Product Contract must be a JSON object.');
+  }
+  const dataset = session.state.datasets.find((candidateDataset) => candidateDataset.dataset_id === latestRelease.dataset_id);
+  const datasetRelease = dataset?.releases.find((candidateRelease) => candidateRelease.release === latestRelease.dataset_release);
+  if (!dataset || !datasetRelease) {
+    fail('DATA_PRODUCT_NOT_AVAILABLE', 'The Dataset Release this Data Product pins is not available.');
+  }
+  const source = session.state.sources.find((candidateSource) => candidateSource.source_id === dataset.source_id);
+  if (!source || source.workspace_id !== product.workspace_id) {
+    fail('DATA_PRODUCT_NOT_AVAILABLE', 'The Source behind this Data Product is not available.');
+  }
+  const { bindings, schemas } = relatedSchemasOf(session, actorName, context, latestRelease, candidate, fail);
+  const contract = parseContract(fail, candidate, schemaOf(session, actorName, context, source.source_id, datasetRelease), schemas);
+  requireServeableGrain(session, actorName, context, contract, datasetRelease);
+  requireBoundRelationships(session, actorName, context, contract, bindings, product.workspace_id);
+  const change = readContractChange(latest.contract, contract);
+  return {
+    product,
+    latest,
+    latestRelease,
+    dataset,
+    datasetRelease,
+    source,
+    contract,
+    bindings,
+    change,
+    next: nextContractVersion(latest, contract),
+  };
+}
+
+/** The Chinese consequence each breaking surface has for an existing Consumer. */
+function breakingConsequence(category: string): string {
+  switch (category) {
+    case 'fields':
+      return '已发布的字段被移除或改名：读取该字段的查询将失败。';
+    case 'dimensions':
+      return '已发布的维度被移除：按该维度分组的查询将失败。';
+    case 'filters':
+      return '已发布的筛选字段被移除：使用该筛选的查询将失败。';
+    case 'metrics':
+      return '指标定义被移除或更改：既有消费方的聚合结果将不再可比。';
+    case 'grain':
+      return '记录粒度改变：分组结果与合计将无法与既有答案对齐。';
+    case 'time':
+      return '时间字段或时区改变：时间窗口结果将不再可比。';
+    case 'relationships':
+      return '关联关系被移除或收窄：读取关联记录的查询将失败。';
+    case 'search':
+      return '文档检索能力被收窄：既有检索查询将失败。';
+    case 'limit':
+    case 'limits':
+      return '查询资源预算被收窄：既有消费方可能被拒绝。';
+    default:
+      return `${category} 发生不兼容变化，既有消费方可能失败。`;
+  }
+}
+
+/** The Consumer consequences of one planned evolution, stated before Publication. */
+function evolutionConsequences(plan: EvolutionPlan): string[] {
+  const { latest, latestRelease, datasetRelease, change, next } = plan;
+  const consequences = [
+    `发布后新增数据产品版本 ${(latest.version + 1)}（契约 ${next.major}.${next.minor}），绑定数据集版本 ${datasetRelease.release}。`,
+  ];
+  if (change.breaking.length === 0) {
+    consequences.push(
+      `主版本 ${latest.contract_version.major} 保持兼容：现有消费方无需修改，未指定主版本的查询将读取发布版本 ${latestRelease.release + 1}。`,
+    );
+    return consequences;
+  }
+  consequences.push(`此变更会开启新的主版本 ${next.major}（契约 ${next.major}.0），发生以下不兼容变化：`);
+  for (const category of change.breaking) consequences.push(breakingConsequence(category));
+  consequences.push(
+    `主版本 ${latest.contract_version.major} 继续以发布版本 ${latestRelease.release} 提供服务，已有消费方不受影响。`,
+  );
+  return consequences;
+}
+
+/**
+ * Previews what publishing a candidate Contract would change, with the exact
+ * next Contract version and the Consumer consequences of every breaking surface.
+ */
+export function previewDataProductEvolution(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  dataProductId: string;
+  contract: unknown;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'data_product_evolution_preview', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const product = requireAdministeredProduct(session, actor, context, options.dataProductId);
+  const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
+  const plan = planEvolution(session, actor, scoped, product, options.contract);
+  const consequences = evolutionConsequences(plan);
+  const result = {
+    data_product_id: product.data_product_id,
+    name: product.name,
+    api_path: product.api_path,
+    base: {
+      data_product_version: plan.latest.version,
+      contract_version: { ...plan.latest.contract_version },
+      data_product_release: plan.latestRelease.release,
+      dataset_release: plan.datasetRelease.release,
+    },
+    candidate: {
+      contract: plan.contract,
+      contract_hash: canonicalDigest(plan.contract),
+      contract_version: { ...plan.next },
+      change: plan.change.breaking.length === 0 ? 'additive' : 'breaking',
+      breaking: [...plan.change.breaking],
+    },
+    consequences,
+  };
+  session.audit({
+    ...scoped,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: {
+      contract_version: `${plan.next.major}.${plan.next.minor}`,
+      change: plan.change.breaking.length === 0 ? 'additive' : 'breaking',
+      breaking: plan.change.breaking.join(','),
+    },
+  });
+  session.save();
+  return result;
+}
+
+/**
+ * Publishes the exact candidate Contract as the next Data Product Version and
+ * Release under the settled major-version rules. A breaking change opens its own
+ * major line while the previous one keeps serving its Consumers.
+ */
+export function publishDataProductEvolution(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  dataProductId: string;
+  contract: unknown;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'data_product_publication', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const product = requireAdministeredProduct(session, actor, context, options.dataProductId);
+  const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
+  const plan = planEvolution(session, actor, scoped, product, options.contract);
+  const publication = publishContractVersion({
+    session,
+    actor,
+    context: scoped,
+    source: plan.source,
+    dataset: plan.dataset,
+    datasetRelease: plan.datasetRelease,
+    name: product.name,
+    contract: plan.contract,
+    relationships: plan.bindings,
+  });
+  session.audit({
+    ...scoped,
+    target: product.data_product_id,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: {
+      data_product_version: publication.version.version,
+      data_product_release: publication.release.release,
+      dataset_release: publication.release.dataset_release,
+      contract_major: publication.version.contract_version.major,
+      contract_minor: publication.version.contract_version.minor,
+      change: plan.change.breaking.length === 0 ? 'additive' : 'breaking',
+      breaking: plan.change.breaking.join(','),
+    },
+  });
+  session.save();
+  return {
+    data_product_id: product.data_product_id,
+    name: product.name,
+    api_path: product.api_path,
+    data_product_version: publication.version.version,
+    data_product_release: publication.release.release,
+    dataset_release: publication.release.dataset_release,
+    contract_version: { ...publication.version.contract_version },
+    contract_hash: publication.version.contract_hash,
+    change: plan.change.breaking.length === 0 ? 'additive' : 'breaking',
+    breaking: [...plan.change.breaking],
   };
 }

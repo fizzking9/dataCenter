@@ -23,6 +23,8 @@ import {
   revokeOAuthClient,
 } from './agents.js';
 import { publishGrant, revokeGrant } from './grants.js';
+import { createExport, downloadExport, listExports, revokeExport } from './export.js';
+import { showDataProductGovernance } from './product-governance.js';
 import { showWorkspaceAudit } from './audit-view.js';
 import { login, logout } from './auth.js';
 import {
@@ -46,7 +48,7 @@ import {
   publishIntegrationDeclaration,
 } from './integration.js';
 import { browserIdentity, browserNavigation } from './navigation.js';
-import { listDataProducts } from './products.js';
+import { listDataProducts, previewDataProductEvolution, publishDataProductEvolution, rollbackDataProductVersion, withdrawDataProductVersion } from './products.js';
 import { publishModelBinding, revokeModelBinding, showModelBindingWorkspace } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, listModelProfiles, publishModelProfile } from './model-profile.js';
 import {
@@ -574,6 +576,171 @@ async function handleApi(
       masterKey: options.masterKey,
       token,
       workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  // Data Product governance: one administrator-scoped answer names every exact
+  // Version and Release, the Dataset freshness and Provenance each Release
+  // pinned, the Grants in force, and the consequences of each lifecycle action.
+  const productGovernanceRoute = /^\/api\/workspace\/products\/([^/]+)\/governance$/u.exec(pathname);
+  if (productGovernanceRoute !== null && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, showDataProductGovernance({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      dataProductId: decodeURIComponent(productGovernanceRoute[1]!),
+    }));
+    return;
+  }
+
+  // Contract evolution is proposed, previewed, and published as exact content.
+  // The governed module decides the next major or minor and states the Consumer
+  // consequences; the browser only renders that answer.
+  const productEvolutionRoute = /^\/api\/workspace\/products\/([^/]+)\/evolution\/(preview|publish)$/u.exec(pathname);
+  if (productEvolutionRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const dataProductId = decodeURIComponent(productEvolutionRoute[1]!);
+    const contract = jsonDocument(body, 'contract');
+    if (productEvolutionRoute[2] === 'preview') {
+      sendJson(response, 200, previewDataProductEvolution({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        dataProductId,
+        contract,
+      }));
+      return;
+    }
+    sendJson(response, 201, publishDataProductEvolution({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      dataProductId,
+      contract,
+    }));
+    return;
+  }
+
+  const productLifecycleRoute = /^\/api\/workspace\/products\/([^/]+)\/(rollback|withdraw)$/u.exec(pathname);
+  if (productLifecycleRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const version = number(body, 'version');
+    if (!Number.isInteger(version)) {
+      throw new HttpError(400, 'INVALID_REQUEST', 'The Data Product Version must be a whole number.');
+    }
+    const dataProductId = decodeURIComponent(productLifecycleRoute[1]!);
+    if (productLifecycleRoute[2] === 'rollback') {
+      sendJson(response, 200, rollbackDataProductVersion({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        dataProductId,
+        version,
+      }));
+      return;
+    }
+    sendJson(response, 200, withdrawDataProductVersion({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      dataProductId,
+      version,
+    }));
+    return;
+  }
+
+  // One Grant surface narrows either a Workspace member or an Agent Identity;
+  // the governed module authorizes the Workspace Administrator and validates
+  // every column and row predicate against the published Contract.
+  if (pathname === '/api/workspace/product-grants' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const columnText = text(body, 'columns');
+    const columns = columnText
+      .split(/[,，\n]/u)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry !== '');
+    const rowFilters = jsonDocument(body, 'row_filters');
+    const agentIdentityId = text(body, 'agent_identity_id');
+    sendJson(response, 201, publishGrant({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      dataProductId: text(body, 'data_product_id'),
+      ...(agentIdentityId === ''
+        ? { username: text(body, 'username') }
+        : { agentIdentityId }),
+      request: {
+        ...(columns.length === 0 ? {} : { columns }),
+        ...(rowFilters === undefined ? {} : { row_filters: rowFilters }),
+      },
+    }));
+    return;
+  }
+
+  const productGrantRevokeRoute = /^\/api\/workspace\/product-grants\/([^/]+)\/revoke$/u.exec(pathname);
+  if (productGrantRevokeRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, revokeGrant({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      grantId: decodeURIComponent(productGrantRevokeRoute[1]!),
+    }));
+    return;
+  }
+
+  // Governed curated-result exports: an administrator lists and revokes them,
+  // while creation and download still run through the same governed query and
+  // Grants the Consumer reads under.
+  if (pathname === '/api/workspace/exports' && method === 'GET') {
+    const token = userSession(request);
+    const dataProductId = searchParam(request, 'data_product_id');
+    sendJson(response, 200, listExports({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+      ...(dataProductId === null ? {} : { dataProductId }),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/exports' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, createExport({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      dataProductId: text(body, 'data_product_id'),
+      request: jsonDocument(body, 'request'),
+    }));
+    return;
+  }
+
+  const exportActionRoute = /^\/api\/workspace\/exports\/([^/]+)\/(revoke|download)$/u.exec(pathname);
+  if (exportActionRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const exportId = decodeURIComponent(exportActionRoute[1]!);
+    if (exportActionRoute[2] === 'revoke') {
+      sendJson(response, 200, revokeExport({
+        root: options.root,
+        masterKey: options.masterKey,
+        token,
+        exportId,
+      }));
+      return;
+    }
+    sendJson(response, 200, downloadExport({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      exportId,
     }));
     return;
   }
@@ -1762,6 +1929,29 @@ const STATUS_BY_CODE: Record<string, number> = {
   DATA_PRODUCT_QUERY_TOO_COMPLEX: 422,
   DATA_PRODUCT_QUERY_RESULT_TOO_LARGE: 422,
   DATA_PRODUCT_QUERY_TIMEOUT: 504,
+  // Data Product governance lifecycle refusals.
+  DATA_PRODUCT_VERSION_NOT_FOUND: 404,
+  DATA_PRODUCT_VERSION_WITHDRAWN: 409,
+  DATA_PRODUCT_MAJOR_NOT_FOUND: 404,
+  DATA_PRODUCT_MAJOR_WITHDRAWN: 409,
+  DATA_PRODUCT_NAME_INVALID: 400,
+  DATA_PRODUCT_NAME_TAKEN: 409,
+  DATA_PRODUCT_CONTRACT_INVALID: 400,
+  DATA_PRODUCT_CONTRACT_UNREADABLE: 400,
+  DATA_PRODUCT_GRAIN_NOT_UNIQUE: 422,
+  DATA_PRODUCT_RELATIONSHIP_UNBOUND: 422,
+  DATA_PRODUCT_RELATIONSHIP_UNDECLARED: 422,
+  DATA_PRODUCT_RELATIONSHIP_DUPLICATED: 422,
+  DATA_PRODUCT_RELATIONSHIP_AMBIGUOUS: 422,
+  DATA_PRODUCT_RELATIONSHIP_SCOPE: 422,
+  DATA_PRODUCT_RELATIONSHIPS_UNREADABLE: 400,
+  EXPORT_NOT_AVAILABLE: 404,
+  EXPORT_ACCESS_EXPIRED: 410,
+  EXPORT_REVOKED: 410,
+  EXPORT_NO_LONGER_AUTHORIZED: 403,
+  EXPORT_TOO_LARGE: 422,
+  EXPORT_INCOMPLETE: 409,
+  EXPORT_OBJECT_UNAVAILABLE: 409,
   MODEL_PROFILE_NAME_INVALID: 400,
   MODEL_ADAPTER_UNSUPPORTED: 400,
   MODEL_PROFILE_CONFIGURATION_INVALID: 400,

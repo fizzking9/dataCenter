@@ -50,7 +50,7 @@ import {
 import { publishCommonContext, publishWorkspaceContext, showContext } from './context.js';
 import { releaseDataset, showDataset } from './datasets.js';
 import { OperatorError } from './errors.js';
-import { createExport, downloadExport } from './export.js';
+import { createExport, downloadExport, listExports, revokeExport } from './export.js';
 import { listGrants, publishGrant, revokeGrant } from './grants.js';
 import { initializeDeployment } from './initialize.js';
 import { installDeployment } from './install.js';
@@ -82,7 +82,7 @@ import {
   listReportSchedules,
   tickReportSchedules,
 } from './report-schedule.js';
-import { listDataProductReleases, listDataProducts, publishDataProduct, withdrawDataProductVersion } from './products.js';
+import { listDataProductReleases, listDataProducts, publishDataProduct, rollbackDataProductVersion, withdrawDataProductVersion } from './products.js';
 import {
   adoptProposal,
   approveProposal,
@@ -620,6 +620,14 @@ async function main(): Promise<void> {
     }));
     return;
   }
+  if (command === 'product' && subcommand === 'rollback') {
+    emit(rollbackDataProductVersion({
+      ...governed(options),
+      dataProductId: required(options, 'product'),
+      version: Number(required(options, 'version')),
+    }));
+    return;
+  }
   if (command === 'product' && subcommand === 'query') {
     emit(queryDataProduct({
       ...governed(options),
@@ -828,6 +836,18 @@ async function main(): Promise<void> {
   }
   if (command === 'export' && subcommand === 'download') {
     emit(downloadExport({ ...governed(options), exportId: required(options, 'export') }));
+    return;
+  }
+  if (command === 'export' && subcommand === 'list') {
+    emit(listExports({
+      ...governed(options),
+      workspaceId: required(options, 'workspace'),
+      ...(options.has('product') ? { dataProductId: required(options, 'product') } : {}),
+    }));
+    return;
+  }
+  if (command === 'export' && subcommand === 'revoke') {
+    emit(revokeExport({ ...governed(options), exportId: required(options, 'export') }));
     return;
   }
   if (command === 'console' && subcommand === 'serve') {

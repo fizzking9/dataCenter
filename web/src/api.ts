@@ -383,6 +383,213 @@ export interface DataProductList {
   data_products: DataProductSummary[];
 }
 
+/** One Data Product Grant in force, narrowed to a member or an Agent Identity. */
+export interface ProductGovernanceGrantView {
+  grant_id: string;
+  grantee_type: 'user' | 'agent';
+  grantee: string | null;
+  columns: string[] | null;
+  row_filters: Array<{ field: string; op: string; value: string | number | null }>;
+  created_at: string;
+}
+
+/** The freshness and Provenance one Data Product Release pinned. */
+export interface ProductReleaseFreshnessView {
+  dataset_id: string;
+  dataset_release: number;
+  record_count: number;
+  records_hash: string;
+  schema_hash: string;
+  integration_configuration_version: number;
+  released_at: string;
+  acquired_at: string;
+  integrated_at: string;
+  provenance: {
+    batch_ids: string[];
+    acquisition_run_ids: string[];
+    raw_acquisition_ids: string[];
+    acquired_at: string;
+    integrated_at: string;
+    released_at: string;
+  };
+}
+
+/** One exact Data Product Release and the Dataset Release it pinned. */
+export interface ProductGovernanceReleaseView {
+  release: number;
+  data_product_version: number;
+  contract_version: { major: number; minor: number } | null;
+  contract_hash: string | null;
+  withdrawn: boolean;
+  current: boolean;
+  created_at: string;
+  created_by: string;
+  dataset_id: string;
+  dataset_release: number;
+  relationships: Array<{ name: string; dataset_id: string; dataset_release: number }>;
+  retention_expired: boolean;
+  freshness: ProductReleaseFreshnessView | null;
+}
+
+/** One exact Data Product Version, its Contract, and the actions it permits. */
+export interface ProductGovernanceVersionView {
+  version: number;
+  contract_version: { major: number; minor: number };
+  published_at: string;
+  published_by: string;
+  contract_hash: string;
+  withdrawn_at: string | null;
+  withdrawn: boolean;
+  current: boolean;
+  release: number | null;
+  dataset_release: number | null;
+  change: 'initial' | 'additive' | 'breaking';
+  breaking: string[];
+  contract: ProductContractView;
+  actions: {
+    withdraw: { enabled: boolean; consequence: string };
+    rollback: { enabled: boolean; consequence: string };
+  };
+}
+
+/** One recorded Rollback fact: an exact earlier Version a line returned to. */
+export interface ProductRollbackHistoryView {
+  rollback_id: string;
+  major: number;
+  from_version: number;
+  from_release: number;
+  to_version: number;
+  to_release: number;
+  created_at: string;
+  created_by: string;
+  actor: string | null;
+}
+
+/** The complete administrator governance answer for one Data Product. */
+export interface ProductGovernanceView {
+  data_product_id: string;
+  workspace_id: string;
+  name: string;
+  api_path: string;
+  lines: Array<{
+    major: number;
+    current_version: number;
+    current_release: number;
+    opened_at: string;
+    withdrawn_at: string | null;
+  }>;
+  active_major: number | null;
+  versions: ProductGovernanceVersionView[];
+  releases: ProductGovernanceReleaseView[];
+  grants: ProductGovernanceGrantView[];
+  members: Array<{ username: string; role: WorkspaceRoleValue }>;
+  agents: Array<{ agent_identity_id: string; name: string; scopes: string[] }>;
+  rollbacks: ProductRollbackHistoryView[];
+  published_columns: string[];
+  published_filters: string[];
+  latest: {
+    data_product_version: number;
+    contract_version: { major: number; minor: number };
+    data_product_release: number | null;
+    dataset_release: number | null;
+    contract: ProductContractView;
+  } | null;
+}
+
+/** The exact next Contract version and Consumer consequences of a revision. */
+export interface ProductEvolutionPreviewView {
+  data_product_id: string;
+  name: string;
+  api_path: string;
+  base: {
+    data_product_version: number;
+    contract_version: { major: number; minor: number };
+    data_product_release: number;
+    dataset_release: number;
+  };
+  candidate: {
+    contract: ProductContractView;
+    contract_hash: string;
+    contract_version: { major: number; minor: number };
+    change: 'additive' | 'breaking';
+    breaking: string[];
+  };
+  consequences: string[];
+}
+
+export interface ProductEvolutionPublicationView {
+  data_product_id: string;
+  name: string;
+  api_path: string;
+  data_product_version: number;
+  data_product_release: number;
+  dataset_release: number;
+  contract_version: { major: number; minor: number };
+  contract_hash: string;
+  change: 'additive' | 'breaking';
+  breaking: string[];
+}
+
+export interface ProductRollbackView {
+  data_product_id: string;
+  rollback_id?: string;
+  contract_major: number;
+  from_version?: number;
+  from_release?: number;
+  data_product_version: number;
+  data_product_release: number;
+  dataset_release?: number;
+  contract_version: { major: number; minor: number };
+  rolled_back_at?: string;
+  serves_default_queries?: boolean;
+  already_current?: boolean;
+}
+
+export interface ProductWithdrawalView {
+  data_product_id: string;
+  data_product_version: number;
+  withdrawn_at?: string;
+  contract_version?: { major: number; minor: number };
+  already_withdrawn?: boolean;
+}
+
+/** One governed curated-result export as its Workspace administers it. */
+export interface WorkspaceExportView {
+  export_id: string;
+  data_product_id: string;
+  data_product_name: string | null;
+  data_product_release: number;
+  producer: string | null;
+  created_at: string;
+  expires_at: string;
+  status: 'active' | 'expired' | 'revoked';
+  revoked_at: string | null;
+  row_count: number;
+  columns: string[];
+  row_filters: Array<{ field: string; op: string; value: string | number | null }>;
+  content_hash: string;
+  downloaded_at: string | null;
+  can_download: boolean;
+}
+
+export interface WorkspaceExportList {
+  workspace_id: string;
+  exports: WorkspaceExportView[];
+}
+
+export interface WorkspaceExportDownload {
+  export_id: string;
+  data_product_id: string;
+  data_product_release: number;
+  content_type: string;
+  encoding: 'base64';
+  content: string;
+  content_hash: string;
+  columns: string[];
+  row_count: number;
+  expires_at: string;
+}
+
 export interface ContextEntryView {
   key: string;
   kind: string;
@@ -2001,6 +2208,78 @@ export const platformApi = {
     ),
   dataProducts: (workspaceId: string) =>
     request<DataProductList>(`/api/workspace/data-products${workspaceQuery(workspaceId)}`),
+  productGovernance: (dataProductId: string) =>
+    request<ProductGovernanceView>(`/api/workspace/products/${encodeURIComponent(dataProductId)}/governance`),
+  previewProductEvolution: (dataProductId: string, contract: unknown) =>
+    request<ProductEvolutionPreviewView>(
+      `/api/workspace/products/${encodeURIComponent(dataProductId)}/evolution/preview`,
+      { method: 'POST', body: JSON.stringify({ contract }) },
+    ),
+  publishProductEvolution: (dataProductId: string, contract: unknown) =>
+    request<ProductEvolutionPublicationView>(
+      `/api/workspace/products/${encodeURIComponent(dataProductId)}/evolution/publish`,
+      { method: 'POST', body: JSON.stringify({ contract }) },
+    ),
+  rollbackProductVersion: (dataProductId: string, version: number) =>
+    request<ProductRollbackView>(
+      `/api/workspace/products/${encodeURIComponent(dataProductId)}/rollback`,
+      { method: 'POST', body: JSON.stringify({ version }) },
+    ),
+  withdrawProductVersion: (dataProductId: string, version: number) =>
+    request<ProductWithdrawalView>(
+      `/api/workspace/products/${encodeURIComponent(dataProductId)}/withdraw`,
+      { method: 'POST', body: JSON.stringify({ version }) },
+    ),
+  publishProductGrant: (
+    dataProductId: string,
+    grantee: { username: string } | { agentIdentityId: string },
+    columns: string,
+    rowFilters: string,
+  ) =>
+    request<{ grant_id: string; data_product_id: string }>('/api/workspace/product-grants', {
+      method: 'POST',
+      body: JSON.stringify({
+        data_product_id: dataProductId,
+        ...('username' in grantee ? { username: grantee.username } : { agent_identity_id: grantee.agentIdentityId }),
+        columns,
+        ...(rowFilters.trim() === '' ? {} : { row_filters: rowFilters }),
+      }),
+    }),
+  revokeProductGrant: (grantId: string) =>
+    request<{ grant_id: string; revoked_at: string | null }>(
+      `/api/workspace/product-grants/${encodeURIComponent(grantId)}/revoke`,
+      { method: 'POST' },
+    ),
+  workspaceExports: (workspaceId: string, dataProductId?: string) =>
+    request<WorkspaceExportList>(
+      `/api/workspace/exports${workspaceQuery(workspaceId)}${
+        dataProductId === undefined ? '' : `&data_product_id=${encodeURIComponent(dataProductId)}`
+      }`,
+    ),
+  createGovernedExport: (dataProductId: string, query: unknown) =>
+    request<{
+      export_id: string;
+      data_product_id: string;
+      data_product_release: number;
+      row_count: number;
+      columns: string[];
+      content_hash: string;
+      created_at: string;
+      expires_at: string;
+    }>('/api/workspace/exports', {
+      method: 'POST',
+      body: JSON.stringify({ data_product_id: dataProductId, request: query }),
+    }),
+  revokeWorkspaceExport: (exportId: string) =>
+    request<{ export_id: string; revoked_at: string | null; already_revoked?: boolean }>(
+      `/api/workspace/exports/${encodeURIComponent(exportId)}/revoke`,
+      { method: 'POST' },
+    ),
+  downloadWorkspaceExport: (exportId: string) =>
+    request<WorkspaceExportDownload>(
+      `/api/workspace/exports/${encodeURIComponent(exportId)}/download`,
+      { method: 'POST' },
+    ),
   context: (workspaceId: string) =>
     request<ContextView>(`/api/workspace/context${workspaceQuery(workspaceId)}`),
   workspaceMembers: (workspaceId: string) =>
