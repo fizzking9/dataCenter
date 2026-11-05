@@ -530,7 +530,12 @@ test('Withdrawal and Rollback are separate exact actions with consequences, audi
     assert.ok(rollbackText.includes('主版本 1'));
     assert.ok(rollbackText.includes('历史'));
     await rollbackConfirm.getByRole('button', { name: '确认回滚' }).click();
-    await contracts.getByText('当前', { exact: true }).first().waitFor();
+    // The old current marker is still on screen, so wait for Version 1 to become current.
+    await contracts
+      .getByRole('row')
+      .filter({ hasText: '1.0' })
+      .getByText('当前', { exact: true })
+      .waitFor();
 
     const rolledBack = await consumerRecords(consoleServer.url, current, { kind: 'records' });
     assert.equal(rolledBack['data_product_release'], 1, 'the major line serves the exact earlier Release again');
