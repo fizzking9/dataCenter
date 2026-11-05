@@ -583,3 +583,21 @@ test('the document surface adds no browser copy and keeps its API contracts and 
   assert.equal(grouped.status, 2);
   assert.equal(grouped.error['code'], 'INVALID_COMMAND');
 });
+
+/** A suggestion is a bounded top-N list, so a page cursor is refused rather than replayed. */
+test('a suggestion refuses a page cursor instead of replaying its first page', () => {
+  const { fixture, consumerToken, productId } = readyProduct();
+  const first = search(fixture, consumerToken, productId, { kind: 'search', q: '维修', limit: 2 });
+  assert.equal(typeof first.next_cursor, 'string');
+
+  // Even a cursor this Release itself issued is not a suggestion cursor.
+  assert.equal(
+    queryFailure(fixture, consumerToken, productId, { kind: 'suggest', q: '巡', cursor: first.next_cursor }),
+    'DATA_PRODUCT_QUERY_CURSOR_NOT_SUPPORTED',
+  );
+
+  // The same cursor still walks the search page it was issued for.
+  const second = search(fixture, consumerToken, productId, { kind: 'search', q: '维修', limit: 2, cursor: first.next_cursor });
+  assert.equal(second.returned, 1);
+  assert.equal(second.next_cursor, null);
+});
