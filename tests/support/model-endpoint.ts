@@ -100,6 +100,9 @@ async function handle(
   respond(response, 404, { error: 'not_found' });
 }
 
+/** The usage every deterministic mock answer states, so accounting is exact. */
+export const MOCK_USAGE = { input_tokens: 1_200, output_tokens: 300 };
+
 function answer(body: Record<string, unknown>, behaviour: MockBehaviour): Record<string, unknown> {
   const purpose = String(body['purpose'] ?? '');
   const envelope: Record<string, unknown> = {
@@ -108,6 +111,9 @@ function answer(body: Record<string, unknown>, behaviour: MockBehaviour): Record
     model_profile_hash: profileHashOf(body),
     output: outputFor(purpose, body, behaviour),
     tool_calls: behaviour === 'undeclared_tool' ? [{ tool: 'shell_exec', arguments: {} }] : [],
+    // A real endpoint states what it consumed; a meta-model without usage is
+    // accounted by the platform's own count instead.
+    usage: { ...MOCK_USAGE },
   };
   return envelope;
 }

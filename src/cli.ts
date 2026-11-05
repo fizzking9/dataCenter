@@ -16,6 +16,23 @@ import {
 import { acquisitionTargets } from './acquisition-targets.js';
 import { listAuditEvents } from './audit-view.js';
 import {
+  admitOperations,
+  dispatchOperations,
+  finishOperations,
+  operationsQueue,
+  type AdmissionOutcome,
+  type AdmissionRequest,
+} from './admission.js';
+import {
+  configureOperations,
+  observeEnvelope,
+  operationsReport,
+  operationsView,
+  recordMeasurements,
+  usageView,
+  type MeasurementInput,
+} from './operations.js';
+import {
   createRetentionHold,
   evaluateRetention,
   listPurgeJobs,
@@ -131,7 +148,7 @@ import { publishScraperCredential, publishScraperTask, showScraperTask } from '.
 import { runScraperService } from './scraper-run.js';
 import { showScraperDiagnostics } from './scraper-diagnostics.js';
 import { deploymentStatus } from './status.js';
-import { readDeployment, recentEvidence } from './state.js';
+import { readDeployment, readJsonFile, recentEvidence } from './state.js';
 import {
   finalizeUpgrade,
   preflightUpgrade,
@@ -146,7 +163,7 @@ const GROUPED_COMMANDS = new Set([
   'user', 'workspace', 'membership', 'ownership', 'context', 'audit',
   'source', 'connection', 'acquisition', 'acquisition-config', 'integration', 'dataset',
   'product', 'product-proposal', 'grant', 'export', 'console', 'agent', 'model', 'binding', 'proposal',
-  'scraper', 'report', 'retention', 'backup',
+  'scraper', 'report', 'retention', 'backup', 'operations',
 ]);
 const BOOLEAN_FLAGS = new Set([
   'admin-password-stdin', 'password-stdin', 'deployment-administrator', 'credential-stdin',
@@ -904,6 +921,117 @@ async function main(): Promise<void> {
       workspaceId: required(options, 'workspace'),
       ...(options.has('schedule') ? { scheduleId: required(options, 'schedule') } : {}),
       ...(options.has('at') ? { at: required(options, 'at') } : {}),
+    }));
+    return;
+  }
+  if (command === 'operations' && subcommand === 'show') {
+    emit({ ...operationsView(required(options, 'root')), ...operationsQueue(required(options, 'root')) });
+    return;
+  }
+  if (command === 'operations' && subcommand === 'admit') {
+    const at = instant(options, 'at');
+    const stated: AdmissionRequest[] = options.has('requests')
+      ? (readJsonFile<Record<string, unknown>>(required(options, 'requests'))['requests'] as Array<Record<string, unknown>>)
+          .map((request) => ({
+            ...request,
+            workspace_id: request['workspace_id'] ?? request['workspace'],
+            agent_identity_id: request['agent_identity_id'] ?? request['agent'] ?? null,
+          }) as AdmissionRequest)
+      : [{
+          workspace_id: required(options, 'workspace'),
+          operation: required(options, 'operation'),
+          class: required(options, 'class') as AdmissionRequest['class'],
+          ...(options.has('agent') ? { agent_identity_id: required(options, 'agent') } : {}),
+          ...(options.has('worker') ? { worker: required(options, 'worker') as 'acquisition' } : {}),
+        }];
+    const admitted = admitOperations({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      token: required(options, 'session-token'),
+      requests: stated,
+      ...(at === undefined ? {} : { at: at.toISOString() }),
+    });
+    if (!options.has('requests')) {
+      const [only] = admitted['results'] as AdmissionOutcome[];
+      if (only !== undefined && only.outcome === 'refused') {
+        throw new OperatorError(only.code ?? 'OPERATION_REFUSED', only.message ?? 'The operation was not admitted.');
+      }
+      emit(only);
+      return;
+    }
+    emit(admitted);
+    return;
+  }
+  if (command === 'operations' && subcommand === 'dispatch') {
+    const at = instant(options, 'at');
+    emit(dispatchOperations({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      token: required(options, 'session-token'),
+      ...(options.has('class') ? { cls: required(options, 'class') as AdmissionRequest['class'] } : {}),
+      ...(at === undefined ? {} : { at: at.toISOString() }),
+    }));
+    return;
+  }
+  if (command === 'operations' && subcommand === 'finish') {
+    const at = instant(options, 'at');
+    const leaseIds = options.has('leases')
+      ? (readJsonFile<Record<string, unknown>>(required(options, 'leases'))['leases'] as string[])
+      : [required(options, 'lease')];
+    emit(finishOperations({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      token: required(options, 'session-token'),
+      leaseIds,
+      ...(at === undefined ? {} : { at: at.toISOString() }),
+    }));
+    return;
+  }
+  if (command === 'operations' && subcommand === 'usage') {
+    const at = instant(options, 'at');
+    emit(usageView(required(options, 'root'), at?.toISOString()));
+    return;
+  }
+  if (command === 'operations' && subcommand === 'measure') {
+    const at = instant(options, 'at');
+    const measured = readJsonFile<Record<string, unknown>>(required(options, 'samples'));
+    emit(recordMeasurements({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      token: required(options, 'session-token'),
+      runId: required(options, 'run'),
+      window: required(options, 'window'),
+      parameters: (measured['parameters'] as Record<string, unknown> | undefined) ?? {},
+      startedAt: String(measured['started_at'] ?? ''),
+      finishedAt: String(measured['finished_at'] ?? ''),
+      samples: (measured['samples'] as MeasurementInput[] | undefined) ?? [],
+      ...(at === undefined ? {} : { at: at.toISOString() }),
+    }));
+    return;
+  }
+  if (command === 'operations' && subcommand === 'observe') {
+    const at = instant(options, 'at');
+    const observed = readJsonFile<Record<string, unknown>>(required(options, 'values'));
+    emit(observeEnvelope({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      token: required(options, 'session-token'),
+      values: observed as Record<string, number>,
+      ...(at === undefined ? {} : { at: at.toISOString() }),
+    }));
+    return;
+  }
+  if (command === 'operations' && subcommand === 'report') {
+    const at = instant(options, 'at');
+    emit(operationsReport(required(options, 'root'), at?.toISOString()));
+    return;
+  }
+  if (command === 'operations' && subcommand === 'configure') {
+    emit(configureOperations({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      token: required(options, 'session-token'),
+      configPath: required(options, 'config'),
     }));
     return;
   }

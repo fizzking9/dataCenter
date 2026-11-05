@@ -41,6 +41,7 @@ import type { Fail } from './errors.js';
 import { classifyResult, freshnessOf, narrationFacts, narrativeViolation } from './governed-result.js';
 import { memberReader, type GrantReader, type GrantScope } from './grants.js';
 import { generateGroundedNarration, promptPinsSimplifiedChinese } from './model-generation.js';
+import type { GenerationMetering } from './operations.js';
 import { pinnedForBinding } from './model-profile.js';
 import { findUserById, workspaceRoleOf, type WorkspaceRole } from './platform.js';
 import { executeDataProductQuery } from './product-query.js';
@@ -799,6 +800,7 @@ async function narrate(
   product: DataProductArtifact,
   result: Record<string, unknown>,
   reference: ReportRecord['data_product'],
+  metering: GenerationMetering,
 ): Promise<{ narrative: ReportRecord['narrative']; limitation: string | null }> {
   const facts = narrationFacts([{ name: product.name, result, release: reference as unknown as Record<string, unknown> }], version.question);
   if (facts.records.length === 0) return { narrative: null, limitation: null };
@@ -822,7 +824,7 @@ async function narrate(
         body: version.grounded_prompt.body,
         hash: version.grounded_prompt.hash,
       },
-    }, fail);
+    }, fail, metering);
     const narrative = String(answer['narrative'] ?? '');
     const violation = narrativeViolation(narrative, facts);
     if (violation !== null) {
@@ -941,10 +943,19 @@ export async function generateReport(options: GenerateReportOptions): Promise<Re
   const window = isRecord(result['window']) ? result['window'] : null;
   const reference = productReference(product, serving.version, serving.release);
   const completion = completionOf(result);
-  const narrated = await narrate(session, template.workspace_id, version, product, result, reference);
+  // One report is one metered operation, so the identifier the narrative is
+  // metered under is the identifier the immutable Report carries.
+  const reportId = randomUUID();
+  const narrated = await narrate(session, template.workspace_id, version, product, result, reference, {
+    root: session.root,
+    class: 'report',
+    operation: 'report_generation',
+    operation_id: reportId,
+    workspace_id: template.workspace_id,
+  });
   if (narrated.limitation !== null) completion.limitations.push(narrated.limitation);
   const report: ReportRecord = {
-    report_id: randomUUID(),
+    report_id: reportId,
     workspace_id: template.workspace_id,
     template: templateReference(template, version),
     data_product: reference,

@@ -33,6 +33,11 @@ import {
   promptPinsSimplifiedChinese,
   toolsFor,
 } from './model-generation.js';
+import {
+  beginGeneration,
+  readOperationsConfiguration,
+  type GenerationMetering,
+} from './operations.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
 export const ADAPTERS: ModelAdapterKind[] = ['hosted', 'generic_local'];
@@ -412,6 +417,20 @@ export async function evaluateModelProfile(options: {
   const failure: Fail = (code, message) => {
     throw new OperatorError(code, message);
   };
+  // The evaluation is a priced run of its own: every generation it performs is
+  // metered, and what it consumed is reported against the activation budget.
+  let consumptionCny = 0;
+  const metering: GenerationMetering = {
+    root: session.root,
+    class: 'activation',
+    ceiling_class: 'artifact',
+    operation: 'model_profile_evaluation',
+    operation_id: randomUUID(),
+    workspace_id: null,
+    on_settled: (usage) => {
+      consumptionCny = Number((consumptionCny + usage.cost_cny).toFixed(6));
+    },
+  };
   const checks: ModelProfileCheck[] = [];
   const record = async (name: string, run: () => Promise<string>): Promise<void> => {
     try {
@@ -430,12 +449,12 @@ export async function evaluateModelProfile(options: {
   // against the purposes it actually declares.
   const first = version.purposes[0]!;
   await record('pinned_identity', async () => {
-    const answer = await generateForPurpose(pinned, first, EVALUATION_INPUTS[first], failure);
+    const answer = await generateForPurpose(pinned, first, EVALUATION_INPUTS[first], failure, metering);
     return `${answer.identity.model}@${answer.identity.profile_hash.slice(0, 12)}`;
   });
   if (version.purposes.includes('integration_proposal')) {
     await record('structured_output', async () => {
-      const answer = await generateForPurpose(pinned, 'integration_proposal', EVALUATION_INPUTS.integration_proposal, failure);
+      const answer = await generateForPurpose(pinned, 'integration_proposal', EVALUATION_INPUTS.integration_proposal, failure, metering);
       const schema = answer.output['schema'];
       if (!Array.isArray(schema) || schema.length === 0) {
         throw new OperatorError('MODEL_STRUCTURED_OUTPUT_INVALID', 'The answer did not honour the declared structured output.');
@@ -445,7 +464,7 @@ export async function evaluateModelProfile(options: {
   }
   if (version.purposes.includes('data_product_proposal')) {
     await record('structured_output:data_product_proposal', async () => {
-      const answer = await generateForPurpose(pinned, 'data_product_proposal', EVALUATION_INPUTS.data_product_proposal, failure);
+      const answer = await generateForPurpose(pinned, 'data_product_proposal', EVALUATION_INPUTS.data_product_proposal, failure, metering);
       const fields = answer.output['fields'];
       if (!Array.isArray(fields) || fields.length === 0) {
         throw new OperatorError('MODEL_STRUCTURED_OUTPUT_INVALID', 'The answer did not honour the declared structured output.');
@@ -455,7 +474,7 @@ export async function evaluateModelProfile(options: {
   }
   if (version.purposes.includes('scraper_repair')) {
     await record('structured_output:scraper_repair', async () => {
-      const answer = await generateForPurpose(pinned, 'scraper_repair', EVALUATION_INPUTS.scraper_repair, failure);
+      const answer = await generateForPurpose(pinned, 'scraper_repair', EVALUATION_INPUTS.scraper_repair, failure, metering);
       const repaired = isRecord(answer.output['output']) ? answer.output['output'] : answer.output;
       const fields = repaired['fields'];
       if (!Array.isArray(fields) || fields.length === 0 || typeof repaired['record_selector'] !== 'string') {
@@ -467,13 +486,22 @@ export async function evaluateModelProfile(options: {
   await record('constrained_tools', async () => {
     // The request exposes only the tools its purpose declares, so any tool call
     // in the answer is the endpoint reaching outside what it was given.
-    const answer = await modelAdapter(version.adapter).generate(pinned, {
+    const prompt = promptOf(pinned, first, failure);
+    const request = {
       purpose: first,
-      prompt: promptOf(pinned, first, failure),
+      prompt,
       structured_output: STRUCTURED_OUTPUT[first],
       tools: toolsFor(pinned, first),
       input: EVALUATION_INPUTS[first],
+    };
+    const meter = beginGeneration(metering, {
+      prompt_body: prompt.body,
+      input: request.input,
+      tools: request.tools,
+      structured_output: request.structured_output,
     }, failure);
+    const answer = await modelAdapter(version.adapter).generate(pinned, request, failure);
+    meter.settle(answer);
     if (answer.tool_calls.length > 0) {
       throw new OperatorError('MODEL_TOOL_NOT_PERMITTED', 'The answer named a tool the request did not expose.');
     }
@@ -488,7 +516,7 @@ export async function evaluateModelProfile(options: {
   });
   if (version.purposes.includes('grounded_narration')) {
     await record('grounded_narration', async () => {
-      const answer = await generateForPurpose(pinned, 'grounded_narration', EVALUATION_INPUTS.grounded_narration, failure);
+      const answer = await generateForPurpose(pinned, 'grounded_narration', EVALUATION_INPUTS.grounded_narration, failure, metering);
       const mismatch = narrationFailure(answer.output, EVALUATION_INPUTS.grounded_narration);
       if (mismatch !== null) {
         throw new OperatorError(mismatch, 'The narrative is not grounded in the supplied evidence.');
@@ -496,7 +524,7 @@ export async function evaluateModelProfile(options: {
       return 'grounded';
     });
     await record('simplified_chinese_narrative', async () => {
-      const answer = await generateForPurpose(pinned, 'grounded_narration', EVALUATION_INPUTS.grounded_narration, failure);
+      const answer = await generateForPurpose(pinned, 'grounded_narration', EVALUATION_INPUTS.grounded_narration, failure, metering);
       const narrative = String(answer.output['narrative'] ?? '');
       if (!isSimplifiedChinese(narrative)) {
         throw new OperatorError('NARRATION_NOT_SIMPLIFIED_CHINESE', 'The narrative is not grounded Simplified Chinese.');
@@ -506,7 +534,7 @@ export async function evaluateModelProfile(options: {
   }
   if (version.purposes.includes('clarification')) {
     await record('simplified_chinese_clarification', async () => {
-      const answer = await generateForPurpose(pinned, 'clarification', EVALUATION_INPUTS.clarification, failure);
+      const answer = await generateForPurpose(pinned, 'clarification', EVALUATION_INPUTS.clarification, failure, metering);
       const question = String(answer.output['question'] ?? '');
       if (!isSimplifiedChinese(question)) {
         throw new OperatorError('CLARIFICATION_NOT_SIMPLIFIED_CHINESE', 'The clarification is not Simplified Chinese.');
@@ -517,7 +545,7 @@ export async function evaluateModelProfile(options: {
 
   if (version.purposes.includes('query_plan')) {
     await record('query_plan', async () => {
-      const answer = await generateForPurpose(pinned, 'query_plan', EVALUATION_INPUTS.query_plan, failure);
+      const answer = await generateForPurpose(pinned, 'query_plan', EVALUATION_INPUTS.query_plan, failure, metering);
       const mismatch = queryPlanFailure(answer.output);
       if (mismatch !== null) {
         throw new OperatorError(mismatch, 'The plan is not a request in the published query vocabulary.');
@@ -525,7 +553,7 @@ export async function evaluateModelProfile(options: {
       return answer.output['action'] === 'clarify' ? 'clarify' : 'query';
     });
     await record('simplified_chinese_plan', async () => {
-      const answer = await generateForPurpose(pinned, 'query_plan', EVALUATION_INPUTS.query_plan, failure);
+      const answer = await generateForPurpose(pinned, 'query_plan', EVALUATION_INPUTS.query_plan, failure, metering);
       const interpretation = String(answer.output['interpretation'] ?? '');
       if (!isSimplifiedChinese(interpretation)) {
         throw new OperatorError('QUERY_PLAN_NOT_SIMPLIFIED_CHINESE', 'The plan is not explained in Simplified Chinese.');
@@ -535,6 +563,12 @@ export async function evaluateModelProfile(options: {
   }
 
   const passed = checks.every((check) => check.passed);
+  const budget = {
+    consumption_cny: consumptionCny,
+    ceiling_cny: readOperationsConfiguration(session.root).budgets.activation_cny,
+    met: false,
+  };
+  budget.met = budget.consumption_cny <= budget.ceiling_cny;
   const evaluation: ModelProfileEvaluation = {
     model_profile_version: version.version,
     model_profile_content_hash: version.content_hash,
@@ -549,6 +583,7 @@ export async function evaluateModelProfile(options: {
       model_profile_content_hash: version.content_hash,
       checks,
     }),
+    budget,
   };
   profile.evaluations.push(evaluation);
 
@@ -570,6 +605,7 @@ export async function evaluateModelProfile(options: {
     content_hash: version.content_hash,
     passed,
     checks: checks.map((check) => ({ ...check })),
+    budget: { ...budget },
     evidence_hash: evaluation.evidence_hash,
     evaluated_at: evaluation.evaluated_at,
   };
@@ -621,6 +657,19 @@ export function activateModelProfile(options: {
       'MODEL_PROFILE_EVALUATION_FAILED',
       'The Model Profile Version did not pass its activation evaluation.',
       'Point the Profile at an endpoint that answers grounded Simplified Chinese, then evaluate it again.',
+    );
+  }
+  // A budget is a ceiling on the run that produces the evidence, so an
+  // evaluation that overran it refuses activation rather than silently billing
+  // past what the Deployment stated it would spend.
+  if (evaluation.budget !== undefined && !evaluation.budget.met) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      context,
+      'ACTIVATION_BUDGET_EXCEEDED',
+      `The activation evaluation consumed CNY ${evaluation.budget.consumption_cny.toFixed(3)}, past the CNY ${evaluation.budget.ceiling_cny.toFixed(2)} activation budget.`,
+      'Raise the activation budget or evaluate against a cheaper endpoint before activating.',
     );
   }
   profile.activated_version = version.version;
