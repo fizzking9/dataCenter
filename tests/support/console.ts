@@ -1,7 +1,8 @@
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import type { PlatformFixture } from './platform.js';
+import { command, type PlatformFixture } from './platform.js';
+import { totpCode } from './totp.js';
 
 const cliPath = fileURLToPath(new URL('../../src/cli.js', import.meta.url));
 
@@ -104,6 +105,44 @@ export interface HttpResult {
   body: Record<string, unknown>;
   text: string;
   cookies: string[];
+}
+
+export interface OperatorConsoleSession {
+  /** The raw `name=value` cookie a later console request carries. */
+  cookie: string;
+  totp_secret: string;
+}
+
+/**
+ * Enrolls one Operator from the CLI-issued one-time secret and opens a console
+ * session over the authenticated HTTP API, exactly as the browser does.
+ */
+export async function signInOperatorConsole(
+  fixture: PlatformFixture,
+  url: string,
+  options: { operator: string; password: string },
+): Promise<OperatorConsoleSession> {
+  const issued = command(fixture, ['console', 'enroll', '--operator', options.operator]);
+  if (issued.status !== 0) throw new Error(`console enroll failed: ${issued.stderr}`);
+  const enrolled = await callApi(url, '/api/operator/enrollment', {
+    body: { enrollment_secret: String(issued.output.enrollment_secret), password: options.password },
+  });
+  if (enrolled.status !== 201) throw new Error(`operator enrollment failed: ${enrolled.text}`);
+  const totpSecret = String(enrolled.body.totp_secret);
+  return { cookie: await signInOperatorPage(url, options, totpSecret), totp_secret: totpSecret };
+}
+
+/** Opens one further console session for an Operator that already has credentials. */
+export async function signInOperatorPage(
+  url: string,
+  options: { operator: string; password: string },
+  totpSecret: string,
+): Promise<string> {
+  const signedIn = await callApi(url, '/api/operator/session', {
+    body: { username: options.operator, password: options.password, totp: totpCode(totpSecret) },
+  });
+  if (signedIn.status !== 200) throw new Error(`operator sign-in failed: ${signedIn.text}`);
+  return (signedIn.cookies[0] ?? '').split(';')[0] ?? '';
 }
 
 /** A raw byte body, which is what one governed upload carries. */

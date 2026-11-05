@@ -91,15 +91,74 @@ export interface LicenseView extends Partial<LicenseSummary> {
   message?: string;
 }
 
-interface LicenseHistoryEntry extends LicenseSummary {
-  request_id: string;
+/** One imported entitlement, stated without its signature or License Request. */
+export interface LicenseHistoryEntry extends LicenseSummary {
   imported_at: string;
   previous_license_id: string | null;
 }
 
+interface StoredLicenseHistoryEntry extends LicenseHistoryEntry {
+  request_id: string;
+}
+
 interface LicenseHistory {
   schema_version: 1;
-  entries: LicenseHistoryEntry[];
+  entries: StoredLicenseHistoryEntry[];
+}
+
+export type LicenseAccessKind = 'full' | 'read_only' | 'closed';
+
+/**
+ * Which operation classes the entitlement allows, stated by the server so the
+ * browser never decides on its own what an expired license still permits. The
+ * identifiers are stable contract values; only their labels are translated.
+ */
+export interface LicenseAccess {
+  access: LicenseAccessKind;
+  permitted: string[];
+  disabled: string[];
+}
+
+/** Everything ordinary expiration leaves open: reads, exports, protection, and recovery. */
+const EXPIRY_PERMITTED = [
+  'existing_reads',
+  'ephemeral_query',
+  'exports',
+  'backup',
+  'lifecycle',
+  'license_import',
+  'authentication',
+];
+
+/** Everything ordinary expiration closes, because each one would write or spend. */
+const EXPIRY_DISABLED = [
+  'acquisition',
+  'integration',
+  'configuration',
+  'artifacts',
+  'reports',
+  'schedules',
+  'data_products',
+];
+
+/** A Deployment closed by an unusable license still imports one and runs lifecycle recovery. */
+const CLOSED_PERMITTED = ['license_import', 'lifecycle'];
+
+export function licenseAccess(view: LicenseView): LicenseAccess {
+  if (view.status === 'valid') {
+    return { access: 'full', permitted: [], disabled: [] };
+  }
+  if (view.status === 'expired') {
+    return { access: 'read_only', permitted: [...EXPIRY_PERMITTED], disabled: [...EXPIRY_DISABLED] };
+  }
+  return {
+    access: 'closed',
+    permitted: [...CLOSED_PERMITTED],
+    disabled: [
+      ...EXPIRY_PERMITTED.filter((operation) => !CLOSED_PERMITTED.includes(operation)),
+      ...EXPIRY_DISABLED,
+    ],
+  };
 }
 
 function compareRelease(left: string, right: string): number {
@@ -372,6 +431,21 @@ function readLicenseHistory(root: string): LicenseHistory {
 }
 
 /**
+ * Every entitlement this Deployment has imported, oldest first, as a console may
+ * state it: identifiers, windows, and import instants, never a signature.
+ */
+export function readLicenseHistoryEntries(root: string): LicenseHistoryEntry[] {
+  return readLicenseHistory(root).entries.map((entry) => ({
+    license_id: entry.license_id,
+    not_before: entry.not_before,
+    expires_at: entry.expires_at,
+    highest_eligible_release: entry.highest_eligible_release,
+    imported_at: entry.imported_at,
+    previous_license_id: entry.previous_license_id ?? null,
+  }));
+}
+
+/**
  * Imports one offline-signed Deployment License. A Deployment that is already
  * open renews in place: the new entitlement is validated before anything is
  * written, the replaced license joins the license history, and business data,
@@ -413,7 +487,7 @@ export function importLicense(options: {
   const renewed = deployment.service_open;
   const next = renewed ? deployment : { ...deployment, state: 'ready_to_initialize' };
   if (!renewed) writeDeployment(options.root, next);
-  recordEvidence(options.root, 'import-license', renewed ? 'renewed' : 'ready_to_initialize', options.operator, {
+  const evidenceId = recordEvidence(options.root, 'import-license', renewed ? 'renewed' : 'ready_to_initialize', options.operator, {
     license_id: assessment.license.payload.license_id,
     previous_license_id: previous?.license_id ?? null,
     not_before: assessment.license.payload.not_before,
@@ -428,6 +502,7 @@ export function importLicense(options: {
     renewed,
     service_open: renewed,
     warning: assessment.warning,
+    evidence_id: evidenceId,
     license_history: history.entries.map((entry) => entry.license_id),
   };
 }

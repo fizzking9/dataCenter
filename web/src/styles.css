@@ -919,3 +919,33 @@ body {
   background: var(--surface-sunken, #f4f5f7);
   font-size: 12px;
 }
+
+/* The two lists an unusable license states: what stays open, what closed. */
+.access-lists {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 18px;
+}
+
+.access-list__title {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  color: var(--ink-muted);
+}
+
+.access-list__items {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+
+.access-list__items--permitted {
+  color: var(--ink);
+}
+
+.access-list__items--disabled {
+  color: var(--ink-muted);
+}

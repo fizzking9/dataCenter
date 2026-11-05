@@ -37,14 +37,78 @@ export interface HealthView {
   checked_at?: string;
 }
 
-export interface LicenseView {
+/** One announced expiration threshold, as the server states it. */
+export interface LicenseWarningView {
+  level: '30_day' | '7_day' | '1_day';
+  days_remaining: number;
+  expires_at: string;
+  message: string;
+}
+
+/** The operation classes the entitlement allows, decided by the server. */
+export interface LicenseAccessView {
+  access: 'full' | 'read_only' | 'closed';
+  permitted: string[];
+  disabled: string[];
+}
+
+/** One imported entitlement, stated without its signature. */
+export interface LicenseHistoryEntryView {
   license_id: string;
   not_before: string;
   expires_at: string;
   highest_eligible_release: string;
+  imported_at: string;
+  previous_license_id: string | null;
+}
+
+/** One durable record a licensing view states as evidence. */
+export interface EvidenceRowView {
+  evidence_id: string;
+  operation: string;
+  outcome: string;
+  occurred_at: string;
+  error_code?: string;
+}
+
+export interface LicenseView {
+  status: 'valid' | 'expired' | 'invalid';
+  license_id?: string;
+  not_before?: string;
+  expires_at?: string;
+  highest_eligible_release?: string;
+  days_remaining: number | null;
+  warning: LicenseWarningView | null;
+  error_code?: string;
+  message?: string;
   release: string;
   deployment_id: string;
   state: string;
+  access: LicenseAccessView;
+  history: LicenseHistoryEntryView[];
+  evidence: EvidenceRowView[];
+  checked_at?: string;
+}
+
+/** The settled outcome of one offline import, beside the surface it leaves behind. */
+export interface LicenseImportView extends LicenseView {
+  license_id: string;
+  previous_license_id: string | null;
+  renewed: boolean;
+  service_open: boolean;
+  evidence_id: string;
+}
+
+/** One live Operator Console session, as the server states it. */
+export interface OperatorSessionView {
+  current: boolean;
+  issued_at: string;
+  expires_at: string;
+}
+
+export interface OperatorSessionListView {
+  operator: string;
+  sessions: OperatorSessionView[];
 }
 
 /** The settled recovery objectives every recovery view states as numbers. */
@@ -3066,6 +3130,17 @@ export const consoleApi = {
     request<Credentials>('/api/operator/enrollment', { method: 'POST', body: JSON.stringify(body) }),
   health: () => request<HealthView>('/api/operator/health'),
   license: () => request<LicenseView>('/api/operator/license'),
+  importLicense: (licensePath: string) =>
+    request<LicenseImportView>('/api/operator/license', {
+      method: 'POST',
+      body: JSON.stringify({ license: licensePath }),
+    }),
+  sessions: () => request<OperatorSessionListView>('/api/operator/sessions'),
+  revokeOtherSessions: () =>
+    request<{ operator: string; sessions_revoked: number; evidence_id: string }>(
+      '/api/operator/sessions/revoke',
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
   stepUp: (body: { purpose: string; target: string; password: string; totp?: string; recovery_code?: string }) =>
     request<StepUpGrantView>('/api/operator/step-up', { method: 'POST', body: JSON.stringify(body) }),
   recovery: () => request<RecoveryOverviewView>('/api/operator/recovery'),

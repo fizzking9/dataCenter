@@ -5,6 +5,7 @@ import { optional, t } from '../i18n/zh-CN.js';
 import { Alert, DefinitionList, Panel, StatusPill, type DefinitionRow } from '../ui/Panel.js';
 import { Button } from '../ui/Button.js';
 import { RecoverySection } from './ConsoleRecoveryScreen.js';
+import { SessionsSection } from './ConsoleSessionsSection.js';
 
 export interface ConsoleScreenProps {
   onSessionLost: () => void;
@@ -123,6 +124,7 @@ export function ConsoleScreen({ onSessionLost }: ConsoleScreenProps) {
         </p>
       )}
 
+      <SessionsSection onSessionLost={onSessionLost} />
       <RecoverySection onSessionLost={onSessionLost} />
     </div>
   );
