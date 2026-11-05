@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { Worker } from 'node:worker_threads';
 import {
   BASE_BACKUP_INTERVAL_HOURS,
   CHECKPOINT_INTERVAL_SECONDS,
@@ -13,7 +14,6 @@ import {
   listBackups,
   readCheckpoints,
   readRecoveryManifest,
-  restoreDeployment,
   showBackup,
   verifyBackupSet,
   type CheckpointRecord,
@@ -422,70 +422,101 @@ export function startRestoration(options: RecoveryTargets & {
     connectivity_enabled: false,
   });
 
-  // The restoration runs after this answer is written, so the request returns
-  // immediately and every poll sees durable progress rather than a held socket.
-  setImmediate(() => runRestoration({ ...options, restorationId }));
+  // The restoration runs in its own worker thread, so this request returns
+  // immediately and every poll sees durable progress while the console stays
+  // responsive for the whole restoration.
+  launchRestoration(options, restorationId);
   return recordView(options.restoreRoot, record);
 }
 
-function runRestoration(options: RecoveryTargets & {
+function launchRestoration(options: RecoveryTargets & {
   masterKey: string;
   backupId: string;
   operator: string;
-  restorationId: string;
-}): void {
-  let record = readRestoration(options.root, options.restorationId);
-  record.started_at = new Date().toISOString();
-  try {
-    // Integrity is re-proved first, so a damaged set is named before any target
-    // directory exists and the durable record states exactly which check failed.
-    inspectRecoverySet({ backupRoot: options.backupRoot, backupId: options.backupId });
-    appendStep(record, step('integrity_verified', 'succeeded'));
-    writeRestoration(options.root, record);
+}, restorationId: string): void {
+  const targetRoot = restorationTarget(options.restoreRoot, restorationId);
+  const recordPath = join(restorationDirectory(options.root), `${restorationId}.json`);
+  const started = readRestoration(options.root, restorationId);
+  started.started_at = new Date().toISOString();
+  writeRestoration(options.root, started);
 
-    const restored = restoreDeployment({
-      root: restorationTarget(options.restoreRoot, options.restorationId),
+  const worker = new Worker(new URL('./restore-worker.js', import.meta.url), {
+    workerData: {
+      targetRoot,
       masterKey: options.masterKey,
-      operator: options.operator,
       backupRoot: options.backupRoot,
       backupId: options.backupId,
-    });
-    record = readRestoration(options.root, options.restorationId);
-    record.state = 'verified_open';
-    record.finished_at = new Date().toISOString();
-    record.verification = (restored['verification'] as Record<string, unknown> | undefined) ?? null;
-    record.purge_ledger = (restored['purge_ledger'] as Record<string, unknown> | undefined) ?? null;
-    record.rto = (restored['rto'] as Record<string, unknown> | undefined) ?? null;
-    record.service_open = restored['service_open'] === true;
-    record.workers_enabled = restored['workers_enabled'] === true;
-    record.connectivity_enabled = restored['connectivity_enabled'] === true;
-    record.evidence_id = typeof restored['evidence_id'] === 'string' ? restored['evidence_id'] : null;
-    appendStep(record, step('restoration_verified', 'succeeded'));
-    writeRestoration(options.root, record);
-    recordOperatorAction(options.root, options.masterKey, options.operator, 'restoration_verified', record.restoration_id, 'succeeded', {
-      restoration_id: record.restoration_id,
-      backup_id: record.backup_id,
-      ...(rtoSecondsOf(record) === null ? {} : { rto_seconds: rtoSecondsOf(record) as number }),
-      rto_met: record.rto !== null && record.rto['met'] === true,
-      workers_enabled: false,
-      connectivity_enabled: false,
-    });
-  } catch (error) {
-    const failure = asFailure(error);
-    record = readRestoration(options.root, options.restorationId);
-    record.state = 'failed';
-    record.finished_at = new Date().toISOString();
-    record.service_open = false;
-    record.error = failure;
-    appendStep(record, step('restoration_failed', 'failed'));
-    writeRestoration(options.root, record);
-    recordOperatorAction(options.root, options.masterKey, options.operator, 'restoration_verified', record.restoration_id, 'failed', {
-      restoration_id: record.restoration_id,
-      backup_id: record.backup_id,
-      error_code: failure.code,
-      service_open: false,
-    });
-  }
+      operator: options.operator,
+      recordPath,
+    },
+  });
+  let settled = false;
+  worker.once('message', (message: { ok: boolean; restored?: Record<string, unknown>; error?: { code: string; message: string; next_step?: string } }) => {
+    if (settled) return;
+    settled = true;
+    void worker.terminate();
+    if (message.ok && message.restored !== undefined) finishRestoration(options, restorationId, message.restored);
+    else failRestoration(options, restorationId, message.error ?? { code: 'RESTORATION_FAILED', message: 'The restoration worker reported no outcome.' });
+  });
+  worker.once('error', (error: Error) => {
+    if (settled) return;
+    settled = true;
+    failRestoration(options, restorationId, { code: 'RESTORATION_FAILED', message: error.message });
+  });
+  worker.once('exit', (code: number) => {
+    if (settled) return;
+    settled = true;
+    if (code !== 0) failRestoration(options, restorationId, { code: 'RESTORATION_FAILED', message: `The restoration worker stopped with exit code ${code}.` });
+  });
+}
+
+/** A verified restoration keeps its evidence, and opens with nothing resumed. */
+function finishRestoration(
+  options: RecoveryTargets & { masterKey: string; operator: string },
+  restorationId: string,
+  restored: Record<string, unknown>,
+): void {
+  const record = readRestoration(options.root, restorationId);
+  record.state = 'verified_open';
+  record.finished_at = new Date().toISOString();
+  record.verification = (restored['verification'] as Record<string, unknown> | undefined) ?? null;
+  record.purge_ledger = (restored['purge_ledger'] as Record<string, unknown> | undefined) ?? null;
+  record.rto = (restored['rto'] as Record<string, unknown> | undefined) ?? null;
+  record.service_open = restored['service_open'] === true;
+  record.workers_enabled = restored['workers_enabled'] === true;
+  record.connectivity_enabled = restored['connectivity_enabled'] === true;
+  record.evidence_id = typeof restored['evidence_id'] === 'string' ? restored['evidence_id'] : null;
+  appendStep(record, step('restoration_verified', 'succeeded'));
+  writeRestoration(options.root, record);
+  recordOperatorAction(options.root, options.masterKey, options.operator, 'restoration_verified', record.restoration_id, 'succeeded', {
+    restoration_id: record.restoration_id,
+    backup_id: record.backup_id,
+    ...(rtoSecondsOf(record) === null ? {} : { rto_seconds: rtoSecondsOf(record) as number }),
+    rto_met: record.rto !== null && record.rto['met'] === true,
+    workers_enabled: false,
+    connectivity_enabled: false,
+  });
+}
+
+/** A refused restoration stays closed and states exactly why. */
+function failRestoration(
+  options: RecoveryTargets & { masterKey: string; operator: string },
+  restorationId: string,
+  failure: { code: string; message: string; next_step?: string },
+): void {
+  const record = readRestoration(options.root, restorationId);
+  record.state = 'failed';
+  record.finished_at = new Date().toISOString();
+  record.service_open = false;
+  record.error = failure;
+  appendStep(record, step('restoration_failed', 'failed'));
+  writeRestoration(options.root, record);
+  recordOperatorAction(options.root, options.masterKey, options.operator, 'restoration_verified', record.restoration_id, 'failed', {
+    restoration_id: record.restoration_id,
+    backup_id: record.backup_id,
+    error_code: failure.code,
+    service_open: false,
+  });
 }
 
 export function showRestoration(options: { root: string; restoreRoot: string; restorationId: string }): Record<string, unknown> {
