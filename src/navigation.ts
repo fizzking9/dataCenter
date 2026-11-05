@@ -17,6 +17,7 @@ export type NavigationKey =
   | 'deployment.workspaces'
   | 'deployment.users'
   | 'deployment.modelProfiles'
+  | 'deployment.retention'
   | 'workspace.overview'
   | 'workspace.sources'
   | 'workspace.scrapers'
@@ -26,6 +27,7 @@ export type NavigationKey =
   | 'workspace.agents'
   | 'workspace.audit'
   | 'workspace.models'
+  | 'workspace.retention'
   | 'workspace.proposals'
   | 'workspace.productProposals';
 
@@ -47,6 +49,7 @@ const WORKSPACE_NAVIGATION: Record<WorkspaceRole, NavigationKey[]> = {
     'workspace.models',
     'workspace.proposals',
     'workspace.productProposals',
+    'workspace.retention',
   ],
   Consumer: ['workspace.overview', 'workspace.products'],
 };
@@ -55,6 +58,7 @@ const DEPLOYMENT_NAVIGATION: NavigationKey[] = [
   'deployment.workspaces',
   'deployment.users',
   'deployment.modelProfiles',
+  'deployment.retention',
 ];
 
 export interface ActivityItem {

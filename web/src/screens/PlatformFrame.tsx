@@ -42,11 +42,12 @@ function hrefOf(key: string, workspaceId: string | null): string | undefined {
   if (key === 'deployment.workspaces') return '/app/deployment';
   if (key === 'deployment.users') return '/app/deployment/users';
   if (key === 'deployment.modelProfiles') return '/app/deployment/model-profiles';
+  if (key === 'deployment.retention') return '/app/deployment/retention';
   if (workspaceId === null || !key.startsWith('workspace.')) return undefined;
   const view = key.slice('workspace.'.length);
   if (view !== 'overview' && view !== 'sources' && view !== 'scrapers' && view !== 'products' && view !== 'context'
     && view !== 'members' && view !== 'audit' && view !== 'models' && view !== 'proposals'
-    && view !== 'productProposals' && view !== 'agents') return undefined;
+    && view !== 'productProposals' && view !== 'agents' && view !== 'retention') return undefined;
   if (view === 'productProposals') {
     return `/app/w/${encodeURIComponent(workspaceId)}/product-proposals`;
   }

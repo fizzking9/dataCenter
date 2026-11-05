@@ -24,7 +24,7 @@ import {
 } from './agents.js';
 import { publishGrant, revokeGrant } from './grants.js';
 import { showWorkspaceAudit } from './audit-view.js';
-import { login, logout } from './auth.js';
+import { login, logout, verifyStepUpAuthentication } from './auth.js';
 import {
   adoptConnection,
   connectionPacing,
@@ -104,6 +104,20 @@ import {
   OPERATOR_SESSION_LIFETIME_MS,
 } from './operators.js';
 import { queryDataProductApi } from './data-product-api.js';
+import {
+  createRetentionHold,
+  evaluateRetention,
+  listPurgeJobs,
+  listRetentionHolds,
+  previewPurge,
+  publishRetentionOverride,
+  publishRetentionPolicy,
+  releaseRetentionHold,
+  requestPurge,
+  showPurgeJob,
+  showRetentionPolicy,
+  tickRetention,
+} from './retention.js';
 import { OperatorError } from './errors.js';
 import { readLicenseSummary } from './license.js';
 import { handleMcpSurface, type McpServerIdentity } from './mcp.js';
@@ -648,6 +662,214 @@ async function handleApi(
       masterKey: options.masterKey,
       token,
       delegationId: decodeURIComponent(agentDelegationRevokeRoute[1]!),
+    }));
+    return;
+  }
+
+  // Retention: Deployment defaults, Workspace overrides, accountable Holds,
+  // dependency-aware eligibility, and step-up-authenticated Purge. Every route
+  // calls the same governed module the CLI calls, so no clock is judged here.
+  if (pathname === '/api/deployment/retention' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, showRetentionPolicy({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/retention' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, publishRetentionPolicy({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      config: {
+        ...(body['defaults'] === undefined ? {} : { defaults: body['defaults'] }),
+        ...(body['bounds'] === undefined ? {} : { bounds: body['bounds'] }),
+      },
+    }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/retention/holds' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listRetentionHolds({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/retention/holds' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, createRetentionHold({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      ...retentionOptions(body),
+      scopeKind: 'deployment',
+      reason: text(body, 'reason'),
+      reviewAt: text(body, 'review_at'),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/retention/purges' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listPurgeJobs({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  // Automatic retention is a Deployment decision: one tick evaluates every
+  // Workspace, queues eligible work, and retries every due failure.
+  if (pathname === '/api/deployment/retention/tick' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const at = text(body, 'at');
+    sendJson(response, 200, tickRetention({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      ...(at === '' ? {} : { at }),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/retention' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, showRetentionPolicy({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/retention/override' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, publishRetentionOverride({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: workspaceFromBody(body),
+      config: body['terms'] ?? {},
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/retention/evaluate' && method === 'GET') {
+    const token = userSession(request);
+    const at = searchParam(request, 'at');
+    sendJson(response, 200, evaluateRetention({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+      ...(at === null ? {} : { at }),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/retention/holds' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listRetentionHolds({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/retention/holds' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, createRetentionHold({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      ...retentionOptions(body),
+      scopeKind: text(body, 'scope_kind'),
+      reason: text(body, 'reason'),
+      reviewAt: text(body, 'review_at'),
+    }));
+    return;
+  }
+
+  // A Hold is released by whichever administrator accountable for its scope the
+  // governed module accepts, so one route serves both navigation trees.
+  const holdReleaseRoute = /^\/api\/retention\/holds\/([^/]+)\/release$/u.exec(pathname);
+  if (holdReleaseRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    sendJson(response, 200, releaseRetentionHold({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      holdId: decodeURIComponent(holdReleaseRoute[1]!),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/retention/purges' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listPurgeJobs({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: activeWorkspace(request),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/workspace/retention/purge/preview' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 200, previewPurge({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      ...retentionOptions(body),
+      scopeKind: text(body, 'scope_kind'),
+    }));
+    return;
+  }
+
+  // Manual Purge is irreversible once its asynchronous deletion runs, so this
+  // route demands a fresh password and MFA proof beside the standing session
+  // before the governed module revokes access and queues the deletion.
+  if (pathname === '/api/workspace/retention/purge' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    const workspaceId = text(body, 'workspace_id');
+    const stepUp = await verifyStepUpAuthentication({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      password: text(body, 'password'),
+      ...(text(body, 'totp') === '' ? {} : { totp: text(body, 'totp') }),
+      ...(text(body, 'recovery_code') === '' ? {} : { recoveryCode: text(body, 'recovery_code') }),
+      purpose: 'retention_purge_request',
+      ...(workspaceId === '' ? {} : { workspaceId }),
+      target: text(body, 'scope_kind'),
+    });
+    sendJson(response, 201, requestPurge({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      ...retentionOptions(body),
+      scopeKind: text(body, 'scope_kind'),
+      stepUpVerifiedAt: stepUp.verified_at,
+    }));
+    return;
+  }
+
+  const purgeShowRoute = /^\/api\/workspace\/retention\/purges\/([^/]+)$/u.exec(pathname);
+  if (purgeShowRoute !== null && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, showPurgeJob({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      purgeId: decodeURIComponent(purgeShowRoute[1]!),
     }));
     return;
   }
@@ -1524,6 +1746,35 @@ function workspaceFromBody(body: Record<string, unknown>): string {
   return workspaceId;
 }
 
+/**
+ * The explicit scope one retention request names. Absent identifiers stay
+ * absent, so the governed module resolves and authorizes the exact scope rather
+ * than guessing one from whatever the browser sent.
+ */
+function retentionOptions(body: Record<string, unknown>): {
+  workspaceId?: string;
+  sourceId?: string;
+  datasetId?: string;
+  datasetRelease?: number;
+  targetId?: string;
+  at?: string;
+} {
+  const workspaceId = text(body, 'workspace_id');
+  const sourceId = text(body, 'source_id');
+  const datasetId = text(body, 'dataset_id');
+  const targetId = text(body, 'proposal_id') === '' ? text(body, 'export_id') : text(body, 'proposal_id');
+  const datasetRelease = number(body, 'dataset_release');
+  const at = text(body, 'at');
+  return {
+    ...(workspaceId === '' ? {} : { workspaceId }),
+    ...(sourceId === '' ? {} : { sourceId }),
+    ...(datasetId === '' ? {} : { datasetId }),
+    ...(Number.isInteger(datasetRelease) ? { datasetRelease } : {}),
+    ...(targetId === '' ? {} : { targetId }),
+    ...(at === '' ? {} : { at }),
+  };
+}
+
 function searchParam(request: IncomingMessage, name: string): string | null {
   const value = new URL(request.url ?? '/', 'http://localhost').searchParams.get(name);
   return value === null || value === '' ? null : value;
@@ -1703,6 +1954,7 @@ const STATUS_BY_CODE: Record<string, number> = {
   OPERATOR_ALREADY_ENROLLED: 409,
   AUTHENTICATION_FAILED: 401,
   SESSION_INVALID: 401,
+  STEP_UP_AUTHENTICATION_FAILED: 401,
   AUTHORIZATION_DENIED: 403,
   WORKSPACE_ACCESS_DENIED: 403,
   ROLE_INVALID: 400,
@@ -1751,6 +2003,14 @@ const STATUS_BY_CODE: Record<string, number> = {
   CONTEXT_ENTRY_INVALID: 400,
   CONTEXT_ENTRY_DUPLICATE: 400,
   CONTEXT_ENTRIES_UNREADABLE: 400,
+  // Retention, Holds, and Purge refusals are governed answers, never faults.
+  RETENTION_CONFIG_UNREADABLE: 400,
+  RETENTION_POLICY_INVALID: 400,
+  RETENTION_POLICY_VERSION_NOT_FOUND: 404,
+  RETENTION_SCOPE_INVALID: 400,
+  RETENTION_HOLD_INVALID: 400,
+  RETENTION_HOLD_NOT_FOUND: 404,
+  RETENTION_PURGE_NOT_FOUND: 404,
   // A Data Product Query failure is a governed answer, not a server fault.
   DATA_PRODUCT_QUERY_INVALID: 400,
   DATA_PRODUCT_QUERY_CURSOR_INVALID: 400,
