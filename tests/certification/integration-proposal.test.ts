@@ -251,6 +251,26 @@ async function generate(s: Surface, bindingId: string): Promise<CommandResult> {
   );
 }
 
+function requirementDocument(
+  s: Surface,
+  name: string,
+  text: string,
+  clarifications: Array<{ question: string; answer: string }> = [],
+): string {
+  return jsonFile(s.fixture, name, { requirement: text, clarifications });
+}
+
+async function generateWithRequirement(s: Surface, bindingId: string, requirementPath: string): Promise<CommandResult> {
+  return commandAsync(
+    s.fixture,
+    [
+      'proposal', 'generate', '--source', s.sourceId, '--binding', bindingId,
+      '--evidence', dataDictionary(s), '--requirement', requirementPath,
+    ],
+    { token: s.workspaceAdministratorToken },
+  );
+}
+
 /** Publishes and adopts the Integration Configuration a Proposal is generated against. */
 function baseIntegration(s: Surface): BaseVersion {
   const published = command(
@@ -955,6 +975,92 @@ test('activation and Binding preflight require grounded Simplified Chinese narra
         .map((check) => check['name']),
       [],
     );
+  } finally {
+    await endpoint.close();
+  }
+});
+
+test('a Chinese requirement and its clarifications become immutable Proposal content and Provenance', async () => {
+  const endpoint = await startMockModelEndpoint();
+  try {
+    const current = surface();
+    const profile = await activatedProfile(current, endpoint, 'hosted', '需求档案');
+    const bindingId = await bindAll(current, profile);
+    const baseline = baseIntegration(current);
+    const rawId = upload(current, 'acquisition', RAW_CSV);
+
+    // A requirement too broad to name governed data is refused with one Chinese
+    // clarification, and the refusal creates no Proposal at all.
+    const broad = await generateWithRequirement(
+      current,
+      bindingId,
+      requirementDocument(current, 'requirement-broad', '请帮我整理一下这份数据。'),
+    );
+    assert.equal(broad.status, 2, broad.stdout);
+    assert.equal(broad.error['code'], 'PROPOSAL_CLARIFICATION_REQUIRED');
+    assert.match(String(broad.error['message']), /^请确认/u);
+    assert.equal(stateOf(current).artifact_proposals.length, 0);
+
+    // A malformed requirement is refused before any model call.
+    const empty = await generateWithRequirement(
+      current,
+      bindingId,
+      jsonFile(current.fixture, 'requirement-empty', { requirement: '   ', clarifications: [] }),
+    );
+    assert.equal(empty.status, 2, empty.stdout);
+    assert.equal(empty.error['code'], 'PROPOSAL_REQUIREMENT_INVALID');
+
+    // The recorded Chinese answer lets generation proceed, and the requirement,
+    // its clarifications, and their content address are immutable Proposal content.
+    const clarifications = [{ question: '请确认要映射哪些源列，以及数据集覆盖的业务范围？', answer: '映射设备SN、城市与处理量三列。' }];
+    const clarified = await generateWithRequirement(
+      current,
+      bindingId,
+      requirementDocument(current, 'requirement-clarified', '请帮我整理一下这份数据。', clarifications),
+    );
+    assert.equal(clarified.status, 0, clarified.stderr);
+    const requirement = asRecord(clarified.output['requirement']);
+    assert.equal(requirement['text'], '请帮我整理一下这份数据。');
+    assert.deepEqual(requirement['clarifications'], clarifications);
+    assert.match(String(requirement['hash']), /^[0-9a-f]{64}$/u);
+
+    // Identical requirement content keeps the content address; a changed answer moves it.
+    const repeated = await generateWithRequirement(
+      current,
+      bindingId,
+      requirementDocument(current, 'requirement-clarified', '请帮我整理一下这份数据。', clarifications),
+    );
+    assert.equal(repeated.status, 0, repeated.stderr);
+    assert.equal(repeated.output['proposal_hash'], clarified.output['proposal_hash']);
+    const changed = await generateWithRequirement(
+      current,
+      bindingId,
+      requirementDocument(current, 'requirement-changed', '请帮我整理一下这份数据。', [
+        { ...clarifications[0]!, answer: '只映射设备SN一列。' },
+      ]),
+    );
+    assert.equal(changed.status, 0, changed.stderr);
+    assert.notEqual(changed.output['proposal_hash'], clarified.output['proposal_hash']);
+
+    // Approval restates the requirement hash beside the model, prompt, and evidence.
+    const proposalId = String(clarified.output['proposal_id']);
+    assert.equal(validate(current, proposalId).status, 0);
+    assert.equal(preview(current, proposalId, rawId).status, 0);
+    const approved = decide(current, 'approve', proposalId);
+    assert.equal(approved.status, 0, approved.stderr);
+    assert.equal(asRecord(approved.output['provenance'])['requirement_hash'], requirement['hash']);
+
+    // Editing the recorded requirement breaks the content address.
+    const statePath = join(current.fixture.root, 'state', 'platform.json');
+    const state = stateOf(current);
+    const stored = state.artifact_proposals.find((proposal) => proposal['proposal_id'] === proposalId);
+    assert.ok(stored !== undefined);
+    asRecord(stored['requirement'])['text'] = '另一个需求';
+    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    const tampered = showProposal(current, proposalId);
+    assert.equal(tampered.status, 2, tampered.stdout);
+    assert.equal(tampered.error['code'], 'PROPOSAL_TAMPERED');
+    assert.equal(stateOf(current).integration_configurations[0]?.adopted_version, baseline.version);
   } finally {
     await endpoint.close();
   }

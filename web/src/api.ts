@@ -824,6 +824,215 @@ export interface WorkspaceModelBindingList {
   model_profiles: BindableModelProfile[];
 }
 
+/** One Chinese clarification the administrator recorded before generation. */
+export interface ProposalClarificationView {
+  question: string;
+  answer: string;
+}
+
+/** The requirement and clarifications one Proposal was generated from. */
+export interface ProposalRequirementView {
+  text: string;
+  clarifications: ProposalClarificationView[];
+  hash: string;
+}
+
+export interface ProposalTransformationView {
+  raw_id: string;
+  row: number;
+  field: string;
+  rule: string;
+  before: string;
+  after: string;
+}
+
+export interface ProposalRejectionView {
+  raw_id: string;
+  row: number;
+  field: string | null;
+  rule: string;
+  reason: string;
+}
+
+/** What a candidate would change relative to its base and a real source table. */
+export interface ProposalDriftView {
+  base_present: boolean;
+  schema: {
+    added: string[];
+    removed: string[];
+    retyped: Array<{ field: string; from: string; to: string }>;
+  };
+  cleaning: { added: string[]; removed: string[] };
+  mapping: {
+    added: string[];
+    removed: string[];
+    retargeted: Array<{ column: string; from: string; to: string }>;
+  };
+  raw_columns: { unmapped: string[]; missing: string[] };
+}
+
+export interface ProposalValidationFixtureView {
+  name: string;
+  record_count: number;
+  transformed: number;
+  rejected: number;
+  transformations: ProposalTransformationView[];
+  rejections: ProposalRejectionView[];
+  drift: ProposalDriftView;
+}
+
+export interface ProposalValidationView {
+  validated_at: string;
+  validated_by: string;
+  evidence_hash: string;
+  fixtures: ProposalValidationFixtureView[];
+}
+
+/** What one deterministic validation run answers to the browser. */
+export interface ProposalValidationResult {
+  proposal_id: string;
+  status: ProposalView['status'];
+  validated_at: string;
+  fixtures: ProposalValidationFixtureView[];
+  evidence_hash: string;
+}
+
+/** What one isolated preview answers to the browser. */
+export interface ProposalPreviewResult {
+  proposal_id: string;
+  status: ProposalView['status'];
+  preview: ProposalPreviewView;
+}
+
+export interface ProposalPreviewView {
+  raw_id: string;
+  record_count: number;
+  transformed: number;
+  rejected: number;
+  transformations: ProposalTransformationView[];
+  rejections: ProposalRejectionView[];
+  evidence_hash: string;
+  drift: ProposalDriftView;
+}
+
+/** The exact lineage every Approval, Publication, and Adoption restates. */
+export interface ProposalProvenanceView {
+  model_profile_id: string;
+  model_profile_version: number;
+  model_profile_content_hash: string;
+  adapter: string;
+  model_id: string;
+  binding_id: string;
+  prompt_id: string;
+  prompt_hash: string;
+  requirement_hash?: string;
+  data_dictionary_hash: string;
+  validation_hash: string;
+  preview_hash: string;
+  candidate_content_hash: string;
+  proposal_hash: string;
+}
+
+export interface ProposalLifecycleDecisionView {
+  decided_at: string;
+  decided_by: string;
+  outcome: 'approved' | 'rejected';
+  reason: string | null;
+  evidence_hash: string;
+  provenance: ProposalProvenanceView;
+}
+
+export interface ProposalLifecyclePublicationView {
+  published_at: string;
+  published_by: string;
+  integration_configuration_version: number;
+  evidence_hash: string;
+  provenance: ProposalProvenanceView;
+}
+
+export interface ProposalLifecycleAdoptionView {
+  adopted_at: string;
+  adopted_by: string;
+  integration_configuration_version: number;
+  previous_adopted_version: number | null;
+  evidence_hash: string;
+  provenance: ProposalProvenanceView;
+}
+
+/** One Artifact Proposal as the browser inspects and decides it. */
+export interface ProposalView {
+  proposal_id: string;
+  status: 'pending' | 'approved' | 'rejected' | 'published' | 'adopted';
+  workspace_id: string;
+  source_id: string;
+  binding_id: string;
+  created_at: string;
+  created_by: string;
+  requirement?: ProposalRequirementView;
+  freshness?: { fresh: boolean; current: { integration_configuration_version: number | null } };
+  base: { integration_configuration_version: number | null; integration_configuration_content_hash: string | null };
+  model: {
+    model_profile_id: string;
+    model_profile_version: number;
+    model_profile_content_hash: string;
+    adapter: string;
+    model_id: string;
+    prompt_id: string;
+    prompt_hash: string;
+  };
+  evidence: { data_dictionary_hash: string; data_dictionary_fields: string[]; field_count: number };
+  candidates: {
+    schema: { candidate_version: number; fields: SourceSchemaField[]; hash: string };
+    cleaning: { candidate_version: number; rules: SourceCleaningRule[]; hash: string };
+    mapping: { candidate_version: number; mapping: Record<string, string>; hash: string };
+    integration_configuration: {
+      version: number;
+      identity_fields: string[];
+      schema_hash: string;
+      cleaning_hash: string;
+      mapping_hash: string;
+      content_hash: string;
+    };
+  };
+  proposal_hash: string;
+  validations: ProposalValidationView[];
+  previews: ProposalPreviewView[];
+  decisions: ProposalLifecycleDecisionView[];
+  publications: ProposalLifecyclePublicationView[];
+  adoptions: ProposalLifecycleAdoptionView[];
+}
+
+export interface ProposalList {
+  source_id: string;
+  proposals: ProposalView[];
+  raw_acquisitions: Array<{
+    raw_id: string;
+    acquisition_run_id: string;
+    byte_length: number;
+    received_at: string;
+  }>;
+}
+
+export interface ProposalDecisionResult {
+  proposal_id: string;
+  status: ProposalView['status'];
+  reason?: string;
+  decided_at?: string;
+  provenance?: ProposalProvenanceView;
+}
+export interface ProposalPublicationResult {
+  proposal_id: string;
+  status: ProposalView['status'];
+  integration_configuration_version: number;
+  content_hash: string;
+}
+export interface ProposalAdoptionResult {
+  proposal_id: string;
+  status: ProposalView['status'];
+  adopted_version: number;
+  previous_adopted_version: number | null;
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<ApiResult<T>> {
   let response: Response;
   try {
@@ -1133,6 +1342,43 @@ export const platformApi = {
     }),
   revokeModelBinding: (bindingId: string) =>
     request<ModelBindingView>(`/api/workspace/model-bindings/${encodeURIComponent(bindingId)}/revoke`, {
+      method: 'POST',
+    }),
+  proposals: (sourceId: string) =>
+    request<ProposalList>(`/api/workspace/sources/${encodeURIComponent(sourceId)}/proposals`),
+  generateProposal: (
+    sourceId: string,
+    body: { binding_id: string; requirement: string; clarifications: ProposalClarificationView[]; dictionary: string },
+  ) =>
+    request<ProposalView>(`/api/workspace/sources/${encodeURIComponent(sourceId)}/proposals/generate`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  validateProposal: (proposalId: string, fixtures: string) =>
+    request<ProposalValidationResult>(`/api/workspace/proposals/${encodeURIComponent(proposalId)}/validate`, {
+      method: 'POST',
+      body: JSON.stringify({ fixtures }),
+    }),
+  previewProposal: (proposalId: string, rawId: string) =>
+    request<ProposalPreviewResult>(`/api/workspace/proposals/${encodeURIComponent(proposalId)}/preview`, {
+      method: 'POST',
+      body: JSON.stringify({ raw_id: rawId }),
+    }),
+  approveProposal: (proposalId: string) =>
+    request<ProposalDecisionResult>(`/api/workspace/proposals/${encodeURIComponent(proposalId)}/approve`, {
+      method: 'POST',
+    }),
+  rejectProposal: (proposalId: string, reason: string) =>
+    request<ProposalDecisionResult>(`/api/workspace/proposals/${encodeURIComponent(proposalId)}/reject`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+  publishProposal: (proposalId: string) =>
+    request<ProposalPublicationResult>(`/api/workspace/proposals/${encodeURIComponent(proposalId)}/publish`, {
+      method: 'POST',
+    }),
+  adoptProposal: (proposalId: string) =>
+    request<ProposalAdoptionResult>(`/api/workspace/proposals/${encodeURIComponent(proposalId)}/adopt`, {
       method: 'POST',
     }),
 };

@@ -23,7 +23,8 @@ export type NavigationKey =
   | 'workspace.context'
   | 'workspace.members'
   | 'workspace.audit'
-  | 'workspace.models';
+  | 'workspace.models'
+  | 'workspace.proposals';
 
 /**
  * The two trees are separate by construction: a Deployment Administrator holds
@@ -39,6 +40,7 @@ const WORKSPACE_NAVIGATION: Record<WorkspaceRole, NavigationKey[]> = {
     'workspace.members',
     'workspace.audit',
     'workspace.models',
+    'workspace.proposals',
   ],
   Consumer: ['workspace.overview', 'workspace.products'],
 };
