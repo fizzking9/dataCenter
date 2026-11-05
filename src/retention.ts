@@ -1076,7 +1076,10 @@ function productReleasesBinding(state: PlatformState, datasetId: string, dataset
   release: DataProductArtifact['releases'][number];
 }> {
   return state.data_products.flatMap((product) => product.releases
-    .filter((release) => release.dataset_id === datasetId && release.dataset_release === datasetRelease)
+    .filter((release) => (release.dataset_id === datasetId && release.dataset_release === datasetRelease)
+      || (release.relationships ?? []).some(
+        (binding) => binding.dataset_id === datasetId && binding.dataset_release === datasetRelease,
+      ))
     .map((release) => ({ product, release })));
 }
 

@@ -177,6 +177,17 @@ export function rawTableOf(
   configuration: FragmentConfiguration,
   raw: RawAcquisitionRecord,
 ): FragmentTable {
+  // A committed Purge revokes access at once, even before the bytes are gone.
+  if (purgeRevoked(session.state, 'raw_acquisition', raw.raw_id)) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      context,
+      'RETENTION_EXPIRED',
+      'A Raw Acquisition this operation needs has expired under the retention policy.',
+      'Acquire the Source again so a new Integration Batch governs the next operation.',
+    );
+  }
   let text: string;
   try {
     text = readFileSync(join(session.root, raw.object_path), 'utf8');
@@ -392,7 +403,7 @@ function integrate(
   for (const batch of batches) {
     const raws = batch.raw_acquisition_ids.flatMap((rawId) => {
       const raw = session.state.raw_acquisitions.find((candidate) => candidate.raw_id === rawId);
-      return raw === undefined ? [] : [raw];
+      return raw === undefined || purgeRevoked(session.state, 'raw_acquisition', rawId) ? [] : [raw];
     });
     if (raws.length < batch.raw_acquisition_ids.length) {
       if (seed !== null && seededBatches.has(batch.batch_id)) {
