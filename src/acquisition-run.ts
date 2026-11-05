@@ -218,7 +218,13 @@ export function cancelAcquisition(options: {
   if (!run) {
     reject(session, actorLabel(actor.user), context, 'ACQUISITION_RUN_NOT_FOUND', 'No Acquisition Run has this identifier.');
   }
-  const source = requireAdministeredSource(session, actor, context, run.source_id);
+  // A Run in a Workspace the actor does not administer answers exactly like one
+  // that never existed, so a Run identifier never discloses its own existence.
+  const runSource = session.state.sources.find((candidate) => candidate.source_id === run.source_id);
+  if (!runSource || workspaceRoleOf(session.state, actor.user.user_id, runSource.workspace_id) !== 'Workspace Administrator') {
+    reject(session, actorLabel(actor.user), context, 'ACQUISITION_RUN_NOT_FOUND', 'No Acquisition Run has this identifier.');
+  }
+  const source = runSource;
   const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
   if (run.status !== 'queued') {
     reject(
@@ -817,7 +823,13 @@ export function readAcquisitionPlan(options: {
   if (!run) {
     reject(session, actorLabel(actor.user), context, 'ACQUISITION_RUN_NOT_FOUND', 'No Acquisition Run has this identifier.');
   }
-  const source = requireAdministeredSource(session, actor, context, run.source_id);
+  // The Run's Workspace is authorized before anything about it is disclosed, so
+  // a foreign Run identifier answers exactly like one that does not exist.
+  const runSource = session.state.sources.find((candidate) => candidate.source_id === run.source_id);
+  if (!runSource || workspaceRoleOf(session.state, actor.user.user_id, runSource.workspace_id) !== 'Workspace Administrator') {
+    reject(session, actorLabel(actor.user), context, 'ACQUISITION_RUN_NOT_FOUND', 'No Acquisition Run has this identifier.');
+  }
+  const source = runSource;
   const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
   const plan = [...session.state.acquisition_plans]
     .reverse()

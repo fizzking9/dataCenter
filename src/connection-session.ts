@@ -11,6 +11,7 @@ import type {
   SealedSecret,
 } from './catalog.js';
 import { isRecord, valueAtPath } from './documents.js';
+import { egressRefusal } from './egress.js';
 import { OperatorError } from './errors.js';
 import { decrypt, encryptSecret } from './keys.js';
 import { readPlatform } from './platform.js';
@@ -244,6 +245,8 @@ export function openConnectionAuth(options: {
 
   const requestToken = async (): Promise<{ token: string | null; cookie: { name: string; value: string } | null }> => {
     if (auth.scheme === 'oauth_client_credentials') {
+      const refusedTarget = await egressRefusal(auth.token_url);
+      if (refusedTarget !== null) throw new OperatorError(refusedTarget, 'The token endpoint is a link-local or metadata target, which no worker may read.');
       const body = new URLSearchParams({
         grant_type: 'client_credentials',
         client_id: auth.client_id,
@@ -269,6 +272,8 @@ export function openConnectionAuth(options: {
     }
     if (auth.scheme === 'login') {
       const url = new URL(`${version.base_url}${auth.login_path}`).toString();
+      const refusedTarget = await egressRefusal(url);
+      if (refusedTarget !== null) throw new OperatorError(refusedTarget, 'The login endpoint is a link-local or metadata target, which no worker may read.');
       const response = await fetch(url, {
         method: 'POST',
         headers: { accept: 'application/json', 'content-type': 'application/json' },
