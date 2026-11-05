@@ -55,15 +55,17 @@ function digest(value: unknown): string {
 }
 
 /**
- * Resolves the integration Proposal kind. A Data Product Proposal is a
- * different review unit, so this lifecycle never governs it by mistake.
+ * Resolves the integration Proposal kind. A Data Product or Scraper Proposal is
+ * a different review unit, so this lifecycle never governs it by mistake.
  */
 function findIntegrationProposal(
   proposals: ArtifactProposalRecord[],
   proposalId: string,
 ): IntegrationProposalRecord | undefined {
   const proposal = findArtifactProposal(proposals, proposalId);
-  return proposal !== undefined && proposal.kind !== 'data_product' ? proposal : undefined;
+  return proposal !== undefined && (proposal.kind === undefined || proposal.kind === 'integration')
+    ? proposal
+    : undefined;
 }
 
 /** The content address of every Proposal fact; a mismatch means tampering. */

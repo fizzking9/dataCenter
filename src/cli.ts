@@ -60,6 +60,18 @@ import {
 } from './product-proposal.js';
 import { createSource } from './sources.js';
 import { adoptSourceAcquisition, publishSourceAcquisition } from './source-acquisition.js';
+import {
+  adoptScraperProposal,
+  approveScraperProposal,
+  compileScraperService,
+  publishScraperProposal,
+  rejectScraperProposal,
+  showScraperProposal,
+  validateScraperProposal,
+  verifyScraperProposal,
+} from './scraper-service.js';
+import { publishScraperCredential, publishScraperTask, showScraperTask } from './scraper-task.js';
+import { runScraperService } from './scraper-run.js';
 import { deploymentStatus } from './status.js';
 import { readDeployment } from './state.js';
 import { createUser, deactivateUser, listUsers, transferOwnership } from './users.js';
@@ -69,6 +81,7 @@ const GROUPED_COMMANDS = new Set([
   'user', 'workspace', 'membership', 'ownership', 'context', 'audit',
   'source', 'connection', 'acquisition', 'acquisition-config', 'integration', 'dataset',
   'product', 'product-proposal', 'grant', 'export', 'console', 'agent', 'model', 'binding', 'proposal',
+  'scraper',
 ]);
 const BOOLEAN_FLAGS = new Set([
   'admin-password-stdin', 'password-stdin', 'deployment-administrator', 'credential-stdin',
@@ -709,6 +722,90 @@ async function main(): Promise<void> {
   }
   if (command === 'product-proposal' && subcommand === 'show') {
     emit(showProductProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'task') {
+    emit(publishScraperTask({
+      ...governed(options),
+      workspaceId: required(options, 'workspace'),
+      name: required(options, 'name'),
+      configPath: required(options, 'config'),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'task-show') {
+    emit(showScraperTask({
+      ...governed(options),
+      taskId: required(options, 'task'),
+      ...(options.has('version') ? { version: Number(required(options, 'version')) } : {}),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'credential') {
+    emit(publishScraperCredential({
+      ...governed(options),
+      workspaceId: required(options, 'workspace'),
+      ref: required(options, 'name'),
+      location: required(options, 'location'),
+      ...(options.has('cookie-name') ? { cookieName: required(options, 'cookie-name') } : {}),
+      ...(options.get('credential-stdin') === 'true' ? { credential: readStdin() } : {}),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'compile') {
+    emit(compileScraperService({
+      ...governed(options),
+      taskId: required(options, 'task'),
+      ...(options.has('version') ? { taskVersion: Number(required(options, 'version')) } : {}),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'validate') {
+    emit(validateScraperProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'reject') {
+    emit(rejectScraperProposal({
+      ...governed(options),
+      proposalId: required(options, 'proposal'),
+      reason: required(options, 'reason'),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'approve') {
+    emit(approveScraperProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'publish') {
+    emit(publishScraperProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'verify') {
+    emit(await verifyScraperProposal({
+      ...governed(options),
+      proposalId: required(options, 'proposal'),
+      ...(options.has('parameters') ? { parametersPath: required(options, 'parameters') } : {}),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'adopt') {
+    emit(adoptScraperProposal({
+      ...governed(options),
+      proposalId: required(options, 'proposal'),
+      sourceId: required(options, 'source'),
+    }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'show') {
+    emit(showScraperProposal({ ...governed(options), proposalId: required(options, 'proposal') }));
+    return;
+  }
+  if (command === 'scraper' && subcommand === 'run') {
+    emit(await runScraperService({
+      ...governed(options),
+      sourceId: required(options, 'source'),
+      ...(options.has('parameters') ? { parametersPath: required(options, 'parameters') } : {}),
+    }));
     return;
   }
   throw new Error(`Unsupported lifecycle command: ${[command, subcommand].filter(Boolean).join(' ')}.`);
