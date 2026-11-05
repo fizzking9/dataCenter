@@ -11,6 +11,7 @@ import { listDataProducts } from './products.js';
 import { publishModelBinding, revokeModelBinding, showModelBindingWorkspace } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, listModelProfiles, publishModelProfile } from './model-profile.js';
 import { grantMembership, listMemberships, listWorkspaces, revokeMembership } from './workspaces.js';
+import { createUser, deactivateUser, listUsers, transferOwnership } from './users.js';
 import {
   exchangeOperatorEnrollment,
   resolveOperatorSession,
@@ -302,6 +303,54 @@ async function handleApi(
   if (pathname === '/api/deployment/workspaces' && method === 'GET') {
     const token = userSession(request);
     sendJson(response, 200, listWorkspaces({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  // Deployment-level identity governance. Every route resolves the platform
+  // session and each module refuses a non-Administrator, so the browser never
+  // decides who may manage identities.
+  if (pathname === '/api/deployment/users' && method === 'GET') {
+    const token = userSession(request);
+    sendJson(response, 200, listUsers({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/users' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, await createUser({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      username: text(body, 'username'),
+      password: text(body, 'password'),
+      deploymentAdministrator: flag(body, 'deployment_administrator'),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/users/deactivate' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 200, deactivateUser({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      username: text(body, 'username'),
+    }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/ownership-transfer' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 200, transferOwnership({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      from: text(body, 'from'),
+      to: text(body, 'to'),
+    }));
     return;
   }
 
@@ -643,6 +692,11 @@ function number(body: Record<string, unknown>, field: string): number {
   return typeof value === 'number' ? value : Number.NaN;
 }
 
+/** A checkbox is its own explicit fact; only a JSON boolean states it. */
+function flag(body: Record<string, unknown>, field: string): boolean {
+  return body[field] === true;
+}
+
 async function serveAsset(
   request: IncomingMessage,
   response: ServerResponse,
@@ -704,6 +758,19 @@ const STATUS_BY_CODE: Record<string, number> = {
   ROLE_INVALID: 400,
   MEMBERSHIP_NOT_FOUND: 404,
   LAST_ADMINISTRATOR_PROTECTED: 409,
+  USERNAME_INVALID: 400,
+  USER_ALREADY_EXISTS: 409,
+  USER_NOT_FOUND: 404,
+  USER_DEACTIVATED: 409,
+  PASSWORD_INVALID: 400,
+  OWNER_TRANSFER_REQUIRED: 409,
+  OWNERSHIP_TARGET_INVALID: 400,
+  OWNER_NOT_ELIGIBLE: 409,
+  WORKSPACE_NAME_INVALID: 400,
+  WORKSPACE_NAME_TAKEN: 409,
+  WORKSPACE_NOT_FOUND: 404,
+  EMERGENCY_ADMINISTRATOR_NOT_PERMITTED: 403,
+  EMERGENCY_ADMINISTRATOR_NOT_REQUIRED: 409,
   CONTEXT_NOT_PUBLISHED: 404,
   CONTEXT_SHADOWS_COMMON: 409,
   CROSS_WORKSPACE_REFERENCE: 409,

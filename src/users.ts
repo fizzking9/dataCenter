@@ -12,6 +12,7 @@ import { enrolMfa } from './enrollment.js';
 import { hashPassword } from './password.js';
 import {
   findUser,
+  findWorkspace,
   isUsernameValid,
   otherActiveWorkspaceAdministrators,
   workspaceRoleOf,
@@ -109,9 +110,17 @@ export function listUsers(options: {
       status: user.status,
       deployment_role: user.deployment_role,
       mfa_enrolled: user.mfa !== null,
+      // Accountability, not content: how many Artifacts name this User as Owner,
+      // which is exactly what deactivation refuses to orphan.
+      owned_artifacts: session.state.context_artifacts
+        .filter((artifact) => artifact.owner_user_id === user.user_id).length,
       workspace_roles: session.state.memberships
         .filter((membership) => membership.user_id === user.user_id)
-        .map((membership) => ({ workspace_id: membership.workspace_id, role: membership.role })),
+        .map((membership) => ({
+          workspace_id: membership.workspace_id,
+          workspace_name: findWorkspace(session.state, membership.workspace_id)?.name ?? null,
+          role: membership.role,
+        })),
     })),
   };
 }

@@ -102,6 +102,50 @@ export interface DeploymentWorkspace {
   role: string;
 }
 
+/** One User of this Deployment, with accountability metadata only. */
+export interface DeploymentUserView {
+  user_id: string;
+  username: string;
+  status: 'active' | 'deactivated';
+  deployment_role: string | null;
+  mfa_enrolled: boolean;
+  owned_artifacts: number;
+  workspace_roles: Array<{
+    workspace_id: string;
+    workspace_name: string | null;
+    role: WorkspaceRoleValue;
+  }>;
+}
+
+export interface DeploymentUserList {
+  users: DeploymentUserView[];
+}
+
+/** A created account, with the one-time enrollment material an Administrator gets. */
+export interface DeploymentUserCreated {
+  user_id: string;
+  username: string;
+  deployment_role: string | null;
+  status: string;
+  mfa_enrolled: boolean;
+  totp_secret?: string;
+  recovery_codes?: string[];
+  enrollment_uri?: string;
+}
+
+export interface DeploymentUserDeactivated {
+  user_id: string;
+  username: string;
+  status: string;
+}
+
+export interface OwnershipTransferResult {
+  from: string;
+  owner: string;
+  transferred: number;
+  artifact_ids: string[];
+}
+
 /** One Workspace membership, in the shape the administered Workspace lists it. */
 export interface WorkspaceMemberView {
   username: string;
@@ -379,6 +423,19 @@ export const platformApi = {
       workspaceId === undefined ? '/api/navigation' : `/api/navigation${workspaceQuery(workspaceId)}`,
     ),
   deploymentWorkspaces: () => request<{ workspaces: DeploymentWorkspace[] }>('/api/deployment/workspaces'),
+  deploymentUsers: () => request<DeploymentUserList>('/api/deployment/users'),
+  createDeploymentUser: (body: { username: string; password: string; deployment_administrator: boolean }) =>
+    request<DeploymentUserCreated>('/api/deployment/users', { method: 'POST', body: JSON.stringify(body) }),
+  deactivateDeploymentUser: (username: string) =>
+    request<DeploymentUserDeactivated>('/api/deployment/users/deactivate', {
+      method: 'POST',
+      body: JSON.stringify({ username }),
+    }),
+  transferOwnership: (from: string, to: string) =>
+    request<OwnershipTransferResult>('/api/deployment/ownership-transfer', {
+      method: 'POST',
+      body: JSON.stringify({ from, to }),
+    }),
   dataProducts: (workspaceId: string) =>
     request<DataProductList>(`/api/workspace/data-products${workspaceQuery(workspaceId)}`),
   context: (workspaceId: string) =>

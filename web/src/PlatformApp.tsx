@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { platformApi, type NavigationView, type PlatformSessionView } from './api.js';
 import { t } from './i18n/zh-CN.js';
 import { PlatformDeploymentScreen } from './screens/PlatformDeploymentScreen.js';
+import { DeploymentUsers } from './screens/PlatformDeploymentAdminScreen.js';
 import { DeploymentModelProfiles, WorkspaceModelBindings } from './screens/PlatformModelScreen.js';
 import { PlatformFrame } from './screens/PlatformFrame.js';
 import { PlatformPicker } from './screens/PlatformPicker.js';
@@ -11,7 +12,7 @@ import { WorkspaceContext, WorkspaceOverview, WorkspaceProducts } from './screen
 import { Alert, Panel } from './ui/Panel.js';
 import { Shell } from './ui/Shell.js';
 
-const VIEWS = ['overview', 'products', 'context', 'members', 'audit', 'models', 'modelProfiles'] as const;
+const VIEWS = ['overview', 'products', 'context', 'members', 'audit', 'models', 'modelProfiles', 'users'] as const;
 type View = (typeof VIEWS)[number];
 
 interface Route {
@@ -24,6 +25,13 @@ interface Route {
 const HOME: Route = { workspaceId: null, view: 'overview', deployment: false };
 const DEPLOYMENT: Route = { workspaceId: null, view: 'overview', deployment: true };
 const DEPLOYMENT_PROFILES: Route = { workspaceId: null, view: 'modelProfiles', deployment: true };
+const DEPLOYMENT_USERS: Route = { workspaceId: null, view: 'users', deployment: true };
+
+/** The navigation key each deployment destination is authorized by. */
+const DEPLOYMENT_KEYS: Partial<Record<View, string>> = {
+  modelProfiles: 'deployment.modelProfiles',
+  users: 'deployment.users',
+};
 
 function viewOf(value: string | undefined): View {
   switch (value) {
@@ -32,6 +40,7 @@ function viewOf(value: string | undefined): View {
     case 'members':
     case 'audit':
     case 'models':
+    case 'users':
       return value;
     default:
       return 'overview';
@@ -54,6 +63,7 @@ function parseRoute(pathname: string): Route {
   const normalized = pathname.replace(/\/+$/u, '');
   if (normalized === '/app/deployment') return DEPLOYMENT;
   if (normalized === '/app/deployment/model-profiles') return DEPLOYMENT_PROFILES;
+  if (normalized === '/app/deployment/users') return DEPLOYMENT_USERS;
   const match = /^\/app\/w\/([^/]+)\/([^/]+)$/u.exec(normalized);
   if (match === null) return HOME;
   const id = match[1];
@@ -250,13 +260,16 @@ export function PlatformApp() {
   // the Workspace picker.
   if (route.deployment) {
     if (navigation.deployment.length === 0) return frame(null, <Unavailable />);
-    if (route.view === 'modelProfiles') {
-      if (!navigation.deployment.some((entry) => entry.key === 'deployment.modelProfiles')) {
-        return frame(null, <Unavailable />);
-      }
-      return frame('deployment.modelProfiles', <DeploymentModelProfiles onSessionLost={sessionLost} />);
-    }
-    return frame('deployment.workspaces', <PlatformDeploymentScreen onSessionLost={sessionLost} />);
+    const key = DEPLOYMENT_KEYS[route.view] ?? 'deployment.workspaces';
+    if (!navigation.deployment.some((entry) => entry.key === key)) return frame(null, <Unavailable />);
+    const content = route.view === 'modelProfiles' ? (
+      <DeploymentModelProfiles onSessionLost={sessionLost} />
+    ) : route.view === 'users' ? (
+      <DeploymentUsers onSessionLost={sessionLost} />
+    ) : (
+      <PlatformDeploymentScreen onSessionLost={sessionLost} />
+    );
+    return frame(key, content);
   }
 
   if (activeId === null) {
