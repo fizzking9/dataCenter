@@ -162,7 +162,7 @@ export const catalog = {
   'license.evidence.outcome': '结果',
   'license.evidence.time': '时间',
   'license.evidence.id': '证据编号',
-  'license.evidence.operation.import-license': '导入许可证',
+  'license.evidence.operation.importLicense': '导入许可证',
   'license.evidence.outcome.renewed': '已续期',
   'license.evidence.outcome.ready_to_initialize': '等待初始化',
 

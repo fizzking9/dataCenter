@@ -34,6 +34,20 @@ const ACCESS_LABELS: Record<'permitted' | 'disabled', MessageKey> = {
   disabled: 'license.access.disabled',
 };
 
+/**
+ * A durable operation keeps its ASCII identifier at the boundary; only the label
+ * the Operator reads is Chinese, and a governed identifier carrying a hyphen
+ * cannot be a catalog key.
+ */
+const EVIDENCE_OPERATION_KEYS: Record<string, MessageKey> = {
+  'import-license': 'license.evidence.operation.importLicense',
+};
+
+function evidenceOperation(operation: string): string {
+  const key = EVIDENCE_OPERATION_KEYS[operation];
+  return key === undefined ? operation : t(key);
+}
+
 function licenseStatusLabel(license: LicenseView): string {
   return optional(`license.value.${license.status}`) ?? license.status;
 }
@@ -323,7 +337,7 @@ export function LicenseScreen({ onSessionLost }: LicenseScreenProps) {
                 <tbody>
                   {license.evidence.map((entry) => (
                     <tr key={entry.evidence_id}>
-                      <td>{optional(`license.evidence.operation.${entry.operation}`) ?? entry.operation}</td>
+                      <td>{evidenceOperation(entry.operation)}</td>
                       <td>{optional(`license.evidence.outcome.${entry.outcome}`) ?? entry.outcome}</td>
                       <td>{formatInstant(entry.occurred_at)}</td>
                       <td className="data-table__mono">{entry.evidence_id}</td>

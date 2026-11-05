@@ -150,13 +150,17 @@ function isBytes(value: unknown): value is Uint8Array {
   return value instanceof Uint8Array;
 }
 
-/** Calls one authenticated HTTP application API with an explicit operator cookie. */
+/**
+ * Calls one authenticated HTTP application API with an explicit operator cookie.
+ * Each call opens its own connection: a test that runs a lifecycle command with
+ * a blocking child process cannot let a pooled socket go stale underneath it.
+ */
 export async function callApi(
   url: string,
   path: string,
   options: { method?: string; body?: unknown; cookie?: string; token?: string; contentType?: string } = {},
 ): Promise<HttpResult> {
-  const headers: Record<string, string> = { accept: 'application/json' };
+  const headers: Record<string, string> = { accept: 'application/json', connection: 'close' };
   if (options.body !== undefined) headers['content-type'] = options.contentType ?? 'application/json';
   if (options.cookie) headers.cookie = options.cookie;
   if (options.token) headers.authorization = `Bearer ${options.token}`;
