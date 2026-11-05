@@ -92,7 +92,7 @@ test('Deployment Administrator accounts create, refuse the last administrator, a
     browser = await chromium.launch({ channel: 'msedge', headless: true });
     const page = await open(browser, consoleServer.url, '/app');
     await signIn(page, world.deploymentAdministrator);
-    await page.getByRole('heading', { name: '工作区' }).waitFor();
+    await page.getByRole('heading', { name: '工作区', exact: true }).waitFor();
 
     // Deployment-only navigation reaches identity management; no Workspace tree appears.
     assert.equal(await page.getByRole('navigation', { name: '部署导航' }).count(), 1);
@@ -164,7 +164,7 @@ test('Deployment Administrator accounts create, refuse the last administrator, a
 
     const secondPage = await open(browser, consoleServer.url, '/app');
     await signIn(secondPage, { username: SECOND_ADMIN, password: SECOND_ADMIN_PASSWORD, totp: totpSecret });
-    await secondPage.getByRole('heading', { name: '工作区' }).waitFor();
+    await secondPage.getByRole('heading', { name: '工作区', exact: true }).waitFor();
     await secondPage.getByRole('link', { name: '用户与身份' }).click();
     const secondUsers = secondPage.getByRole('region', { name: '用户' });
     await secondUsers.getByRole('cell', { name: SUCCESSOR, exact: true }).waitFor();
@@ -220,7 +220,7 @@ test('ownership transfer keeps every Artifact accountable and unblocks deactivat
     browser = await chromium.launch({ channel: 'msedge', headless: true });
     const page = await open(browser, consoleServer.url, '/app');
     await signIn(page, world.deploymentAdministrator);
-    await page.getByRole('heading', { name: '工作区' }).waitFor();
+    await page.getByRole('heading', { name: '工作区', exact: true }).waitFor();
     await page.getByRole('link', { name: '用户与身份' }).click();
     const users = page.getByRole('region', { name: '用户' });
     await users.getByRole('cell', { name: world.deploymentAdministrator.username, exact: true }).waitFor();
@@ -291,7 +291,7 @@ test('Service Identities execute internal jobs but never consume, and revoke at 
     browser = await chromium.launch({ channel: 'msedge', headless: true });
     const page = await open(browser, consoleServer.url, '/app');
     await signIn(page, world.deploymentAdministrator);
-    await page.getByRole('heading', { name: '工作区' }).waitFor();
+    await page.getByRole('heading', { name: '工作区', exact: true }).waitFor();
     await page.getByRole('link', { name: '用户与身份' }).click();
     await page.getByRole('heading', { name: '服务身份', exact: true }).waitFor();
     const identities = page.getByRole('region', { name: '服务身份', exact: true });
@@ -353,6 +353,140 @@ test('Service Identities execute internal jobs but never consume, and revoke at 
     });
     assert.equal(repeated.status, 200, repeated.text);
     assert.equal(repeated.body.already_revoked, true);
+  } finally {
+    await browser?.close();
+    await consoleServer.stop();
+  }
+});
+
+/** AC1, AC4, AC5: Workspace creation, emergency administration, and orphan safeguards. */
+test('Workspace creation names a first administrator, and an emergency administrator prevents an orphan', async () => {
+  const fixture = initializePlatform();
+  const administratorToken = sessionFor(fixture, fixture.administrator.username, fixture.administrator.password);
+  createUser(fixture, administratorToken, OPERATIONS, OPERATIONS_PASSWORD);
+  createUser(fixture, administratorToken, SUCCESSOR, SUCCESSOR_PASSWORD);
+  const isolation = createUser(fixture, administratorToken, 'isolation@example.invalid', 'isolation-administrator');
+  const isolationTotp = String(isolation.output.totp_secret);
+  const deploymentAdministrator: Credentials = {
+    username: fixture.administrator.username,
+    password: fixture.administrator.password,
+    totp: fixture.administrator.totp_secret,
+  };
+
+  const consoleServer = await startConsole(fixture);
+  let browser: Browser | undefined;
+  try {
+    browser = await chromium.launch({ channel: 'msedge', headless: true });
+    const page = await open(browser, consoleServer.url, '/app');
+    await signIn(page, deploymentAdministrator);
+    await page.getByRole('heading', { name: '工作区', exact: true }).waitFor();
+    const workspaces = page.getByRole('region', { name: '工作区', exact: true });
+    await workspaces.getByText('尚未创建工作区。').waitFor();
+
+    // A Workspace is created together with its first accountable administrator.
+    await workspaces.getByLabel('工作区名称', { exact: true }).fill('Operations');
+    await workspaces.getByLabel('第一位工作区管理员', { exact: true }).fill(OPERATIONS);
+    await workspaces.getByRole('button', { name: '创建工作区' }).click();
+    const creation = page.getByRole('region', { name: '确认创建工作区' });
+    assert.match(await creation.innerText(), /第一位工作区管理员/u);
+    await creation.getByRole('button', { name: '确认创建工作区' }).click();
+    await workspaces.getByText('工作区已创建：Operations。').waitFor();
+    const operationsRow = workspaces.getByRole('row', { name: /Operations/u });
+    await operationsRow.waitFor();
+    assert.match(await operationsRow.innerText(), /部署管理员/u);
+    assert.equal(await operationsRow.getByRole('cell', { name: '1', exact: true }).count(), 1);
+
+    // A duplicate name and an unknown administrator answer in Simplified Chinese.
+    await workspaces.getByLabel('工作区名称', { exact: true }).fill('Operations');
+    await workspaces.getByLabel('第一位工作区管理员', { exact: true }).fill(OPERATIONS);
+    await workspaces.getByRole('button', { name: '创建工作区' }).click();
+    await page.getByRole('region', { name: '确认创建工作区' }).getByRole('button', { name: '确认创建工作区' }).click();
+    await workspaces.getByText('该工作区名称已存在。').waitFor();
+
+    await workspaces.getByLabel('工作区名称', { exact: true }).fill('Isolation');
+    await workspaces.getByLabel('第一位工作区管理员', { exact: true }).fill('nobody@example.invalid');
+    await workspaces.getByRole('button', { name: '创建工作区' }).click();
+    await page.getByRole('region', { name: '确认创建工作区' }).getByRole('button', { name: '确认创建工作区' }).click();
+    await workspaces.getByText('该账号不存在。').waitFor();
+
+    await workspaces.getByLabel('工作区名称', { exact: true }).fill('Isolation');
+    await workspaces.getByLabel('第一位工作区管理员', { exact: true }).fill('isolation@example.invalid');
+    await workspaces.getByRole('button', { name: '创建工作区' }).click();
+    await page.getByRole('region', { name: '确认创建工作区' }).getByRole('button', { name: '确认创建工作区' }).click();
+    await workspaces.getByText('工作区已创建：Isolation。').waitFor();
+
+    // Deployment authority still opens no Workspace content, in either direction.
+    const cookie = await cookieHeader(page.context());
+    const listed = await callApi(consoleServer.url, '/api/deployment/workspaces', { cookie });
+    assert.equal(listed.status, 200, listed.text);
+    const rows = listed.body.workspaces as Array<{ workspace_id: string; name: string }>;
+    const operationsId = rows.find((entry) => entry.name === 'Operations')?.workspace_id ?? '';
+    const isolationId = rows.find((entry) => entry.name === 'Isolation')?.workspace_id ?? '';
+    assert.notEqual(operationsId, '');
+    assert.notEqual(isolationId, '');
+
+    await page.goto(`${consoleServer.url}/app/w/${operationsId}/overview`);
+    await page.getByRole('heading', { name: '工作区不可用' }).waitFor();
+    const content = await callApi(consoleServer.url, `/api/workspace/context?workspace_id=${operationsId}`, { cookie });
+    assert.equal(content.status, 403, content.text);
+    assert.equal(content.body.code, 'WORKSPACE_ACCESS_DENIED');
+
+    // A Workspace's only administrator cannot be deactivated: it would orphan it.
+    await page.goto(`${consoleServer.url}/app/deployment/users`);
+    const users = page.getByRole('region', { name: '用户' });
+    await users.getByRole('cell', { name: 'isolation@example.invalid', exact: true }).waitFor();
+    await users.getByRole('button', { name: '停用 isolation@example.invalid' }).click();
+    await confirmAction(page, '停用平台账号', '确认停用');
+    await users.getByText(LAST_ADMINISTRATOR).waitFor();
+
+    // Emergency administration names exactly one Workspace and one account, and
+    // never converts the acting Deployment Administrator's authority into access.
+    await page.goto(`${consoleServer.url}/app/deployment`);
+    const emergency = page.getByRole('region', { name: '任命紧急管理员' });
+    await emergency.getByLabel('工作区', { exact: true }).selectOption({ label: 'Isolation' });
+    await emergency.getByLabel('紧急管理员', { exact: true }).fill(deploymentAdministrator.username);
+    await emergency.getByRole('button', { name: '任命紧急管理员' }).click();
+    await page.getByRole('region', { name: '确认任命紧急管理员' }).getByRole('button', { name: '确认任命' }).click();
+    await workspaces.getByText('部署管理员不能任命自己为工作区的紧急管理员。').waitFor();
+
+    await emergency.getByLabel('紧急管理员', { exact: true }).fill('isolation@example.invalid');
+    await emergency.getByRole('button', { name: '任命紧急管理员' }).click();
+    await page.getByRole('region', { name: '确认任命紧急管理员' }).getByRole('button', { name: '确认任命' }).click();
+    await workspaces.getByText('该账号已经是这个工作区的工作区管理员。').waitFor();
+
+    await emergency.getByLabel('紧急管理员', { exact: true }).fill(SUCCESSOR);
+    await emergency.getByRole('button', { name: '任命紧急管理员' }).click();
+    const appointment = page.getByRole('region', { name: '确认任命紧急管理员' });
+    const stated = await appointment.innerText();
+    assert.match(stated, /Isolation/u);
+    assert.match(stated, new RegExp(SUCCESSOR.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+    assert.match(stated, /影响/u);
+    await appointment.getByRole('button', { name: '确认任命' }).click();
+    await workspaces.getByText(`已任命 ${SUCCESSOR} 为 Isolation 的紧急管理员。`).waitFor();
+    const enrollment = page.getByRole('region', { name: '一次性注册信息' });
+    await enrollment.waitFor();
+    const successorTotp = /动态验证码密钥\s*\n+\s*([A-Z2-7]{16,})/u.exec(await enrollment.innerText())?.[1];
+    assert.ok(successorTotp);
+    const isolationRow = workspaces.getByRole('row', { name: /Isolation/u });
+    assert.equal(await isolationRow.getByRole('cell', { name: '2', exact: true }).count(), 1);
+
+    // With a second administrator the Workspace is no longer at risk, so the
+    // departing administrator can be deactivated and one stays accountable.
+    await page.goto(`${consoleServer.url}/app/deployment/users`);
+    await users.getByRole('cell', { name: 'isolation@example.invalid', exact: true }).waitFor();
+    await users.getByRole('button', { name: '停用 isolation@example.invalid' }).click();
+    await confirmAction(page, '停用平台账号', '确认停用');
+    await users.getByText('账号已停用：isolation@example.invalid，其会话已立即失效。').waitFor();
+
+    const successorPage = await open(browser, consoleServer.url, '/app');
+    await signIn(successorPage, { username: SUCCESSOR, password: SUCCESSOR_PASSWORD, totp: successorTotp });
+    await successorPage.getByRole('heading', { name: '工作区概览' }).waitFor();
+    assert.match(await successorPage.getByLabel('当前会话').innerText(), /Isolation/u);
+
+    // The deactivated administrator keeps answering with the generic failure.
+    const revokedPage = await open(browser, consoleServer.url, '/app');
+    await signIn(revokedPage, { username: 'isolation@example.invalid', password: 'isolation-administrator', totp: isolationTotp });
+    await revokedPage.getByText('登录失败：账号、密码或验证码不正确。').waitFor();
   } finally {
     await browser?.close();
     await consoleServer.stop();

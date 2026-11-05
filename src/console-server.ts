@@ -10,7 +10,14 @@ import { browserIdentity, browserNavigation } from './navigation.js';
 import { listDataProducts } from './products.js';
 import { publishModelBinding, revokeModelBinding, showModelBindingWorkspace } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, listModelProfiles, publishModelProfile } from './model-profile.js';
-import { grantMembership, listMemberships, listWorkspaces, revokeMembership } from './workspaces.js';
+import {
+  appointEmergencyAdministrator,
+  createWorkspace,
+  grantMembership,
+  listMemberships,
+  listWorkspaces,
+  revokeMembership,
+} from './workspaces.js';
 import { createUser, deactivateUser, listUsers, transferOwnership } from './users.js';
 import { createServiceIdentity, listServiceIdentities, revokeServiceIdentity } from './service-identities.js';
 import {
@@ -304,6 +311,33 @@ async function handleApi(
   if (pathname === '/api/deployment/workspaces' && method === 'GET') {
     const token = userSession(request);
     sendJson(response, 200, listWorkspaces({ root: options.root, masterKey: options.masterKey, token }));
+    return;
+  }
+
+  if (pathname === '/api/deployment/workspaces' && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 201, createWorkspace({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      name: text(body, 'name'),
+      administrator: text(body, 'administrator'),
+    }));
+    return;
+  }
+
+  const emergencyRoute = /^\/api\/deployment\/workspaces\/([^/]+)\/emergency-administrator$/u.exec(pathname);
+  if (emergencyRoute !== null && method === 'POST') {
+    const token = userSession(request);
+    const body = await readJson(request);
+    sendJson(response, 200, appointEmergencyAdministrator({
+      root: options.root,
+      masterKey: options.masterKey,
+      token,
+      workspaceId: decodeURIComponent(emergencyRoute[1]!),
+      username: text(body, 'username'),
+    }));
     return;
   }
 

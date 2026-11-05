@@ -100,6 +100,31 @@ export interface DeploymentWorkspace {
   name: string;
   created_at: string;
   role: string;
+  /** Governance metadata: how many active administrators keep it governable. */
+  active_administrators: number | null;
+}
+
+export interface CreatedWorkspace {
+  workspace_id: string;
+  name: string;
+  created_at: string;
+  administrator: string;
+  administrator_role: WorkspaceRoleValue;
+  totp_secret?: string;
+  recovery_codes?: string[];
+  enrollment_uri?: string;
+}
+
+export interface EmergencyAdministrator {
+  workspace_id: string;
+  workspace_name: string;
+  username: string;
+  role: WorkspaceRoleValue;
+  previous_role: WorkspaceRoleValue | null;
+  active_administrators: number;
+  totp_secret?: string;
+  recovery_codes?: string[];
+  enrollment_uri?: string;
 }
 
 /** One User of this Deployment, with accountability metadata only. */
@@ -447,6 +472,16 @@ export const platformApi = {
       workspaceId === undefined ? '/api/navigation' : `/api/navigation${workspaceQuery(workspaceId)}`,
     ),
   deploymentWorkspaces: () => request<{ workspaces: DeploymentWorkspace[] }>('/api/deployment/workspaces'),
+  createDeploymentWorkspace: (name: string, administrator: string) =>
+    request<CreatedWorkspace>('/api/deployment/workspaces', {
+      method: 'POST',
+      body: JSON.stringify({ name, administrator }),
+    }),
+  appointEmergencyAdministrator: (workspaceId: string, username: string) =>
+    request<EmergencyAdministrator>(
+      `/api/deployment/workspaces/${encodeURIComponent(workspaceId)}/emergency-administrator`,
+      { method: 'POST', body: JSON.stringify({ username }) },
+    ),
   deploymentUsers: () => request<DeploymentUserList>('/api/deployment/users'),
   createDeploymentUser: (body: { username: string; password: string; deployment_administrator: boolean }) =>
     request<DeploymentUserCreated>('/api/deployment/users', { method: 'POST', body: JSON.stringify(body) }),

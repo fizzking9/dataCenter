@@ -387,20 +387,22 @@ export function isDeploymentAdministrator(user: UserRecord): boolean {
   return user.deployment_role === 'Deployment Administrator';
 }
 
+/** Active Workspace Administrators of one Workspace, used for orphan safeguards. */
+export function activeWorkspaceAdministrators(state: PlatformState, workspaceId: string): UserRecord[] {
+  return state.memberships
+    .filter((membership) => membership.workspace_id === workspaceId && membership.role === 'Workspace Administrator')
+    .map((membership) => findUserById(state, membership.user_id))
+    .filter((user): user is UserRecord => user !== undefined && user.status === 'active');
+}
+
 /** Active Workspace Administrators other than the named User, used for orphan safeguards. */
 export function otherActiveWorkspaceAdministrators(
   state: PlatformState,
   workspaceId: string,
   userId: string,
 ): UserRecord[] {
-  return state.memberships
-    .filter(
-      (membership) => membership.workspace_id === workspaceId
-        && membership.role === 'Workspace Administrator'
-        && membership.user_id !== userId,
-    )
-    .map((membership) => findUserById(state, membership.user_id))
-    .filter((user): user is UserRecord => user !== undefined && user.status === 'active');
+  return activeWorkspaceAdministrators(state, workspaceId)
+    .filter((user) => user.user_id !== userId);
 }
 
 export function findContextArtifact(state: PlatformState, artifactId: string): ContextArtifact | undefined {

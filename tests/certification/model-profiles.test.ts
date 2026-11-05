@@ -582,7 +582,7 @@ test('the browser covers successful activation, evaluation failure, revocation, 
 
     // A Deployment Administrator publishes, evaluates, and activates.
     await signIn(page, current.deploymentAdministrator);
-    await page.getByRole('heading', { name: '工作区' }).waitFor();
+    await page.getByRole('heading', { name: '工作区', exact: true }).waitFor();
     await page.getByRole('link', { name: '模型档案' }).click();
     await page.getByRole('heading', { name: '模型档案' }).waitFor();
 
@@ -747,7 +747,7 @@ test('the Model Profile form renders every purpose and data category the server 
     page.setDefaultTimeout(20_000);
     await page.goto(`${consoleServer.url}/app`);
     await signIn(page, current.deploymentAdministrator);
-    await page.getByRole('heading', { name: '工作区' }).waitFor();
+    await page.getByRole('heading', { name: '工作区', exact: true }).waitFor();
     await page.getByRole('link', { name: '模型档案' }).click();
     await page.getByRole('heading', { name: '模型档案' }).waitFor();
 

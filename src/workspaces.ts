@@ -10,7 +10,9 @@ import {
 } from './authz.js';
 import { enrolMfa } from './enrollment.js';
 import {
+  activeWorkspaceAdministrators,
   findUserById,
+  findWorkspace,
   isDeploymentAdministrator,
   isWorkspaceRole,
   otherActiveWorkspaceAdministrators,
@@ -37,6 +39,7 @@ export function listWorkspaces(options: {
       ? 'Deployment Administrator'
       : workspaceRoleOf(session.state, actor.user.user_id, workspace.workspace_id),
   })).filter((entry) => entry.role !== null);
+  const governance = isDeploymentAdministrator(actor.user);
 
   session.audit({ ...context, actor: actorLabel(actor.user), outcome: 'succeeded' });
   return {
@@ -45,6 +48,11 @@ export function listWorkspaces(options: {
       name: workspace.name,
       created_at: workspace.created_at,
       role,
+      // How many active administrators keep the Workspace governable. It is
+      // governance metadata, so only deployment authority reads it.
+      active_administrators: governance
+        ? activeWorkspaceAdministrators(session.state, workspace.workspace_id).length
+        : null,
     })),
   };
 }
@@ -199,6 +207,89 @@ export function revokeMembership(options: {
 
 function isSoleAdministrator(session: PlatformSession, workspaceId: string, userId: string): boolean {
   return otherActiveWorkspaceAdministrators(session.state, workspaceId, userId).length === 0;
+}
+
+/**
+ * Appoints one active User as a Workspace's emergency administrator. Deployment
+ * authority administers Workspaces without reading their content, so the
+ * appointment names the exact Workspace and account, adds the Workspace
+ * Administrator Role to that User, and never grants the acting Deployment
+ * Administrator anything. It removes nothing, so it can only prevent a stuck or
+ * orphaned Workspace, never create one.
+ */
+export function appointEmergencyAdministrator(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  workspaceId: string;
+  username: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'emergency_administrator_appointment',
+    scope: 'workspace',
+    workspace_id: options.workspaceId,
+    target: options.username,
+  };
+  const actor = resolveActor(session, options.token, context);
+  requireDeploymentAdministrator(session, actor, context);
+  const workspace = findWorkspace(session.state, options.workspaceId);
+  if (!workspace) {
+    reject(session, actorLabel(actor.user), context, 'WORKSPACE_NOT_FOUND', 'The named Workspace does not exist in this Deployment.');
+  }
+  const administrator = requireActiveUser(session, actorLabel(actor.user), context, options.username);
+  if (administrator.user_id === actor.user.user_id) {
+    deny(
+      session,
+      actorLabel(actor.user),
+      context,
+      'EMERGENCY_ADMINISTRATOR_NOT_PERMITTED',
+      'A Deployment Administrator cannot appoint themselves as a Workspace administrator.',
+      'Name another active User who will hold the Workspace Administrator Role.',
+    );
+  }
+  const previous = workspaceRoleOf(session.state, administrator.user_id, workspace.workspace_id);
+  if (previous === 'Workspace Administrator') {
+    reject(
+      session,
+      actorLabel(actor.user),
+      context,
+      'EMERGENCY_ADMINISTRATOR_NOT_REQUIRED',
+      'The named User already administers this Workspace.',
+    );
+  }
+  const existing = session.state.memberships.find(
+    (membership) => membership.workspace_id === workspace.workspace_id && membership.user_id === administrator.user_id,
+  );
+  if (existing) {
+    existing.role = 'Workspace Administrator';
+    existing.granted_at = new Date().toISOString();
+  } else {
+    session.state.memberships.push({
+      workspace_id: workspace.workspace_id,
+      user_id: administrator.user_id,
+      role: 'Workspace Administrator',
+      granted_at: new Date().toISOString(),
+    });
+  }
+  const enrollment = administrator.mfa === null ? enrolMfa(administrator.username, session.dataKey) : undefined;
+  if (enrollment) administrator.mfa = enrollment.mfa;
+  session.audit({
+    ...context,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: { workspace_name: workspace.name, previous_role: previous ?? 'none', role: 'Workspace Administrator' },
+  });
+  session.save();
+  return {
+    workspace_id: workspace.workspace_id,
+    workspace_name: workspace.name,
+    username: administrator.username,
+    role: 'Workspace Administrator',
+    previous_role: previous,
+    active_administrators: activeWorkspaceAdministrators(session.state, workspace.workspace_id).length,
+    ...(enrollment?.secrets ?? {}),
+  };
 }
 
 /**
