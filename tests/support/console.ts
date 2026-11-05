@@ -9,6 +9,8 @@ const cliPath = fileURLToPath(new URL('../../src/cli.js', import.meta.url));
 export interface ConsoleHandle {
   url: string;
   port: number;
+  /** Whatever the server last wrote to stderr, so a failed call can explain itself. */
+  errors(): string;
   stop(): Promise<void>;
 }
 
@@ -55,9 +57,14 @@ async function startConsoleOnce(
   );
   const listening = await waitForListening(child);
   const url = String(listening.url);
+  let errors = '';
+  child.stderr.on('data', (chunk: Buffer) => {
+    errors += chunk.toString();
+  });
   return {
     url,
     port: Number(listening.port),
+    errors: () => errors,
     async stop() {
       if (child.exitCode !== null || child.signalCode !== null) return;
       const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));

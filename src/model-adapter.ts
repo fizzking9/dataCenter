@@ -55,6 +55,11 @@ export interface GenerationResult {
   /** The identity the endpoint echoed, so a caller can record the exact pin. */
   identity: { model: string; profile_hash: string };
   request_hash: string;
+  /**
+   * What the endpoint states it consumed. An endpoint may state nothing, in
+   * which case the platform accounts its own documented token count instead.
+   */
+  usage: { input_tokens: number; output_tokens: number } | null;
 }
 
 export interface ModelAdapter {
@@ -175,11 +180,21 @@ function enforce(
   if (!isRecord(output)) {
     fail('MODEL_STRUCTURED_OUTPUT_INVALID', 'The Model Profile answer did not honour the declared structured output.');
   }
+  const statedUsage = envelope['usage'];
+  const usage = isRecord(statedUsage)
+    && typeof statedUsage['input_tokens'] === 'number'
+    && typeof statedUsage['output_tokens'] === 'number'
+    ? {
+        input_tokens: statedUsage['input_tokens'],
+        output_tokens: statedUsage['output_tokens'],
+      }
+    : null;
   return {
     output,
     tool_calls: toolCalls,
     identity: { model: profile.model_id, profile_hash: profile.content_hash },
     request_hash: '',
+    usage,
   };
 }
 

@@ -1181,6 +1181,12 @@ export interface ModelProfileEvaluation {
   passed: boolean;
   checks: ModelProfileCheck[];
   evidence_hash: string;
+  /**
+   * What the evaluation itself consumed, priced at the Deployment's tariff,
+   * beside the activation budget it is measured against. An evaluation recorded
+   * before budgets were accounted states none.
+   */
+  budget?: { consumption_cny: number; ceiling_cny: number; met: boolean };
 }
 
 /** One immutable Model Profile Version: endpoint, contract, credential, and prompts. */
