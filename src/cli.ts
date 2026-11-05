@@ -130,6 +130,13 @@ import { runScraperService } from './scraper-run.js';
 import { showScraperDiagnostics } from './scraper-diagnostics.js';
 import { deploymentStatus } from './status.js';
 import { readDeployment } from './state.js';
+import {
+  finalizeUpgrade,
+  preflightUpgrade,
+  rollbackDeployment,
+  upgradeDeployment,
+  verifyUpgrade,
+} from './upgrade.js';
 import { createUser, deactivateUser, listUsers, transferOwnership } from './users.js';
 import { createWorkspace, grantMembership, listWorkspaces, revokeMembership } from './workspaces.js';
 
@@ -256,6 +263,55 @@ async function main(): Promise<void> {
     emit(deploymentStatus({
       root: required(options, 'root'),
       ...(options.has('master-key') ? { masterKey: required(options, 'master-key') } : {}),
+      operator: required(options, 'operator'),
+    }));
+    return;
+  }
+  if (command === 'preflight' || command === 'upgrade') {
+    const signed = {
+      bundle: required(options, 'bundle'),
+      releaseKey: required(options, 'release-key'),
+      confirmedFingerprint: required(options, 'confirm-release-key-fingerprint'),
+    };
+    if (command === 'preflight') {
+      emit(preflightUpgrade({
+        root: required(options, 'root'),
+        masterKey: required(options, 'master-key'),
+        operator: required(options, 'operator'),
+        ...(options.has('license') ? { license: required(options, 'license') } : {}),
+        ...signed,
+      }));
+      return;
+    }
+    emit(upgradeDeployment({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      operator: required(options, 'operator'),
+      ...(options.has('license') ? { license: required(options, 'license') } : {}),
+      ...(options.has('backup-root') ? { backupRoot: required(options, 'backup-root') } : {}),
+      ...signed,
+    }));
+    return;
+  }
+  if (command === 'verify') {
+    emit(verifyUpgrade({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
+      operator: required(options, 'operator'),
+    }));
+    return;
+  }
+  if (command === 'finalize') {
+    emit(finalizeUpgrade({
+      root: required(options, 'root'),
+      operator: required(options, 'operator'),
+    }));
+    return;
+  }
+  if (command === 'rollback') {
+    emit(rollbackDeployment({
+      root: required(options, 'root'),
+      masterKey: required(options, 'master-key'),
       operator: required(options, 'operator'),
     }));
     return;

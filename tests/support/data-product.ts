@@ -142,8 +142,11 @@ export interface PublishedProduct extends WorkspaceFixture {
  * Publishes one Data Product over a governed Dataset Release, so a Consumer and
  * an Agent Identity can read exactly the same Artifact through two surfaces.
  */
-export function publishLedgerProduct(contract: unknown = CONTRACT): PublishedProduct {
-  const base: WorkspaceFixture = workspaceFixture();
+export function publishLedgerProduct(
+  contract: unknown = CONTRACT,
+  options: { highestEligibleRelease?: string } = {},
+): PublishedProduct {
+  const base: WorkspaceFixture = workspaceFixture(options);
   const { fixture, workspaceId, workspaceAdministratorToken } = base;
   const sourceId = publishSource(fixture, workspaceAdministratorToken, workspaceId);
   acquireAndRelease(fixture, workspaceAdministratorToken, sourceId);

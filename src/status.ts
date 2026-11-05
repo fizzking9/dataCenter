@@ -7,6 +7,7 @@ import { readPlatform } from './platform.js';
 import { retentionHealth } from './retention.js';
 import { healthyServices } from './runtime.js';
 import { readDeployment, readJsonFile, recordEvidence } from './state.js';
+import { rollbackWindow } from './upgrade.js';
 
 export function deploymentStatus(options: {
   root: string;
@@ -33,6 +34,8 @@ export function deploymentStatus(options: {
       state: deployment.state,
       health: 'closed',
       service_open: false,
+      release: deployment.release,
+      rollback_window: rollbackWindow(options.root),
       ...recovery,
       evidence_id: evidenceId,
     };
@@ -63,6 +66,8 @@ export function deploymentStatus(options: {
     state: deployment.state,
     health,
     service_open: true,
+    release: deployment.release,
+    rollback_window: rollbackWindow(options.root),
     runtime_services: services,
     mfa_enrolled: deployment.mfa_enrolled === true,
     default_credentials: deployment.default_credentials !== false,

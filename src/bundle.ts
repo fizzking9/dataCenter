@@ -17,6 +17,10 @@ export interface ReleaseManifest {
     installable: boolean;
     host_platforms: string[];
   };
+  /** Releases this bundle declares as compatible predecessors, so N -> N+1 is signed. */
+  compatibility?: {
+    upgrade_from: string[];
+  };
   license_verification: {
     key_id: string;
     public_key_pem: string;
