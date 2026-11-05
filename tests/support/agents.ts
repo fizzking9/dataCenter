@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
+import { USER_SESSION_COOKIE } from '../../src/auth.js';
 import type { OperatorResult } from './operator.js';
 import { requestToken } from './mcp.js';
 import { command, jsonFile, type PlatformFixture } from './platform.js';
@@ -100,7 +101,7 @@ export async function issueAgentToken(
 
 /** The platform User session cookie a delegated authorization request carries. */
 export function userCookie(sessionToken: string): string {
-  return `dc_user_session=${sessionToken}`;
+  return `${USER_SESSION_COOKIE}=${sessionToken}`;
 }
 
 /** One RFC 7636 verifier and the S256 challenge a client presents. */
