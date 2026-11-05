@@ -8,7 +8,9 @@ import {
   delegateAgent,
   grantAgent,
   issueAgentToken,
+  issueDelegatedToken,
   registerAgentClient,
+  userCookie,
 } from '../support/agents.js';
 import { startConsole, type ConsoleHandle } from '../support/console.js';
 import { EXTENDED_LEDGER_CONTRACT, publishLedgerProduct } from '../support/data-product.js';
@@ -302,8 +304,16 @@ async function readySurface(): Promise<Surface> {
         console,
         readToken: await issueAgentToken(console.url, client, 'mcp:read'),
         nlqToken: await issueAgentToken(console.url, client, 'mcp:nlq'),
-        delegatedReadToken: await issueAgentToken(console.url, client, 'mcp:read', delegation.delegation_id),
-        delegatedNlqToken: await issueAgentToken(console.url, client, 'mcp:nlq', delegation.delegation_id),
+        delegatedReadToken: await issueDelegatedToken(console.url, client, {
+          cookie: userCookie(consumerToken),
+          workspaceId,
+          scope: 'mcp:read',
+        }),
+        delegatedNlqToken: await issueDelegatedToken(console.url, client, {
+          cookie: userCookie(consumerToken),
+          workspaceId,
+          scope: 'mcp:nlq',
+        }),
       };
     } catch (error) {
       await console.stop();

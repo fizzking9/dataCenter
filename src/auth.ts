@@ -19,6 +19,13 @@ const MAX_CONSECUTIVE_FAILURES = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
 const GENERIC_FAILURE = 'Authentication failed.';
 
+/**
+ * The platform User session cookie. It is `SameSite=Lax` so a top-level
+ * navigation into the OAuth authorization endpoint carries the session, while
+ * a cross-site POST still does not.
+ */
+export const USER_SESSION_COOKIE = 'dc_user_session';
+
 function auditFailed(session: PlatformSession, context: ActionContext, reason: string): never {
   session.save();
   session.audit({ ...context, actor: 'unauthenticated', outcome: 'failed', detail: { reason } });

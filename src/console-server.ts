@@ -27,7 +27,7 @@ import { publishGrant, revokeGrant } from './grants.js';
 import { createExport, downloadExport, listExports, listOwnExports, revokeExport } from './export.js';
 import { showDataProductGovernance } from './product-governance.js';
 import { showWorkspaceAudit } from './audit-view.js';
-import { login, logout, verifyStepUpAuthentication } from './auth.js';
+import { login, logout, USER_SESSION_COOKIE, verifyStepUpAuthentication } from './auth.js';
 import {
   adoptConnection,
   connectionPacing,
@@ -168,7 +168,7 @@ import { finalizeUpgrade, preflightUpgrade, readMigrationLedger, readUpgradeReco
 
 export const SESSION_COOKIE = 'dc_operator_console';
 /** Platform User sessions are a separate channel from the Operator Console. */
-export const USER_SESSION_COOKIE = 'dc_user_session';
+export { USER_SESSION_COOKIE };
 
 /** One governed JSON body is bounded before it reaches any governed module. */
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -2755,11 +2755,15 @@ function searchParam(request: IncomingMessage, name: string): string | null {
   return value === null || value === '' ? null : value;
 }
 
-/** The browser never reads this cookie, and it never outlives the session. */
+/**
+ * The browser never reads this cookie, and it never outlives the session. It is
+ * `SameSite=Lax` so the OAuth authorization endpoint receives it on a top-level
+ * navigation from a client; cross-site POSTs still never carry it.
+ */
 function sessionCookie(token: string, expiresAt: unknown): string {
   const remaining = Date.parse(String(expiresAt)) - Date.now();
   const maxAge = token === '' || !Number.isFinite(remaining) ? 0 : Math.max(0, Math.floor(remaining / 1000));
-  return `${USER_SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
+  return `${USER_SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
 }
 
 /** Reads the Bearer credential a published Data Product API path presents. */

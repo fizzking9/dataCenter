@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
-import { grantAgent, createAgent, delegateAgent, issueAgentToken, registerAgentClient } from '../support/agents.js';
+import {
+  grantAgent,
+  createAgent,
+  delegateAgent,
+  issueAgentToken,
+  issueDelegatedToken,
+  registerAgentClient,
+  userCookie,
+} from '../support/agents.js';
 import { callApi, startConsole } from '../support/console.js';
 import { publishLedgerProduct } from '../support/data-product.js';
 import { callTool, listTools, mcpResult, requestToken, toolFailure, toolPayload } from '../support/mcp.js';
@@ -258,7 +266,7 @@ test('Workspace grants and delegated consent intersect, and revocation stops the
   } = product;
   const agentId = createAgent(fixture, deploymentAdministratorToken, workspaceId);
   const client = registerAgentClient(fixture, deploymentAdministratorToken, agentId);
-  const delegation = delegateAgent(fixture, consumerToken, agentId, workspaceId);
+  delegateAgent(fixture, consumerToken, agentId, workspaceId);
 
   // The delegated User's own Grant is narrower than the Agent's: the delegated
   // read must carry only the intersection of both column sets.
@@ -332,10 +340,15 @@ test('Workspace grants and delegated consent intersect, and revocation stops the
     assert.equal(listed.text.includes(client.client_secret), false);
     assert.equal(listed.text.includes('client_secret'), false);
 
-    // Autonomous access reads the Agent's Grant; delegated access reads only
-    // what both the Agent and the delegated User may see, in the same Workspace.
+    // Autonomous access reads the Agent's Grant; delegated access goes through
+    // the User's authorization code with PKCE and reads only what both the
+    // Agent and the delegated User may see, in the same Workspace.
     const autonomousToken = await issueAgentToken(consoleServer.url, client);
-    const delegatedToken = await issueAgentToken(consoleServer.url, client, 'mcp:read', delegation.delegation_id);
+    const delegatedToken = await issueDelegatedToken(consoleServer.url, client, {
+      cookie: userCookie(consumerToken),
+      workspaceId,
+      scope: 'mcp:read',
+    });
     const query = {
       workspace_id: workspaceId,
       data_product_id: dataProductId,
