@@ -246,7 +246,7 @@ export interface AcquisitionConnectionVersion {
   retry: ConnectionRetryPolicy;
   pacing: ConnectionPacingPolicy;
   pagination: ConnectionPagination;
-  schedule: { every_minutes: number } | null;
+  schedule: { every_minutes: number; tolerance_seconds: number } | null;
   content_hash: string;
 }
 

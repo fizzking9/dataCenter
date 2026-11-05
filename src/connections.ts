@@ -118,13 +118,28 @@ function readPagination(session: PlatformSession, actor: string, context: Action
   };
 }
 
-function readSchedule(session: PlatformSession, actor: string, context: ActionContext, raw: unknown): { every_minutes: number } | null {
+/**
+ * Reads the schedule one Connection Version declares: how often its Sources are
+ * swept, and how late a sweep may start and still count as on time. A schedule
+ * that declares no tolerance treats only the due instant itself as on time;
+ * work is never dropped for being late.
+ */
+function readSchedule(
+  session: PlatformSession,
+  actor: string,
+  context: ActionContext,
+  raw: unknown,
+): { every_minutes: number; tolerance_seconds: number } | null {
   if (raw === undefined || raw === null) return null;
   const every = isRecord(raw) ? raw['every_minutes'] : undefined;
+  const tolerance = isRecord(raw) ? raw['tolerance_seconds'] ?? 0 : 0;
   if (!Number.isInteger(every) || (every as number) < 1 || (every as number) > 10_080) {
     reject(session, actor, context, 'CONNECTION_CONFIGURATION_INVALID', 'A schedule interval must be a whole number of minutes from 1 to 10080.');
   }
-  return { every_minutes: every as number };
+  if (!Number.isInteger(tolerance) || (tolerance as number) < 0 || (tolerance as number) > 3_600) {
+    reject(session, actor, context, 'CONNECTION_CONFIGURATION_INVALID', 'A schedule tolerance must be a whole number of seconds from 0 to 3600.');
+  }
+  return { every_minutes: every as number, tolerance_seconds: tolerance as number };
 }
 
 function readAuth(session: PlatformSession, actor: string, context: ActionContext, raw: unknown): ConnectionAuth {

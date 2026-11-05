@@ -676,6 +676,8 @@ export function tickSchedules(options: {
       source_id: source.source_id,
       acquisition_run_id: run.acquisition_run_id,
       due_at: new Date(dueAt).toISOString(),
+      queued_at: run.queued_at,
+      tolerance_seconds: schedule.tolerance_seconds ?? 0,
     });
   }
   session.audit({
@@ -756,6 +758,79 @@ export function resetAcquisitionCheckpoint(options: {
   session.audit({ ...scoped, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { checkpoint_reset: true } });
   session.save();
   return { source_id: source.source_id, checkpoint: { ...artifact.checkpoint } };
+}
+
+/**
+ * Reads the immutable Acquisition Plan — the manifest — one Run attempt left,
+ * together with the Raw Acquisition inventory that attempt kept.
+ *
+ * The Plan is durable before the first request and after every page, so a later
+ * process reads exactly the fragments and window the attempt really used rather
+ * than reconstructing them from the current checkpoint.
+ */
+export function readAcquisitionPlan(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  runId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'acquisition_plan_read', scope: 'workspace' };
+  const actor = resolveActor(session, options.token, context);
+  const run = session.state.acquisition_runs.find(
+    (candidate) => candidate.acquisition_run_id === options.runId,
+  );
+  if (!run) {
+    reject(session, actorLabel(actor.user), context, 'ACQUISITION_RUN_NOT_FOUND', 'No Acquisition Run has this identifier.');
+  }
+  const source = requireAdministeredSource(session, actor, context, run.source_id);
+  const scoped: ActionContext = { ...context, workspace_id: source.workspace_id, target: source.source_id };
+  const plan = [...session.state.acquisition_plans]
+    .reverse()
+    .find((candidate) => candidate.acquisition_run_id === run.acquisition_run_id);
+  if (!plan) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      scoped,
+      'ACQUISITION_PLAN_NOT_FOUND',
+      'This Run has not durably planned an attempt.',
+      'Work the Run so its Plan is durable before reading its manifest.',
+    );
+  }
+  const rawAcquisitions = session.state.raw_acquisitions
+    .filter((raw) => raw.acquisition_run_id === run.acquisition_run_id)
+    .map((raw) => ({
+      raw_id: raw.raw_id,
+      content_hash: raw.content_hash,
+      byte_length: raw.byte_length,
+      received_at: raw.received_at,
+    }));
+  session.audit({
+    ...scoped,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: {
+      acquisition_run_id: run.acquisition_run_id,
+      plan_id: plan.plan_id,
+      raw_acquisition_count: rawAcquisitions.length,
+    },
+  });
+  return {
+    source_id: source.source_id,
+    acquisition_run_id: run.acquisition_run_id,
+    plan: {
+      ...plan,
+      window: plan.window === null ? null : { ...plan.window },
+      checkpoint_before: plan.checkpoint_before === null ? null : { ...plan.checkpoint_before },
+      checkpoint_after: plan.checkpoint_after === null ? null : { ...plan.checkpoint_after },
+      pages: plan.pages.map((page) => ({
+        ...page,
+        failed_attempts: page.failed_attempts.map((attempt) => ({ ...attempt })),
+      })),
+    },
+    raw_acquisitions: rawAcquisitions,
+  };
 }
 
 /** The Sources of a Workspace and the acquisition state each one holds. */
