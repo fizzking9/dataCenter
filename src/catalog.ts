@@ -678,6 +678,22 @@ export interface DataProductGrantRecord {
   revoked_at: string | null;
 }
 
+/**
+ * One audited Rollback fact returning a major Contract line to an earlier
+ * Release. It never rewrites the Versions or Releases it moves past.
+ */
+export interface DataProductRollbackRecord {
+  rollback_id: string;
+  /** The major line whose pointer the Rollback moved. */
+  major: number;
+  from_version: number;
+  from_release: number;
+  to_version: number;
+  to_release: number;
+  created_at: string;
+  created_by: string;
+}
+
 /** One encrypted, short-lived curated-result export a Consumer requested. */
 export interface ExportRecord {
   export_id: string;
@@ -695,6 +711,8 @@ export interface ExportRecord {
   /** The ciphertext object, relative to the Deployment root. */
   object_path: string;
   downloaded_at: string | null;
+  /** Set when a Workspace Administrator revoked the download, keeping its audit history. */
+  revoked_at?: string | null;
 }
 
 /** One immutable result binding an exact Data Product Version to a Dataset Release. */
@@ -723,6 +741,8 @@ export interface DataProductArtifact {
   releases: DataProductRelease[];
   /** One entry per major Contract line ever opened. */
   lines: DataProductMajorLine[];
+  /** Every Rollback fact this Data Product recorded, in order. */
+  rollbacks?: DataProductRollbackRecord[];
 }
 
 export function findSource(sources: SourceRecord[], sourceId: string): SourceRecord | undefined {

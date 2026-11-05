@@ -9,6 +9,7 @@ import { PlatformPicker } from './screens/PlatformPicker.js';
 import { PlatformSignInScreen } from './screens/PlatformSignInScreen.js';
 import { WorkspaceAudit, WorkspaceMembers } from './screens/PlatformWorkspaceAdminScreen.js';
 import { WorkspaceContext, WorkspaceOverview, WorkspaceProducts } from './screens/PlatformWorkspaceScreen.js';
+import { WorkspaceProductGovernance } from './screens/PlatformProductGovernanceScreen.js';
 import { WorkspaceProductProposals } from './screens/PlatformProductProposalScreen.js';
 import { WorkspaceProposals } from './screens/PlatformProposalScreen.js';
 import { WorkspaceAgents } from './screens/PlatformAgentScreen.js';
@@ -19,8 +20,8 @@ import { Alert, Panel } from './ui/Panel.js';
 import { Shell } from './ui/Shell.js';
 
 const VIEWS = [
-  'overview', 'sources', 'scrapers', 'products', 'productProposals', 'context', 'members', 'audit',
-  'models', 'proposals', 'agents', 'modelProfiles', 'users', 'retention',
+  'overview', 'sources', 'scrapers', 'products', 'productGovernance', 'productProposals', 'context', 'members',
+  'audit', 'models', 'proposals', 'agents', 'modelProfiles', 'users', 'retention',
 ] as const;
 type View = (typeof VIEWS)[number];
 
@@ -58,6 +59,8 @@ function viewOf(value: string | undefined): View {
     case 'users':
     case 'retention':
       return value;
+    case 'product-governance':
+      return 'productGovernance';
     case 'product-proposals':
       return 'productProposals';
     default:
@@ -330,6 +333,8 @@ export function PlatformApp() {
     <WorkspaceScrapers workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'products' ? (
     <WorkspaceProducts workspaceId={activeId} onSessionLost={sessionLost} />
+  ) : route.view === 'productGovernance' ? (
+    <WorkspaceProductGovernance workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'productProposals' ? (
     <WorkspaceProductProposals workspaceId={activeId} onSessionLost={sessionLost} />
   ) : route.view === 'context' ? (
