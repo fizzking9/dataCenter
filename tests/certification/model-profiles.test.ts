@@ -924,6 +924,8 @@ test('the Model Profile form renders every purpose and data category the server 
     await page.getByRole('heading', { name: '工作区', exact: true }).waitFor();
     await page.getByRole('link', { name: '模型档案' }).click();
     await page.getByRole('heading', { name: '模型档案' }).waitFor();
+    // The form renders the server vocabulary, so wait for it before counting.
+    await page.getByLabel('integration_proposal', { exact: true }).waitFor();
 
     for (const purpose of [
       'integration_proposal',

@@ -11,7 +11,7 @@
     "build:web": "vite build --config web/vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json",
     "test": "npm run build && npm run build:web && node --test \"dist/tests/**/*.test.js\"",
-    "certify": "npm run build && npm run build:web && node --test \"dist/tests/certification/**/*.test.js\""
+    "certify": "npm run build && npm run build:web && node --test --test-concurrency=1 \"dist/tests/certification/**/*.test.js\""
   },
   "engines": {
     "node": ">=22.0.0"

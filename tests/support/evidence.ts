@@ -27,6 +27,19 @@ export interface EvidenceVerification {
   reason: string | null;
 }
 
+/** JSON omits undefined properties, so sign and write the same visible fact set. */
+export function defined(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(defined);
+  if (value !== null && typeof value === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (item !== undefined) result[key] = defined(item);
+    }
+    return result;
+  }
+  return value;
+}
+
 /** Sorts every object key, so the same evidence always serializes to the same bytes. */
 function canonicalObject(value: unknown): unknown {
   return JSON.parse(canonicalJson(value)) as unknown;
@@ -40,7 +53,8 @@ export function writeEvidenceManifest(options: {
   keyId: string;
 }): WrittenEvidence {
   mkdirSync(options.directory, { recursive: true, mode: 0o700 });
-  const canonical = canonicalJson(options.body);
+  const body = defined(options.body) as Record<string, unknown>;
+  const canonical = canonicalJson(body);
   const signature: EvidenceSignature = {
     algorithm: 'Ed25519',
     key_id: options.keyId,
@@ -48,9 +62,9 @@ export function writeEvidenceManifest(options: {
   };
   const manifestPath = join(options.directory, 'evidence.json');
   const signaturePath = join(options.directory, 'evidence.sig');
-  writeFileSync(manifestPath, `${JSON.stringify(canonicalObject(options.body), null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(manifestPath, `${JSON.stringify(canonicalObject(body), null, 2)}\n`, { mode: 0o600 });
   writeFileSync(signaturePath, `${JSON.stringify(signature, null, 2)}\n`, { mode: 0o600 });
-  return { manifestPath, signaturePath, digest: canonicalDigest(options.body), signature };
+  return { manifestPath, signaturePath, digest: canonicalDigest(body), signature };
 }
 
 /**

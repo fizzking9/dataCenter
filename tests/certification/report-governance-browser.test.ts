@@ -206,6 +206,8 @@ async function signIn(page: Page, username: string, password: string, totp: stri
 async function open(browser: Browser, url: string, path: string): Promise<Page> {
   const page = await browser.newPage();
   page.setDefaultTimeout(20_000);
+  // A loaded host can take longer than the action budget to finish navigation.
+  page.setDefaultNavigationTimeout(60_000);
   await page.goto(`${url}${path}`);
   return page;
 }
@@ -380,6 +382,8 @@ test('a secure schedule revalidates its designated Consumer, pauses and resumes,
     await openGovernance(page);
     const cookie = await cookieHeader(page.context());
     const panel = page.getByRole('region', { name: '报告计划' });
+    // The panel confirms the session and loads the schedule list before it settles.
+    await panel.getByText('当前工作区还没有报告计划。').waitFor();
     const emptyText = await panel.innerText();
     for (const copy of ['当前工作区还没有报告计划。', '计划只在显式的到期检查时评估']) {
       assert.ok(emptyText.includes(copy), `the schedule panel omits ${copy}: ${emptyText}`);

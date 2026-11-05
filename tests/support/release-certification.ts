@@ -19,7 +19,7 @@ import { createBundleFixture, type BundleFixture } from './bundle.js';
 import { startConsole } from './console.js';
 import { EXTENDED_LEDGER_CONTRACT, acquireAndRelease, publishSource } from './data-product.js';
 import { blockedEgressEnvironment, recordedEgressAttempts, type EgressGuard } from './egress-guard.js';
-import { verifyEvidenceManifest, writeEvidenceManifest, type WrittenEvidence } from './evidence.js';
+import { defined, verifyEvidenceManifest, writeEvidenceManifest, type WrittenEvidence } from './evidence.js';
 import { fakeDockerEnvironment } from './fake-docker.js';
 import { issueLicense } from './license.js';
 import {
@@ -222,7 +222,7 @@ function ok(result: OperatorResult, step: string): Record<string, unknown> {
 function readProjection(world: ChannelWorld): Record<string, unknown> {
   const records = ok(command(world, [
     'product', 'query', '--product', world.dataProductId,
-    '--request', requestFile(world, { kind: 'records', limit: 10 }),
+    '--request', requestFile(world, { kind: 'records', limit: 10, include_totals: true }),
   ], { token: world.consumerToken }), 'governed records read');
   const aggregate = ok(command(world, [
     'product', 'query', '--product', world.dataProductId,
@@ -570,7 +570,7 @@ function runLifecycle(options: {
   const restoredToken = sessionFor(restoredFixture, OPERATIONS, OPERATIONS_PASSWORD);
   const restoredRead = ok(command(restoredFixture, [
     'product', 'query', '--product', world.dataProductId,
-    '--request', requestFile(restoredFixture, { kind: 'records', limit: 10 }),
+    '--request', requestFile(restoredFixture, { kind: 'records', limit: 10, include_totals: true }),
   ], { token: restoredToken }), 'restored governed read');
   observations['restored_read'] = {
     returned: restoredRead['returned'],
@@ -1369,7 +1369,7 @@ export async function certifyRelease(options: CertificationOptions = {}): Promis
 }
 
 function canonicalEquals(left: unknown, right: unknown): boolean {
-  return canonicalJson(left) === canonicalJson(right);
+  return canonicalJson(defined(left)) === canonicalJson(defined(right));
 }
 
 async function scenarioAsync(
@@ -1408,7 +1408,7 @@ function governedScenarios(
   world: ChannelWorld,
   redactionSample: { profile_id: string; credential: string; endpoint_url: string },
 ): Scenario[] {
-  const recordsRequest = (): string => requestFile(world, { kind: 'records', limit: 10 });
+  const recordsRequest = (): string => requestFile(world, { kind: 'records', limit: 10, include_totals: true });
   return [
     scenario('numeric_correctness', 'governed', () => {
       const records = ok(command(world, [

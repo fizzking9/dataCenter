@@ -30,6 +30,7 @@ export async function copyLeaks(page: Page): Promise<CopyLeak[]> {
 
     const looksLikeToken = (text: string): boolean =>
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(text)
+      || /^[0-9a-f]{16,}$/iu.test(text)
       || /[/_:@\\]/u.test(text)
       || /^[a-z][a-z0-9]*(?:-[a-z0-9]+)+$/u.test(text)
       || /^[a-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)+\.?$/u.test(text)
