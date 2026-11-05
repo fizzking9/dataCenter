@@ -523,5 +523,44 @@ test('NLQ writes every new piece of user-facing copy in Simplified Chinese', asy
   }
 });
 
-// The remaining acceptance criteria are added one at a time, each red before green.
-void EXTENDED_LEDGER_CONTRACT;
+test('NLQ answers a Chinese question with a mixed identifier, clarifies in Chinese, and keeps every governed field unchanged', async (t) => {
+  const s = await readySurface({ contract: EXTENDED_LEDGER_CONTRACT });
+  t.after(() => s.endpoint.close());
+
+  // The question is Chinese and carries a Latin device identifier verbatim.
+  const answered = asOutput(await ask(s, ['--question', '请查询 SN 为 sn-002 的 2026-01-01 至 2026-01-31 处理量合计是多少？']));
+  assert.equal(answered.outcome, 'answered', JSON.stringify(answered));
+  assert.deepEqual(asRecord(answered.query)['filters'], [{ field: 'sn', op: 'equals', value: 'sn-002' }], 'the identifier survives unchanged');
+  assert.equal(asRecord(answered.resolved)['filters'] !== null, true);
+  assert.deepEqual(asRecord(answered.resolved)['filters'], [{ field: 'sn', op: 'equals', value: 'sn-002' }]);
+
+  // The narrative is Simplified Chinese and restates the governed number.
+  const answer = asRecord(answered.answer);
+  const narrative = String(answer['narrative'] ?? '');
+  assertChineseCopy(narrative, 'the grounded narrative');
+  const result = asRecord(answered.result);
+  const totals = asRecord(asRecord(result['totals'])['metrics']);
+  assert.equal(totals['handled_total'], 5, 'the filtered read totals the one matching device');
+  assert.ok(narrative.includes(String(totals['handled_total'])), `the narrative states the governed total: ${narrative}`);
+
+  // Chinese input changes nothing deterministic: the same compiled request
+  // through the engine returns the same numbers, filters, Release, and Provenance.
+  const direct = command(s.fixture, ['product', 'query', '--product', s.dataProductId, '--request', jsonFile(s.fixture, 'nlq-cn', asRecord(answered.query))], { token: s.consumerToken });
+  assert.equal(direct.status, 0, direct.stderr);
+  const directResult = direct.output as Record<string, unknown>;
+  assert.deepEqual(governedNumbers(result), governedNumbers(directResult), 'the numbers are unchanged');
+  assert.deepEqual(answered.provenance, directResult['provenance'], 'Provenance is unchanged');
+  assert.deepEqual(answered.data_product && asRecord(answered.data_product)['data_product_release'], directResult['data_product_release'], 'the Release is unchanged');
+
+  // A Chinese question missing its period is clarified in Chinese, with the
+  // mixed identifier carried into the model input untouched.
+  const clarified = asOutput(await ask(s, ['--question', 'SN 为 sn-002 的处理量是多少？']));
+  assert.equal(clarified.outcome, 'clarification', JSON.stringify(clarified));
+  assert.equal(clarified.executed, false);
+  assert.deepEqual(asRecord(clarified.clarification)['missing'], ['period']);
+  assertChineseCopy(String(asRecord(clarified.clarification)['question']), 'the clarification question');
+  assertChineseCopy(clarified.summary, 'the clarification summary');
+  const clarifyCall = s.endpoint.calls.filter((call) => call['purpose'] === 'clarification').at(-1);
+  assert.ok(clarifyCall, 'the model was asked for a clarification');
+  assert.ok(String(asRecord(clarifyCall['input'])['question']).includes('sn-002'), 'the identifier reaches the model unchanged');
+});
