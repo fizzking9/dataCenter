@@ -2,6 +2,8 @@ import {
   type DataProductContract,
   type DataProductMetric,
   type DataProductQueryLimits,
+  type DataProductSearch,
+  type DataProductSearchRanking,
   type DataProductTime,
   type DatasetSchemaField,
   type MetricAggregation,
@@ -20,6 +22,16 @@ const METRIC_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 const AGGREGATIONS: MetricAggregation[] = ['count', 'sum', 'min', 'max', 'avg'];
 const VALUE_TYPES: MetricValueType[] = ['integer', 'decimal', 'money', 'date', 'timestamp'];
 const TIME_PRECISIONS: Array<DataProductTime['precision']> = ['date', 'timestamp'];
+
+/** The one ranking this release ships; a Contract names it rather than describing it. */
+const SEARCH_RANKINGS: Array<DataProductSearchRanking['kind']> = ['weighted_term_frequency'];
+/** Fields every search result already carries, so a Contract field may not shadow them. */
+const RESERVED_RESULT_FIELDS = ['score', 'matched_terms'];
+const TERM_WEIGHT_CEILING = 100;
+const MAX_TERMS_CEILING = 64;
+const MIN_TERM_LENGTH_CEILING = 32;
+const DEFAULT_MAX_TERMS = 8;
+const DEFAULT_MIN_TERM_LENGTH = 2;
 
 /** The resource envelope a Contract gets when it declares none of its own. */
 const DEFAULT_QUERY_LIMITS: DataProductQueryLimits = {
@@ -92,6 +104,7 @@ export function readContract(fail: Fail, path: string, schema: DatasetSchemaFiel
   const filters = readFilters(fail, parsed['filters'], fields);
   const { defaultLimit, maxLimit } = readPageLimits(fail, parsed['limit']);
   const limits = readQueryLimits(fail, parsed['limits']);
+  const search = readSearch(fail, parsed['search'], fields, schema);
 
   return {
     title,
@@ -105,6 +118,7 @@ export function readContract(fail: Fail, path: string, schema: DatasetSchemaFiel
     default_limit: defaultLimit,
     max_limit: maxLimit,
     limits,
+    ...(search === undefined ? {} : { search }),
   };
 }
 
@@ -356,5 +370,107 @@ function readQueryLimits(fail: Fail, raw: unknown): DataProductQueryLimits {
     max_scanned_records: read('max_scanned_records'),
     max_groups: read('max_groups'),
     max_execution_ms: read('max_execution_ms'),
+  };
+}
+
+function readWholeNumber(
+  fail: Fail,
+  label: string,
+  raw: unknown,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const value = raw ?? fallback;
+  if (!Number.isInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+    fail('DATA_PRODUCT_CONTRACT_INVALID', `Contract search ${label} must be a whole number between ${minimum} and ${maximum}.`);
+  }
+  return value as number;
+}
+
+function readSearchRanking(fail: Fail, raw: unknown): DataProductSearchRanking {
+  if (!isRecord(raw)) {
+    fail('DATA_PRODUCT_CONTRACT_INVALID', 'Contract search ranking must state its kind and term weights.');
+  }
+  const kind = raw['kind'] as DataProductSearchRanking['kind'];
+  if (!SEARCH_RANKINGS.includes(kind)) {
+    fail('DATA_PRODUCT_CONTRACT_INVALID', `Contract search ranking kind must be one of: ${SEARCH_RANKINGS.join(', ')}.`);
+  }
+  const weight = (label: string, value: unknown): number => {
+    if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > TERM_WEIGHT_CEILING) {
+      fail('DATA_PRODUCT_CONTRACT_INVALID', `Contract search ${label} must be a whole number between 1 and ${TERM_WEIGHT_CEILING}.`);
+    }
+    return value as number;
+  };
+  return {
+    kind,
+    title_weight: weight('title_weight', raw['title_weight'] ?? 1),
+    text_weight: weight('text_weight', raw['text_weight'] ?? 1),
+  };
+}
+
+/**
+ * Reads the search capability a Document Contract declares. Every field it
+ * names is one the Contract already exposes and one the Dataset Schema holds
+ * string values in, so a search never reaches a field a Consumer cannot read.
+ */
+function readSearch(
+  fail: Fail,
+  raw: unknown,
+  fields: DataProductContract['fields'],
+  schema: DatasetSchemaField[],
+): DataProductSearch | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) {
+    fail('DATA_PRODUCT_CONTRACT_INVALID', 'Contract search must state the field it searches and how it ranks.');
+  }
+  const exposed = fields.map((field) => field.name);
+  const stringFields = schema.filter((field) => field.type === 'string').map((field) => field.name);
+  const shadowed = exposed.filter((name) => RESERVED_RESULT_FIELDS.includes(name));
+  if (shadowed.length > 0) {
+    fail(
+      'DATA_PRODUCT_CONTRACT_INVALID',
+      `${shadowed.join(', ')} already names a value every search result carries, so a searchable Contract cannot publish it as a field.`,
+    );
+  }
+
+  const textField = raw['text_field'];
+  if (typeof textField !== 'string' || !stringFields.includes(textField)) {
+    fail('DATA_PRODUCT_CONTRACT_INVALID', 'Contract search text_field must name an exposed string field.');
+  }
+  let titleField: string | undefined;
+  const rawTitle = raw['title_field'];
+  if (rawTitle !== undefined) {
+    if (typeof rawTitle !== 'string' || !stringFields.includes(rawTitle)) {
+      fail('DATA_PRODUCT_CONTRACT_INVALID', 'Contract search title_field must name an exposed string field.');
+    }
+    if (rawTitle === textField) {
+      fail('DATA_PRODUCT_CONTRACT_INVALID', 'Contract search title_field must differ from its text_field.');
+    }
+    titleField = rawTitle;
+  }
+  const suggestFields = readNameList(fail, raw['suggest_fields'] ?? [], exposed, {
+    notArray: 'Contract search suggest_fields must be an array of exposed field names.',
+    invalid: 'Each Contract search suggest field must name an exposed field.',
+  });
+  for (const name of suggestFields) {
+    if (!stringFields.includes(name)) {
+      fail('DATA_PRODUCT_CONTRACT_INVALID', `The ${name} suggest field is not a string field, so it can suggest no term.`);
+    }
+  }
+  return {
+    text_field: textField,
+    ...(titleField === undefined ? {} : { title_field: titleField }),
+    suggest_fields: suggestFields,
+    ranking: readSearchRanking(fail, raw['ranking']),
+    max_terms: readWholeNumber(fail, 'max_terms', raw['max_terms'], DEFAULT_MAX_TERMS, 1, MAX_TERMS_CEILING),
+    min_term_length: readWholeNumber(
+      fail,
+      'min_term_length',
+      raw['min_term_length'],
+      DEFAULT_MIN_TERM_LENGTH,
+      1,
+      MIN_TERM_LENGTH_CEILING,
+    ),
   };
 }

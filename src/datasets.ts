@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { resolveActor } from './auth.js';
 import { actorLabel, reject, type ActionContext, type Actor } from './authz.js';
 import {
+  DEFAULT_DOCUMENT_PARSE_LIMITS,
+  DOCUMENT_BUNDLE_PARSER,
   findDataset,
   findIntegrationConfiguration,
   ISO_TIMESTAMP,
@@ -21,6 +23,7 @@ import {
 } from './catalog.js';
 import { parseCsv } from './csv.js';
 import { canonicalDigest } from './crypto.js';
+import { parseDocumentBundleIsolated } from './document-isolate.js';
 import { isRecord, valueAtPath } from './documents.js';
 import { openPlatform, type PlatformSession } from './session.js';
 import { requireAdministeredSource } from './sources.js';
@@ -39,7 +42,7 @@ interface IntegrationOutcome {
 /** One fragment's source records, whichever representation acquired them. */
 interface FragmentTable {
   header: string[];
-  rows: Array<{ row: number; cells: string[] }>;
+  rows: Array<{ row: number; cells: string[]; locator?: string }>;
 }
 
 function digest(value: unknown): string {
@@ -51,6 +54,44 @@ function cellOf(value: unknown): string {
   if (typeof value === 'string') return value;
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return JSON.stringify(value);
+}
+
+/**
+ * Reads one document bundle into the same header-and-rows table a CSV file
+ * becomes, so mapping, cleaning, coercion, identity, and Record Rejection apply
+ * to documents exactly as they apply to records.
+ *
+ * The parse runs in an isolated worker under the envelope the Configuration
+ * declared. The columns are the ones the Configuration maps — a bundle is
+ * schema-less, so the mapping, not the bundle, states the field set — and each
+ * row keeps the locator of the document it was read from.
+ */
+function documentTable(
+  session: PlatformSession,
+  actor: Actor,
+  context: ActionContext,
+  version: IntegrationConfigurationVersion,
+  raw: RawAcquisitionRecord,
+  text: string,
+): FragmentTable {
+  const refuse: (code: string, message: string) => never = (code, message) =>
+    reject(session, actorLabel(actor.user), context, code, message);
+  // Bytes are opaque until this point; a bundle that is not UTF-8 text has no
+  // governed reading, so it is refused rather than decoded with replacements.
+  if (Buffer.byteLength(text, 'utf8') !== raw.byte_length || text.includes('\u0000') || text.includes('\uFFFD')) {
+    refuse('DOCUMENT_CONTENT_NOT_TEXT', 'A document bundle must be UTF-8 text; this Raw Acquisition is not.');
+  }
+  const parsed = parseDocumentBundleIsolated(text, version.document_limits ?? DEFAULT_DOCUMENT_PARSE_LIMITS);
+  if (!parsed.ok) refuse(parsed.code, parsed.message);
+  const header = Object.keys(version.mapping);
+  return {
+    header,
+    rows: parsed.documents.map((document, index) => ({
+      row: index + 1,
+      locator: document.locator,
+      cells: header.map((column) => cellOf(document.fields[column])),
+    })),
+  };
 }
 
 /**
@@ -68,6 +109,9 @@ function fragmentTable(
   text: string,
 ): FragmentTable {
   const source = session.state.sources.find((candidate) => candidate.source_id === raw.source_id);
+  if (source?.type === 'document') {
+    return documentTable(session, actor, context, version, raw, text);
+  }
   if (source?.type !== 'http_json') {
     const document = parseCsv(text, (code, message) => reject(session, actorLabel(actor.user), context, code, message));
     return { header: document.header, rows: document.rows };
@@ -241,7 +285,11 @@ function integrate(
       }
       seenInFragment.add(identity);
       seenInBatch.add(identity);
-      records.set(identity, { identity, values });
+      records.set(identity, {
+        identity,
+        values,
+        ...(row.locator === undefined ? {} : { raw: { raw_id: raw.raw_id, locator: row.locator } }),
+      });
     }
   }
 
@@ -321,7 +369,10 @@ export function releaseDatasetFor(
       : [{ batch_id: batch.batch_id, raw }];
   }));
   const outcome = integrate(session, actor, scoped, version, fragments);
-  const recordsHash = digest(outcome.records);
+  // The hash covers the curated values alone, so a redelivery that reconciles
+  // to the same records is the same Release even though its Raw Acquisition — 
+  // and so its per-document locator — is a different one.
+  const recordsHash = digest(outcome.records.map((record) => ({ identity: record.identity, values: record.values })));
 
   let dataset = findDataset(session.state.datasets, source.source_id);
   if (!dataset) {
@@ -367,6 +418,14 @@ export function releaseDatasetFor(
     },
     records: outcome.records,
     record_rejections: outcome.rejections,
+    ...(source.type === 'document'
+      ? {
+        document_processing: {
+          parser: { ...DOCUMENT_BUNDLE_PARSER },
+          limits: { ...(version.document_limits ?? DEFAULT_DOCUMENT_PARSE_LIMITS) },
+        },
+      }
+      : {}),
   };
   dataset.releases.push(release);
 
@@ -433,6 +492,14 @@ function view(dataset: DatasetArtifact, release: DatasetReleaseRecord): Record<s
     pins: { ...release.pins },
     record_rejection_count: release.record_rejections.length,
     record_rejections: release.record_rejections.map((rejection) => ({ ...rejection })),
+    ...(release.document_processing === undefined
+      ? {}
+      : {
+        document_processing: {
+          parser: { ...release.document_processing.parser },
+          limits: { ...release.document_processing.limits },
+        },
+      }),
     provenance: {
       batch_ids: [...release.provenance.batch_ids],
       acquisition_run_ids: [...release.provenance.acquisition_run_ids],

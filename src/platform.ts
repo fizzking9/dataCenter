@@ -232,6 +232,10 @@ export function readPlatform(root: string): PlatformState {
   state.data_products ??= [];
   state.data_product_grants ??= [];
   state.exports ??= [];
+  // Documents added no Collection: an Integration Configuration Version may
+  // carry a document envelope and a Dataset Release may name the parser it ran,
+  // and both read as absent on a Deployment written before they existed. A
+  // tabular Release therefore never pretends to have parsed a document.
   // A Run recorded before acquisition was queued still reads as a completed
   // manual attempt rather than a Run that never started.
   for (const run of state.acquisition_runs) {

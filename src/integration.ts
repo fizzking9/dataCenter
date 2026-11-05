@@ -1,12 +1,14 @@
 import { resolveActor } from './auth.js';
 import { actorLabel, reject, type ActionContext } from './authz.js';
 import {
+  DEFAULT_DOCUMENT_PARSE_LIMITS,
   findIntegrationConfiguration,
   latestIntegrationVersion,
   type CleaningRule,
   type CleaningRuleName,
   type DatasetFieldType,
   type DatasetSchemaField,
+  type DocumentParseLimits,
   type IntegrationConfigurationArtifact,
   type IntegrationConfigurationVersion,
 } from './catalog.js';
@@ -33,7 +35,13 @@ function readConfiguration(
   actor: string,
   context: ActionContext,
   path: string,
-): { identity: string[]; schema: DatasetSchemaField[]; cleaning: CleaningRule[]; mapping: Record<string, string> } {
+): {
+  identity: string[];
+  schema: DatasetSchemaField[];
+  cleaning: CleaningRule[];
+  mapping: Record<string, string>;
+  documentLimits: DocumentParseLimits;
+} {
   const parsed: unknown = readJsonDocument(
     path,
     (code, message) => reject(session, actor, context, code, message),
@@ -48,7 +56,8 @@ function readConfiguration(
   const identity = readIdentity(session, actor, context, parsed['identity'], fieldNames);
   const cleaning = readCleaning(session, actor, context, parsed['cleaning'] ?? [], fieldNames);
   const mapping = readMapping(session, actor, context, parsed['mapping'], fieldNames);
-  return { identity, schema, cleaning, mapping };
+  const documentLimits = readDocumentLimits(session, actor, context, parsed['document_limits']);
+  return { identity, schema, cleaning, mapping, documentLimits };
 }
 
 function readSchema(
@@ -175,6 +184,59 @@ function readMapping(
   return mapping;
 }
 
+/** The ceilings a Configuration may raise one document limit to. */
+const DOCUMENT_LIMIT_CEILINGS: DocumentParseLimits = {
+  max_bytes: 67_108_864,
+  max_documents: 100_000,
+  max_text_chars: 5_000_000,
+  max_metadata_fields: 256,
+  max_worker_ms: 60_000,
+  max_heap_mb: 1_024,
+};
+
+/**
+ * Reads the explicit resource envelope documents are parsed under. A limit is
+ * never inferred from the file at hand: it is declared here, the Release pins
+ * it, and a bundle that needs more fails closed rather than being read wider.
+ */
+function readDocumentLimits(
+  session: PlatformSession,
+  actor: string,
+  context: ActionContext,
+  raw: unknown,
+): DocumentParseLimits {
+  if (raw === undefined) return { ...DEFAULT_DOCUMENT_PARSE_LIMITS };
+  if (!isRecord(raw)) {
+    reject(session, actor, context, 'INTEGRATION_CONFIGURATION_INVALID', 'Document limits must be a JSON object.');
+  }
+  const unknown = Object.keys(raw).filter((key) => !(key in DEFAULT_DOCUMENT_PARSE_LIMITS));
+  if (unknown.length > 0) {
+    reject(
+      session,
+      actor,
+      context,
+      'INTEGRATION_CONFIGURATION_INVALID',
+      `Document limits must name only: ${Object.keys(DEFAULT_DOCUMENT_PARSE_LIMITS).join(', ')}. Unknown: ${unknown.join(', ')}.`,
+    );
+  }
+  const limits = { ...DEFAULT_DOCUMENT_PARSE_LIMITS };
+  for (const key of Object.keys(DEFAULT_DOCUMENT_PARSE_LIMITS) as Array<keyof DocumentParseLimits>) {
+    const value = raw[key];
+    if (value === undefined) continue;
+    if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > DOCUMENT_LIMIT_CEILINGS[key]) {
+      reject(
+        session,
+        actor,
+        context,
+        'INTEGRATION_CONFIGURATION_INVALID',
+        `Document limit ${key} must be a whole number between 1 and ${DOCUMENT_LIMIT_CEILINGS[key]}.`,
+      );
+    }
+    limits[key] = value as number;
+  }
+  return limits;
+}
+
 /** The Business Context versions an Integration Configuration is pinned to. */
 function currentPins(
   session: PlatformSession,
@@ -226,6 +288,7 @@ export function publishIntegrationConfiguration(options: {
     schema: configuration.schema,
     cleaning: configuration.cleaning,
     mapping: configuration.mapping,
+    document_limits: configuration.documentLimits,
     schema_hash: digest(configuration.schema),
     cleaning_hash: digest(configuration.cleaning),
     mapping_hash: digest(configuration.mapping),
@@ -234,6 +297,7 @@ export function publishIntegrationConfiguration(options: {
       schema: configuration.schema,
       cleaning: configuration.cleaning,
       mapping: configuration.mapping,
+      document_limits: configuration.documentLimits,
     }),
     pins: currentPins(session, source.workspace_id),
   };

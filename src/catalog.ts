@@ -5,8 +5,11 @@
  * Workspace and a missing identifier never resolves across Workspaces.
  */
 
-/** First release acquisition types: a hand-uploaded file or a declarative JSON endpoint. */
-export type SourceType = 'file' | 'http_json';
+/**
+ * First release acquisition types: a hand-uploaded file, a declarative JSON
+ * endpoint, or an uploaded bundle of documents.
+ */
+export type SourceType = 'file' | 'http_json' | 'document';
 
 /** The one connector this release ships, named and versioned so a Plan pins it. */
 export const HTTP_JSON_CONNECTOR = { name: 'http-json', version: 1 } as const;
@@ -39,6 +42,49 @@ export interface DatasetSchemaField {
   type: DatasetFieldType;
 }
 
+/**
+ * The explicit resource envelope one document bundle is parsed under. Every
+ * bound is declared before parsing, and a bundle that would exceed any one of
+ * them fails closed rather than being partly read.
+ */
+export interface DocumentParseLimits {
+  /** The raw bytes one Raw Acquisition may hold. */
+  max_bytes: number;
+  /** How many documents one bundle may state. */
+  max_documents: number;
+  /** How many characters one document's extracted text may hold. */
+  max_text_chars: number;
+  /** How many metadata members one document may carry. */
+  max_metadata_fields: number;
+  /** The wall-clock budget the isolated parse worker is given. */
+  max_worker_ms: number;
+  /** The heap the isolated parse worker may grow to. */
+  max_heap_mb: number;
+}
+
+/** The document parser this release ships, named and versioned so a Release pins it. */
+export const DOCUMENT_BUNDLE_PARSER = { name: 'document-bundle', version: 1 } as const;
+
+/** The envelope a document bundle is parsed under when its Configuration states none. */
+export const DEFAULT_DOCUMENT_PARSE_LIMITS: DocumentParseLimits = {
+  max_bytes: 8_388_608,
+  max_documents: 5_000,
+  max_text_chars: 200_000,
+  max_metadata_fields: 64,
+  max_worker_ms: 5_000,
+  max_heap_mb: 128,
+};
+
+/**
+ * The exact parser and resource envelope one Dataset Release ran. A Release
+ * that curated no document carries none, so a Reader can tell a document
+ * Release from a tabular one without guessing.
+ */
+export interface DocumentProcessingRecord {
+  parser: { name: 'document-bundle'; version: 1 };
+  limits: DocumentParseLimits;
+}
+
 export type CleaningRuleName = 'trim' | 'uppercase' | 'lowercase' | 'default' | 'require_non_empty';
 
 export interface CleaningRule {
@@ -60,6 +106,8 @@ export interface IntegrationConfigurationVersion {
   schema: DatasetSchemaField[];
   cleaning: CleaningRule[];
   mapping: Record<string, string>;
+  /** The resource envelope documents are parsed under; unstated takes the default. */
+  document_limits?: DocumentParseLimits;
   schema_hash: string;
   cleaning_hash: string;
   mapping_hash: string;
@@ -350,6 +398,11 @@ export interface ConnectionPacingRecord {
 export interface DatasetRecordRow {
   identity: string;
   values: Record<string, string | number | null>;
+  /**
+   * The Raw Acquisition this record was read from, and its locator inside it.
+   * A tabular record carries none; a curated document always names both.
+   */
+  raw?: { raw_id: string; locator: string };
 }
 
 export type RejectionRule = 'identity' | 'type' | CleaningRuleName;
@@ -392,6 +445,8 @@ export interface DatasetReleaseRecord {
   };
   records: DatasetRecordRow[];
   record_rejections: RecordRejection[];
+  /** The parser and resource envelope this Release ran, when it curates documents. */
+  document_processing?: DocumentProcessingRecord;
 }
 
 /** A Dataset Artifact and its ordered, append-only Releases. */
@@ -430,6 +485,29 @@ export interface DataProductTime {
   time_zone: string;
 }
 
+/** How a Document Contract ranks the documents one search matches. */
+export interface DataProductSearchRanking {
+  kind: 'weighted_term_frequency';
+  title_weight: number;
+  text_weight: number;
+}
+
+/**
+ * The search capability a Document Contract declares: which field carries the
+ * extracted text, where a title weight applies, which fields suggest terms, and
+ * the ranking it returns. A Contract that declares none cannot be searched.
+ */
+export interface DataProductSearch {
+  text_field: string;
+  title_field?: string;
+  suggest_fields: string[];
+  ranking: DataProductSearchRanking;
+  /** How many distinct terms one query may state. */
+  max_terms: number;
+  /** The shortest term the index keeps. */
+  min_term_length: number;
+}
+
 /** The resource envelope one Data Product Query may consume. */
 export interface DataProductQueryLimits {
   max_scanned_records: number;
@@ -457,6 +535,8 @@ export interface DataProductContract {
   max_limit: number;
   /** The resource envelope one query may consume, distinct from its page size. */
   limits: DataProductQueryLimits;
+  /** The search capability this Contract declares; absent means it cannot be searched. */
+  search?: DataProductSearch;
 }
 
 export interface DataProductVersion {

@@ -3,11 +3,13 @@ import {
   ISO_TIMESTAMP,
   type DataProductContract,
   type DataProductMetric,
+  type DataProductSearch,
   type DataProductTime,
   type DatasetSchemaField,
 } from './catalog.js';
 import { isRecord } from './documents.js';
 import type { Fail } from './errors.js';
+import { readSearchTerms } from './product-search.js';
 
 export type QueryOperator =
   | 'equals'
@@ -37,6 +39,10 @@ const AGGREGATE_KEYS = [
   'kind', 'group_by', 'metrics', 'filters', 'metric_filters',
   'include_totals', 'sort', 'limit', 'window', 'comparison', 'cursor', 'release', 'major',
 ];
+/** A search or a suggestion reads the same page cursor and Release a record query does. */
+const SEARCH_KEYS = ['kind', 'q', 'limit', 'cursor', 'release', 'major'];
+/** A query states the text it looks for; it never hands the platform a document to read. */
+const MAX_QUERY_LENGTH = 1024;
 
 /** A request the Query document itself cannot express, whatever the Contract says. */
 const MALFORMED = 'DATA_PRODUCT_QUERY_INVALID';
@@ -78,6 +84,14 @@ export interface QueryTarget {
 
 export type ParsedQuery =
   | { kind: 'records'; filters: QueryFilter[]; limit: number; window?: Window }
+  | {
+    kind: 'search';
+    /** The capability the Contract declared, already proven to exist. */
+    search: DataProductSearch;
+    terms: string[];
+    limit: number;
+  }
+  | { kind: 'suggest'; search: DataProductSearch; q: string; limit: number }
   | {
     kind: 'aggregate';
     groupBy: string[];
@@ -406,5 +420,34 @@ export function readQuery(
     readShape(parsed, AGGREGATE_KEYS, 'aggregate', fail);
     return readAggregate(parsed, contract, schema, fail);
   }
-  fail(MALFORMED, 'A Data Product Query must state whether it reads records or aggregates.');
+  if (kind === 'search' || kind === 'suggest') {
+    readShape(parsed, SEARCH_KEYS, kind, fail);
+    const search = contract.search;
+    if (search === undefined) {
+      fail(REFUSED, 'This Data Product Contract publishes no search, so it cannot answer a search or a suggestion.');
+    }
+    const q = parsed['q'];
+    if (typeof q !== 'string' || q.trim().length === 0) {
+      fail(MALFORMED, 'A search or a suggestion must state the text it looks for.');
+    }
+    if ([...q].length > MAX_QUERY_LENGTH) {
+      fail(MALFORMED, `A search may not state more than ${MAX_QUERY_LENGTH} characters.`);
+    }
+    const limit = readLimit(parsed['limit'], contract, fail);
+    if (kind === 'suggest') {
+      return { kind: 'suggest', search, q: q.trim(), limit };
+    }
+    const terms = readSearchTerms(search, q);
+    if (terms.length === 0) {
+      fail(
+        REFUSED,
+        `Every term this search states is shorter than the ${search.min_term_length} characters the Contract indexes.`,
+      );
+    }
+    if (terms.length > search.max_terms) {
+      fail(REFUSED, `This search states ${terms.length} terms, beyond the ${search.max_terms} the Contract permits.`);
+    }
+    return { kind: 'search', search, terms, limit };
+  }
+  fail(MALFORMED, 'A Data Product Query must state whether it reads records, aggregates, searches, or suggests.');
 }
