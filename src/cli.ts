@@ -36,7 +36,7 @@ import { adoptIntegrationConfiguration, publishIntegrationConfiguration } from '
 import { publishModelBinding, revokeModelBinding, showModelBinding } from './model-binding.js';
 import { activateModelProfile, evaluateModelProfile, publishModelProfile, showModelProfile } from './model-profile.js';
 import { importLicense, readLicenseSummary } from './license.js';
-import { askDataProduct } from './natural-language-query.js';
+import { askDataProduct, askWorkspaceQuery } from './natural-language-query.js';
 import { queryDataProduct } from './product-query.js';
 import { listDataProductReleases, listDataProducts, publishDataProduct, withdrawDataProductVersion } from './products.js';
 import {
@@ -462,13 +462,23 @@ async function main(): Promise<void> {
     return;
   }
   if (command === 'product' && subcommand === 'ask') {
-    emit(await askDataProduct({
+    // A Natural-Language Query names either one Data Product or one Workspace,
+    // never both, so the turn's authority is always explicit.
+    const dataProductId = options.get('product');
+    const workspaceId = options.get('workspace');
+    if ((dataProductId === undefined) === (workspaceId === undefined)) {
+      throw new Error('product ask requires exactly one of --product or --workspace.');
+    }
+    const shared = {
       ...governed(options),
-      dataProductId: required(options, 'product'),
       question: required(options, 'question'),
       ...(options.has('clarification') ? { clarification: required(options, 'clarification') } : {}),
       ...(options.has('binding') ? { bindingId: required(options, 'binding') } : {}),
-    }));
+      ...(options.has('conversation') ? { conversation: required(options, 'conversation') } : {}),
+    };
+    emit(dataProductId !== undefined
+      ? await askDataProduct({ ...shared, dataProductId })
+      : await askWorkspaceQuery({ ...shared, workspaceId: required(options, 'workspace') }));
     return;
   }
   if (command === 'grant' && subcommand === 'publish') {
