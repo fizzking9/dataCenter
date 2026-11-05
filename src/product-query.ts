@@ -4,10 +4,13 @@ import {
   type DataProductArtifact,
   type DataProductContract,
   type DataProductMetric,
+  type DataProductRelationship,
   type DataProductTime,
+  type DatasetArtifact,
   type DatasetRecordRow,
   type DatasetReleaseRecord,
   type DatasetSchemaField,
+  type SourceRecord,
 } from './catalog.js';
 import { canonicalDigest } from './crypto.js';
 import { readJsonDocument } from './documents.js';
@@ -19,7 +22,15 @@ import { evaluateAggregate, orderGroups, type EvaluatedGroup, type MetricValue }
 import { queryCacheKey, readCachedPage, writeCachedPage } from './product-cache.js';
 import { decodeCursor, encodeCursor } from './product-cursor.js';
 import { periodComplete, sameElapsedInterval } from './product-period.js';
-import { readQuery, readQueryTarget, type ParsedQuery, type QueryOperator, type QueryTarget, type Window } from './product-query-document.js';
+import {
+  readQuery,
+  readQueryTarget,
+  type IncludeSpec,
+  type ParsedQuery,
+  type QueryOperator,
+  type QueryTarget,
+  type Window,
+} from './product-query-document.js';
 import { resolveRelease, type ResolvedRelease } from './product-release.js';
 import { orderSearchHits, searchRecords, suggestValues } from './product-search.js';
 import { requireReadableProduct } from './products.js';
@@ -268,6 +279,144 @@ function orderRecords(records: DatasetRecordRow[], contract: DataProductContract
   });
 }
 
+/** One declared relationship resolved to the exact Dataset Release it was bound to. */
+interface LinkedDataset {
+  relationship: DataProductRelationship;
+  dataset: DatasetArtifact;
+  datasetRelease: DatasetReleaseRecord;
+  schema: DatasetSchemaField[];
+  source: SourceRecord | undefined;
+}
+
+/**
+ * Resolves every relationship the Release bound to the Dataset Release it pinned.
+ * A linked record is read from the Release the Data Product Release names, never
+ * from the newest data, so an answer stays reproducible.
+ */
+function linkedDatasets(
+  session: PlatformSession,
+  contract: DataProductContract,
+  release: { release: number; relationships?: Array<{ name: string; dataset_id: string; dataset_release: number }> },
+  fail: Fail,
+): LinkedDataset[] {
+  return (release.relationships ?? []).map((binding) => {
+    const relationship = (contract.relationships ?? []).find((candidate) => candidate.name === binding.name);
+    if (relationship === undefined) {
+      fail(
+        'DATA_PRODUCT_RELEASE_INVALID',
+        `Data Product Release ${release.release} links a relationship its Contract does not declare.`,
+      );
+    }
+    const dataset = session.state.datasets.find((candidate) => candidate.dataset_id === binding.dataset_id);
+    const datasetRelease = dataset?.releases.find((candidate) => candidate.release === binding.dataset_release);
+    if (!dataset || !datasetRelease) {
+      fail(
+        'DATASET_RELEASE_NOT_FOUND',
+        `The Dataset Release the ${relationship.name} relationship pins is not available.`,
+      );
+    }
+    const schema = session.state.integration_configurations
+      .find((artifact) => artifact.source_id === dataset.source_id)
+      ?.versions.find((candidate) => candidate.version === datasetRelease.integration_configuration_version)
+      ?.schema ?? [];
+    const source = session.state.sources.find((candidate) => candidate.source_id === dataset.source_id);
+    return { relationship, dataset, datasetRelease, schema, source };
+  });
+}
+
+/** The base columns one reader may project, in the Contract's own order. */
+function permittedBaseColumns(contract: DataProductContract, scope: GrantScope): string[] {
+  return contract.fields.map((field) => field.name).filter((name) => scope.columns.includes(name));
+}
+
+/** The linked columns one reader may project, in the relationship's own order. */
+function permittedLinkedColumns(relationship: DataProductRelationship, scope: GrantScope): string[] {
+  return relationship.fields
+    .map((field) => field.name)
+    .filter((name) => scope.columns.includes(`${relationship.name}.${name}`));
+}
+
+/** Whether a Grant permits any field of one relationship at all. */
+function visibleRelationship(relationship: DataProductRelationship, scope: GrantScope): boolean {
+  return permittedLinkedColumns(relationship, scope).length > 0;
+}
+
+/**
+ * Orders linked records the way the relationship's own grain says they are one
+ * record, so a many relationship answers the same sequence on every read.
+ */
+function orderLinkedRecords(records: DatasetRecordRow[], relationship: DataProductRelationship): DatasetRecordRow[] {
+  return [...records].sort((left, right) => {
+    for (const field of relationship.grain) {
+      const comparison = compareValues(left.values[field] ?? null, right.values[field] ?? null);
+      if (comparison !== 0) return comparison;
+    }
+    if (left.identity === right.identity) return 0;
+    return left.identity < right.identity ? -1 : 1;
+  });
+}
+
+/** A missing join value reaches nothing, because a link names equal values, not equal absence. */
+function joinKey(values: Array<string | number | null>): string | null {
+  return values.some((value) => value === null) ? null : JSON.stringify(values);
+}
+
+/**
+ * Reads one included relationship the way its record grain and cardinality
+ * declare: every linked record falls under exactly one base record, so reading
+ * links never multiplies the records, the counts, or the metrics of the product.
+ */
+function linkedIndex(datasetRelease: DatasetReleaseRecord, spec: IncludeSpec): Map<string, DatasetRecordRow[]> {
+  const { relationship, filters } = spec;
+  const relatedFields = Object.keys(relationship.on).map((local) => relationship.on[local]!);
+  const index = new Map<string, DatasetRecordRow[]>();
+  for (const record of datasetRelease.records) {
+    if (!filters.every((filter) => matches(record.values[filter.field] ?? null, filter.op, filter.value))) continue;
+    const key = joinKey(relatedFields.map((field) => record.values[field] ?? null));
+    if (key === null) continue;
+    const bucket = index.get(key);
+    if (bucket === undefined) index.set(key, [record]);
+    else bucket.push(record);
+  }
+  for (const [key, rows] of index) index.set(key, orderLinkedRecords(rows, relationship));
+  return index;
+}
+
+function projectLinkedRecord(
+  record: DatasetRecordRow,
+  relationship: DataProductRelationship,
+  scope: GrantScope,
+): Record<string, string | number | null> {
+  return Object.fromEntries(
+    permittedLinkedColumns(relationship, scope).map((name) => [name, record.values[name] ?? null]),
+  );
+}
+
+/**
+ * The linked records of one base record: exactly one record or an explicit null
+ * for a one relationship, and a bounded, ordered list for a many relationship.
+ */
+function linkedValue(
+  base: DatasetRecordRow,
+  spec: IncludeSpec,
+  index: Map<string, DatasetRecordRow[]>,
+  scope: GrantScope,
+): unknown {
+  const relationship = spec.relationship;
+  const key = joinKey(Object.keys(relationship.on).map((local) => base.values[local] ?? null));
+  const rows = key === null ? [] : index.get(key) ?? [];
+  if (relationship.cardinality === 'one') {
+    const record = rows[0];
+    return record === undefined ? null : projectLinkedRecord(record, relationship, scope);
+  }
+  const page = rows.slice(0, relationship.limit);
+  return {
+    records: page.map((record) => projectLinkedRecord(record, relationship, scope)),
+    returned: page.length,
+    truncated: rows.length > relationship.limit,
+  };
+}
+
 /** The query itself, minus the page position, so a cursor pins what it answered. */
 function normalizeQuery(
   query: ParsedQuery,
@@ -282,7 +431,15 @@ function normalizeQuery(
     return { release, major, scope: scopeFingerprint, kind: 'suggest', q: query.q };
   }
   if (query.kind === 'records') {
-    return { release, major, scope: scopeFingerprint, kind: 'records', filters: query.filters, window: query.window ?? null };
+    return {
+      release,
+      major,
+      scope: scopeFingerprint,
+      kind: 'records',
+      filters: query.filters,
+      window: query.window ?? null,
+      include: query.include.map((spec) => ({ relationship: spec.relationship.name, filters: spec.filters })),
+    };
   }
   return {
     release,
@@ -327,7 +484,29 @@ function requireGrantPermits(query: ParsedQuery, scope: GrantScope, fail: Fail):
       );
     }
   }
-  if (query.kind !== 'aggregate') return;
+  if (query.kind !== 'aggregate') {
+    if (query.kind === 'records') {
+      for (const spec of query.include) {
+        if (!visibleRelationship(spec.relationship, scope)) {
+          fail(
+            'DATA_PRODUCT_QUERY_REFUSED',
+            `The ${spec.relationship.name} relationship publishes no column this Grant permits, so it cannot be included.`,
+            'Query only the relationships and columns the Grant permits.',
+          );
+        }
+        for (const filter of spec.filters) {
+          if (!scope.columns.includes(`${spec.relationship.name}.${filter.field}`)) {
+            fail(
+              'DATA_PRODUCT_QUERY_REFUSED',
+              `The ${spec.relationship.name}.${filter.field} column is not one this Grant permits, so it cannot filter the linked records.`,
+              'Query only the relationships and columns the Grant permits.',
+            );
+          }
+        }
+      }
+    }
+    return;
+  }
   for (const dimension of query.groupBy) {
     if (!scope.columns.includes(dimension)) {
       fail(
@@ -468,8 +647,10 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
   const definitions = pinnedMetricDefinitions(session, dataset.workspace_id, datasetRelease.pins);
   const directionOf = (metric: DataProductMetric): ContextEntry['favorable_direction'] =>
     metric.definition === undefined ? undefined : definitions.get(metric.definition)?.favorable_direction;
+  const linked = linkedDatasets(session, contract, release, fail);
+  const relatedSchemas = Object.fromEntries(linked.map((entry) => [entry.relationship.name, entry.schema]));
 
-  const query = readQuery(request as Record<string, unknown>, contract, schema, fail);
+  const query = readQuery(request as Record<string, unknown>, contract, schema, fail, relatedSchemas);
   const scope = reader.requireScope(product, contract, fail);
   requireGrantPermits(query, scope, fail);
   const queryHash = canonicalDigest(normalizeQuery(query, release.release, major, scope.fingerprint));
@@ -490,7 +671,15 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
     limit: query.limit,
   });
 
-  const scanned = datasetRelease.records.length;
+  // Reading a linked record set scans that Release too, so the declared resource
+  // envelope holds the same total whether or not a query follows its links.
+  const linkedScanned = query.kind === 'records'
+    ? query.include.reduce((total, spec) => {
+      const entry = linked.find((candidate) => candidate.relationship.name === spec.relationship.name);
+      return total + (entry?.datasetRelease.records.length ?? 0);
+    }, 0)
+    : 0;
+  const scanned = datasetRelease.records.length + linkedScanned;
   // A narrowed reader must not learn the size of the population they cannot
   // see, so the reported scan, the time coverage, and the Release provenance
   // describe only the rows their Grants permit. The declared limits still
@@ -517,6 +706,24 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
     acquired_at: datasetRelease.provenance.acquired_at,
     integrated_at: datasetRelease.provenance.integrated_at,
     released_at: datasetRelease.created_at,
+    // A relationship the Grant withholds entirely is not disclosed here either:
+    // Provenance explains what the reader was permitted to read, not what else
+    // the Release happens to link.
+    relationships: linked
+      .filter((entry) => visibleRelationship(entry.relationship, scope))
+      .map((entry) => ({
+        name: entry.relationship.name,
+        cardinality: entry.relationship.cardinality,
+        source: { source_id: entry.dataset.source_id, name: entry.source?.name ?? null },
+        dataset_id: entry.dataset.dataset_id,
+        dataset_release: entry.datasetRelease.release,
+        integration_configuration_version: entry.datasetRelease.integration_configuration_version,
+        business_context: { ...entry.datasetRelease.pins },
+        record_count: entry.datasetRelease.record_count,
+        acquired_at: entry.datasetRelease.provenance.acquired_at,
+        integrated_at: entry.datasetRelease.provenance.integrated_at,
+        released_at: entry.datasetRelease.created_at,
+      })),
   };
   const identity = {
     data_product_id: product.data_product_id,
@@ -563,6 +770,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
   };
 
   if (query.kind === 'search') {
+    const baseColumns = permittedBaseColumns(contract, scope);
     const hits = orderSearchHits(
       searchRecords(permittedRows, query.search, query.terms, scope.columns),
       contract,
@@ -571,7 +779,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
     const page = hits.slice(offset, offset + query.limit);
     const records = page.map((hit) => {
       const values: Record<string, string | number | null> = {};
-      for (const name of scope.columns) {
+      for (const name of baseColumns) {
         values[name] = hit.record.values[name] ?? null;
       }
       return { ...values, score: hit.score, matched_terms: [...hit.matched] };
@@ -589,7 +797,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
       kind: 'search',
       query: { terms: [...query.terms], text_field: query.search.text_field },
       ranking: { ...query.search.ranking },
-      columns: [...scope.columns],
+      columns: [...baseColumns],
       records,
       matched_count: hits.length,
       returned: records.length,
@@ -630,6 +838,11 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
   }
 
   if (query.kind === 'records') {
+    const baseColumns = permittedBaseColumns(contract, scope);
+    const included = query.include.map((spec) => {
+      const entry = linked.find((candidate) => candidate.relationship.name === spec.relationship.name)!;
+      return { spec, index: linkedIndex(entry.datasetRelease, spec) };
+    });
     const selected = orderRecords(
       selectRecords(datasetRelease.records, contract, queryFilters, query.window),
       contract,
@@ -638,10 +851,15 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
     const page = selected.slice(offset, offset + query.limit);
     const projected = page.map((record) => {
       const values: Record<string, string | number | null> = {};
-      for (const name of scope.columns) {
+      for (const name of baseColumns) {
         values[name] = record.values[name] ?? null;
       }
-      return values;
+      if (included.length === 0) return values;
+      const links: Record<string, unknown> = {};
+      for (const { spec, index } of included) {
+        links[spec.relationship.name] = linkedValue(record, spec, index, scope);
+      }
+      return { ...values, linked: links };
     });
     const more = offset + projected.length < selected.length;
     requireBudget();
@@ -654,7 +872,10 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
     return remember({
       ...identity,
       kind: 'records',
-      columns: [...scope.columns],
+      columns: [...baseColumns],
+      ...(included.length === 0
+        ? {}
+        : { linked: included.map(({ spec }) => spec.relationship.name) }),
       records: projected,
       matched_count: selected.length,
       returned: projected.length,
@@ -668,7 +889,7 @@ export function executeDataProductQuery(options: DataProductQueryExecution): Rec
         })
         : null,
       limit: query.limit,
-      scanned_records: permitted,
+      scanned_records: permitted + linkedScanned,
       ...(query.window === undefined || contract.time === undefined
         ? { window: null }
         : { window: windowView(contract.time, query.window, coverage) }),

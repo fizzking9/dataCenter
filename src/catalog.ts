@@ -555,6 +555,29 @@ export interface DataProductQueryLimits {
 }
 
 /**
+ * One declared link from a Contract's own record grain to another Dataset of the
+ * same Workspace. Its cardinality says whether one base record reaches at most
+ * one related record or several, and its own grain says what one linked record
+ * is — so a link can be read without fanning metrics out.
+ */
+export interface DataProductRelationship {
+  /** The name a Consumer includes and a Grant permits columns of. */
+  name: string;
+  description?: string;
+  cardinality: 'one' | 'many';
+  /** Published base-side fields, each mapped to the related Dataset Schema field it equals. */
+  on: Record<string, string>;
+  /** The related Dataset Schema fields this link publishes. */
+  fields: Array<{ name: string; description?: string }>;
+  /** The related Dataset Schema fields that identify exactly one linked record. */
+  grain: string[];
+  /** The related fields a Consumer may filter the linked records by. */
+  filters: string[];
+  /** The most linked records one base record returns from a many relationship. */
+  limit: number;
+}
+
+/**
  * The Consumer-facing Contract of a Data Product. It names the fields a Consumer
  * may read, the dimensions they may group by, the metrics they may request, the
  * record grain, and the time field, and nothing about the Dataset behind them.
@@ -576,6 +599,11 @@ export interface DataProductContract {
   limits: DataProductQueryLimits;
   /** The search capability this Contract declares; absent means it cannot be searched. */
   search?: DataProductSearch;
+  /**
+   * The other Datasets this Contract links to its own records. A Contract that
+   * declares none publishes one Dataset and can link to nothing.
+   */
+  relationships?: DataProductRelationship[];
 }
 
 export interface DataProductVersion {
@@ -673,6 +701,11 @@ export interface DataProductRelease {
   data_product_version: number;
   dataset_id: string;
   dataset_release: number;
+  /**
+   * The exact Dataset Release each declared relationship was bound to, so a
+   * linked record is reproducible under the Release rather than the latest data.
+   */
+  relationships?: Array<{ name: string; dataset_id: string; dataset_release: number }>;
   created_at: string;
   created_by: string;
 }

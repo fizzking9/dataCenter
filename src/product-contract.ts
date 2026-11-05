@@ -2,6 +2,7 @@ import {
   type DataProductContract,
   type DataProductMetric,
   type DataProductQueryLimits,
+  type DataProductRelationship,
   type DataProductSearch,
   type DataProductSearchRanking,
   type DataProductTime,
@@ -17,6 +18,11 @@ const TITLE_MAXIMUM = 128;
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 1000;
 const LIMIT_CEILING = 10000;
+/** The key a record query uses to carry its linked records, so no base field may own it. */
+const LINKED_KEY = 'linked';
+const RELATIONSHIP_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+const RELATIONSHIP_CARDINALITIES: Array<DataProductRelationship['cardinality']> = ['one', 'many'];
+const RELATIONSHIP_LIMIT_CEILING = 1000;
 
 const METRIC_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 const DEFINITION_KEY = /^[a-z][a-z0-9_]{1,63}$/;
@@ -82,11 +88,15 @@ function readNameList(
  * Validates one already-parsed Contract document against the exact Dataset
  * Schema behind it. Generation and publication both reach this function, so a
  * generated candidate is never validated by a second Contract model.
+ *
+ * A Contract that links to other Datasets is validated against each related
+ * Dataset Schema as well, keyed by the relationship name the Contract declares.
  */
 export function parseContract(
   fail: Fail,
   document: Record<string, unknown>,
   schema: DatasetSchemaField[],
+  related: Record<string, DatasetSchemaField[]> = {},
 ): DataProductContract {
   const parsed: Record<string, unknown> = document;
   const title = typeof parsed['title'] === 'string' ? parsed['title'].trim() : '';
@@ -107,6 +117,7 @@ export function parseContract(
   const { defaultLimit, maxLimit } = readPageLimits(fail, parsed['limit']);
   const limits = readQueryLimits(fail, parsed['limits']);
   const search = readSearch(fail, parsed['search'], fields, schema);
+  const relationships = readRelationships(fail, parsed['relationships'], fields, dimensions, metrics, schema, related);
 
   return {
     title,
@@ -121,11 +132,17 @@ export function parseContract(
     max_limit: maxLimit,
     limits,
     ...(search === undefined ? {} : { search }),
+    ...(relationships.length === 0 ? {} : { relationships }),
   };
 }
 
 /** Reads one Contract file and validates it exactly as a generated candidate is. */
-export function readContract(fail: Fail, path: string, schema: DatasetSchemaField[]): DataProductContract {
+export function readContract(
+  fail: Fail,
+  path: string,
+  schema: DatasetSchemaField[],
+  related: Record<string, DatasetSchemaField[]> = {},
+): DataProductContract {
   const parsed = readJsonDocument(
     path,
     fail,
@@ -135,7 +152,7 @@ export function readContract(fail: Fail, path: string, schema: DatasetSchemaFiel
   if (!isRecord(parsed)) {
     fail('DATA_PRODUCT_CONTRACT_INVALID', 'A Data Product Contract must be a JSON object.');
   }
-  return parseContract(fail, parsed, schema);
+  return parseContract(fail, parsed, schema, related);
 }
 
 function readFields(fail: Fail, raw: unknown, schema: DatasetSchemaField[]): DataProductContract['fields'] {
@@ -362,6 +379,185 @@ function resolvesTimeZone(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Reads the other Datasets a Contract links to its own records, proving each
+ * declared join really compares a published field with a field of the Dataset
+ * that relationship was bound to, that the linked records have their own record
+ * grain, and that a one relationship cannot promise more than one record.
+ *
+ * Nothing here reaches a record: whether the declared grain and cardinality
+ * really hold over the pinned Release is proven at Publication.
+ */
+function readRelationships(
+  fail: Fail,
+  raw: unknown,
+  fields: DataProductContract['fields'],
+  dimensions: string[],
+  metrics: DataProductMetric[],
+  schema: DatasetSchemaField[],
+  related: Record<string, DatasetSchemaField[]>,
+): DataProductRelationship[] {
+  const candidates = raw ?? [];
+  if (!Array.isArray(candidates)) {
+    fail('DATA_PRODUCT_CONTRACT_INVALID', 'Contract relationships must be an array of declared relationships.');
+  }
+  const relationships: DataProductRelationship[] = [];
+  for (const candidate of candidates) {
+    if (!isRecord(candidate) || typeof candidate['name'] !== 'string' || !RELATIONSHIP_NAME.test(candidate['name'])) {
+      fail('DATA_PRODUCT_CONTRACT_INVALID', 'Each relationship name must be a lowercase identifier of up to 64 characters.');
+    }
+    const name = candidate['name'];
+    if (relationships.some((relationship) => relationship.name === name)) {
+      fail('DATA_PRODUCT_CONTRACT_INVALID', 'Each relationship name must appear once.');
+    }
+    if (fields.some((field) => field.name === name)
+      || dimensions.includes(name)
+      || metrics.some((metric) => metric.name === name)) {
+      fail('DATA_PRODUCT_CONTRACT_INVALID', `${name} is already a published field, dimension, or metric, so it cannot name a relationship.`);
+    }
+    if (fields.some((field) => field.name === LINKED_KEY)) {
+      fail(
+        'DATA_PRODUCT_CONTRACT_INVALID',
+        `A record query carries its linked records under ${LINKED_KEY}, so a linking Contract cannot publish a field named ${LINKED_KEY}.`,
+      );
+    }
+    const relatedSchema = related[name];
+    if (relatedSchema === undefined) {
+      fail(
+        'DATA_PRODUCT_CONTRACT_INVALID',
+        `The ${name} relationship links to a Dataset this Publication did not bind, so its join has no governed meaning.`,
+      );
+    }
+    const cardinality = candidate['cardinality'] as DataProductRelationship['cardinality'];
+    if (!RELATIONSHIP_CARDINALITIES.includes(cardinality)) {
+      fail('DATA_PRODUCT_CONTRACT_INVALID', `The ${name} relationship cardinality must be one of: ${RELATIONSHIP_CARDINALITIES.join(', ')}.`);
+    }
+    const description = candidate['description'];
+    if (description !== undefined && typeof description !== 'string') {
+      fail('DATA_PRODUCT_CONTRACT_INVALID', `The ${name} relationship description must be a string.`);
+    }
+    const on = readJoin(fail, name, candidate['on'], fields, schema, relatedSchema);
+    const relatedFields = readRelatedFields(fail, name, candidate['fields'], relatedSchema);
+    const grain = readRelatedGrain(fail, name, candidate['grain'], relatedSchema);
+    const filters = readNameList(fail, candidate['filters'], relatedFields.map((field) => field.name), {
+      notArray: `The ${name} relationship filters must be an array of fields it publishes.`,
+      invalid: `Each ${name} relationship filter must be one of its published fields.`,
+    });
+    const limit = readRelationshipLimit(fail, name, cardinality, candidate['limit']);
+    relationships.push({
+      name,
+      ...(typeof description === 'string' ? { description } : {}),
+      cardinality,
+      on,
+      fields: relatedFields,
+      grain,
+      filters,
+      limit,
+    });
+  }
+  return relationships;
+}
+
+/** Reads the join, proving both sides compare the same kind of value. */
+function readJoin(
+  fail: Fail,
+  name: string,
+  raw: unknown,
+  fields: DataProductContract['fields'],
+  schema: DatasetSchemaField[],
+  relatedSchema: DatasetSchemaField[],
+): Record<string, string> {
+  if (!isRecord(raw) || Object.keys(raw).length === 0) {
+    fail('DATA_PRODUCT_CONTRACT_INVALID', `The ${name} relationship must state the join from a published field to a related field.`);
+  }
+  const published = fields.map((field) => field.name);
+  const on: Record<string, string> = {};
+  for (const [local, target] of Object.entries(raw)) {
+    if (!published.includes(local)) {
+      fail('DATA_PRODUCT_CONTRACT_INVALID', `The ${name} relationship joins on ${local}, which the Contract does not publish.`);
+    }
+    if (typeof target !== 'string' || !relatedSchema.some((field) => field.name === target)) {
+      fail('DATA_PRODUCT_CONTRACT_INVALID', `The ${name} relationship joins ${local} to a field the related Dataset does not hold.`);
+    }
+    const localField = schema.find((field) => field.name === local)!;
+    const targetField = relatedSchema.find((field) => field.name === target)!;
+    if (localField.type !== targetField.type) {
+      fail(
+        'DATA_PRODUCT_CONTRACT_INVALID',
+        `The ${name} relationship joins a ${localField.type} field to a ${targetField.type} field, so the two records could never be the same value.`,
+      );
+    }
+    on[local] = target;
+  }
+  return on;
+}
+
+function readRelatedFields(
+  fail: Fail,
+  name: string,
+  raw: unknown,
+  relatedSchema: DatasetSchemaField[],
+): DataProductRelationship['fields'] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    fail('DATA_PRODUCT_CONTRACT_INVALID', `The ${name} relationship must publish at least one field of its related Dataset.`);
+  }
+  const declared: DataProductRelationship['fields'] = [];
+  for (const candidate of raw) {
+    if (!isRecord(candidate) || typeof candidate['name'] !== 'string') {
+      fail('DATA_PRODUCT_CONTRACT_INVALID', `Each ${name} relationship field must name a field of the related Dataset.`);
+    }
+    const field = candidate['name'];
+    if (!relatedSchema.some((candidateField) => candidateField.name === field)) {
+      fail('DATA_PRODUCT_CONTRACT_INVALID', `${field} is not a field of the Dataset the ${name} relationship links to.`);
+    }
+    if (declared.some((candidateField) => candidateField.name === field)) {
+      fail('DATA_PRODUCT_CONTRACT_INVALID', `Each ${name} relationship field must appear once.`);
+    }
+    const fieldDescription = candidate['description'];
+    declared.push({
+      name: field,
+      ...(typeof fieldDescription === 'string' ? { description: fieldDescription } : {}),
+    });
+  }
+  return declared;
+}
+
+function readRelatedGrain(
+  fail: Fail,
+  name: string,
+  raw: unknown,
+  relatedSchema: DatasetSchemaField[],
+): string[] {
+  const grain = readNameList(fail, raw, relatedSchema.map((field) => field.name), {
+    notArray: `The ${name} relationship grain must be an array of related Dataset fields.`,
+    invalid: `Each ${name} relationship grain field must be a field of the related Dataset.`,
+  });
+  if (grain.length === 0) {
+    fail('DATA_PRODUCT_CONTRACT_INVALID', `The ${name} relationship must declare the grain that identifies one linked record.`);
+  }
+  return grain;
+}
+
+function readRelationshipLimit(
+  fail: Fail,
+  name: string,
+  cardinality: DataProductRelationship['cardinality'],
+  raw: unknown,
+): number {
+  const fallback = cardinality === 'one' ? 1 : 50;
+  const limit = raw ?? fallback;
+  if (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > RELATIONSHIP_LIMIT_CEILING) {
+    fail(
+      'DATA_PRODUCT_CONTRACT_INVALID',
+      `The ${name} relationship limit must be a whole number between 1 and ${RELATIONSHIP_LIMIT_CEILING}.`,
+    );
+  }
+  if (cardinality === 'one' && limit !== 1) {
+    fail('DATA_PRODUCT_CONTRACT_INVALID', `The ${name} relationship reaches at most one record, so its limit is 1.`);
+  }
+  return limit as number;
 }
 
 function readFilters(fail: Fail, raw: unknown, fields: DataProductContract['fields']): string[] {
