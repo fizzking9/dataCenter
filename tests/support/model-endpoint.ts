@@ -24,7 +24,8 @@ export type MockBehaviour =
   | 'unknown_key_plan'
   | 'clarify_metric'
   | 'clarify_dimension'
-  | 'omitted_metrics_plan';
+  | 'omitted_metrics_plan'
+  | 'unpublished_metric_plan';
 
 export interface MockModelEndpoint {
   url: string;
@@ -135,6 +136,14 @@ function queryPlan(body: Record<string, unknown>, behaviour: MockBehaviour): Rec
       query: { kind: 'records', select: 'sn', limit: 10 },
     };
   }
+  if (behaviour === 'unpublished_metric_plan') {
+    return {
+      action: 'query',
+      interpretation: '统计一个未在已发布契约中的指标。',
+      query: { kind: 'aggregate', metrics: ['settled_median'], window: { start: '2026-01-01', end: '2026-01-31' } },
+    };
+  }
+
   if (behaviour === 'clarify_metric') {
     return {
       action: 'clarify',

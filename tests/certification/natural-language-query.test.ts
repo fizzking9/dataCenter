@@ -351,5 +351,58 @@ test('NLQ asks a targeted clarification before executing and discloses governed 
   assert.equal(totalsDefault['value'], true);
 });
 
+test('NLQ returns a distinct structured outcome and limitation for empty, no-evidence, unavailable, and refused turns', async (t) => {
+  const s = await readySurface({ contract: EXTENDED_LEDGER_CONTRACT });
+  t.after(() => s.endpoint.close());
+
+  // Empty: the window holds no rows, so no number is invented.
+  const empty = asOutput(await ask(s, ['--question', '2024-01-01 至 2024-01-31 杭州的处理量合计是多少？']));
+  assert.equal(empty.outcome, 'empty', JSON.stringify(empty));
+  assert.equal(empty.executed, true);
+  assert.equal(empty.reason_code, 'NLQ_EMPTY_RESULT');
+  assert.equal(asRecord(empty.result)['groups_total'], 0);
+  assert.equal(empty.answer, null, 'an empty window never yields a narrated zero');
+  assert.ok((empty.limitations as string[]).some((line) => line.includes('没有记录')), 'the empty case states its limitation');
+
+  // No evidence: rows match, but the governed metric carries no value.
+  const noEvidence = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-01-31 无证据的平均结算金额是多少？']));
+  assert.equal(noEvidence.outcome, 'no_evidence', JSON.stringify(noEvidence));
+  assert.equal(noEvidence.executed, true);
+  assert.equal(noEvidence.reason_code, 'NLQ_NO_EVIDENCE');
+  assert.equal(noEvidence.answer, null);
+  const evidenceGroup = (asRecord(noEvidence.result)['groups'] as Array<Record<string, unknown>>)[0];
+  assert.ok(evidenceGroup, 'the no-evidence read still returns its governed group');
+  assert.equal(asRecord(evidenceGroup['metrics'])['settled_average'], null, 'a missing value is never rendered as a zero');
+  assert.ok((noEvidence.limitations as string[]).some((line) => line.includes('没有可引用的数值')), 'the no-evidence case states its limitation');
+
+  // Refused: the plan asks for a metric the Contract does not publish.
+  s.endpoint.behaviour = 'unpublished_metric_plan';
+  const refused = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-01-31 杭州的平均结算金额合计是多少？']));
+  assert.equal(refused.outcome, 'refused', JSON.stringify(refused));
+  assert.equal(refused.executed, false);
+  assert.equal(refused.reason_code, 'NLQ_METRIC_NOT_PUBLISHED');
+  assert.equal(refused.result, null);
+  assert.equal(refused.answer, null);
+  assert.ok((refused.limitations as string[]).some((line) => line.includes('已发布契约')), 'the refused case states its limitation');
+
+  // Unavailable: the pinned endpoint no longer answers, so nothing executes.
+  await s.endpoint.close();
+  const unavailable = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-01-31 杭州的处理量合计是多少？']));
+  assert.equal(unavailable.outcome, 'unavailable', JSON.stringify(unavailable));
+  assert.equal(unavailable.executed, false);
+  assert.equal(unavailable.result, null);
+  assert.equal(unavailable.answer, null);
+  assert.equal(unavailable.reason_code, 'MODEL_ENDPOINT_UNREACHABLE');
+  assert.ok((unavailable.limitations as string[]).some((line) => line.includes('不可用')), 'the unavailable case states its limitation');
+
+  // Four distinct outcomes, each a structured answer rather than an error page.
+  const outcomes = [empty.outcome, noEvidence.outcome, refused.outcome, unavailable.outcome];
+  assert.equal(new Set(outcomes).size, 4, 'empty, no evidence, refused, and unavailable stay distinct');
+  for (const turn of [empty, noEvidence, refused, unavailable]) {
+    assert.ok((turn.limitations as string[]).length > 0, `${turn.outcome} states an explicit limitation`);
+    assert.ok((turn.limitations as string[]).every((line) => (line.match(/[\u4e00-\u9fff]/gu) ?? []).length >= 4), `${turn.outcome} states it in Chinese`);
+  }
+});
+
 // The remaining acceptance criteria are added one at a time, each red before green.
 void EXTENDED_LEDGER_CONTRACT;
