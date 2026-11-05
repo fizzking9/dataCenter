@@ -65,7 +65,7 @@ const CHINESE = /[\u3400-\u4dbf\u4e00-\u9fff]/u;
 const PARAMETER_TYPES: ReportParameterType[] = ['date_window', 'date', 'integer', 'string'];
 
 /** One refusal the Report path decides before or around the deterministic engine. */
-class ReportGenerationFailure extends Error {
+export class ReportGenerationFailure extends Error {
   readonly code: string;
   readonly nextStep: string | undefined;
 
@@ -77,7 +77,7 @@ class ReportGenerationFailure extends Error {
 }
 
 /** The Contract line and Dataset schema one Template Version pins and generates against. */
-interface ServingContract {
+export interface ServingContract {
   major: number;
   version: DataProductVersion;
   release: DataProductRelease;
@@ -145,7 +145,7 @@ function memberRole(
 }
 
 /** The active (or explicitly named) Contract line and the Dataset schema behind it. */
-function servingContract(
+export function servingContract(
   session: PlatformSession,
   product: DataProductArtifact,
   major?: number,
@@ -155,6 +155,7 @@ function servingContract(
   const version = findDataProductVersion(product, line.current_version);
   const release = findDataProductRelease(product, line.current_release);
   if (!version || !release) return null;
+  if (version.withdrawn_at !== null) return null;
   const dataset = session.state.datasets.find((candidate) => candidate.dataset_id === release.dataset_id);
   const datasetRelease = dataset?.releases.find((candidate) => candidate.release === release.dataset_release);
   if (!dataset || !datasetRelease) return null;
@@ -469,7 +470,7 @@ function interpretationOf(request: Record<string, unknown>, contract: DataProduc
   return `${parts.join('；')}。`;
 }
 
-function templateVersionView(
+export function templateVersionView(
   session: PlatformSession,
   template: ReportTemplateArtifact,
   version: ReportTemplateVersion,
@@ -496,6 +497,7 @@ function templateVersionView(
     freshness_policy: { ...version.freshness_policy },
     published_at: version.published_at,
     published_by: version.published_by,
+    withdrawn_at: version.withdrawn_at,
   };
 }
 
@@ -592,6 +594,8 @@ export function publishReportTemplate(options: {
     grounded_prompt: { id: 'grounded_answer', body: grounded.body, hash: grounded.hash },
     freshness_policy: { ...freshness },
     content_hash: '',
+    withdrawn_at: null,
+    withdrawn_by: null,
   };
   volume.content_hash = canonicalDigest({
     question: volume.question,
@@ -829,7 +833,7 @@ async function narrate(
 }
 
 /** The Chinese limitation lines one Report's completeness states. */
-function completionOf(result: Record<string, unknown>): ReportRecord['completion'] {
+export function completionOf(result: Record<string, unknown>): ReportRecord['completion'] {
   const outcome = classifyResult(result);
   const window = isRecord(result['window']) ? result['window'] : null;
   const partial = window !== null && window['partial'] === true;
@@ -850,12 +854,12 @@ function completionOf(result: Record<string, unknown>): ReportRecord['completion
 
 export interface GenerateReportOptions {
   session: PlatformSession;
-  actor: Actor;
+  actor: { user: UserRecord };
   reader: GrantReader;
   template: ReportTemplateArtifact;
   version: ReportTemplateVersion;
   now: Date;
-  trigger: 'explicit' | 'stock_refresh';
+  trigger: 'explicit' | 'stock_refresh' | 'scheduled';
 }
 
 /**
@@ -867,6 +871,12 @@ export interface GenerateReportOptions {
  */
 export async function generateReport(options: GenerateReportOptions): Promise<ReportRecord> {
   const { session, reader, template, version } = options;
+  if (version.withdrawn_at !== null) {
+    throw new ReportGenerationFailure(
+      'REPORT_TEMPLATE_WITHDRAWN',
+      'The Report Template Version this generation would read has been withdrawn.',
+    );
+  }
   const product = findDataProduct(session.state.data_products, version.data_product_id);
   if (!product || product.workspace_id !== template.workspace_id) {
     throw new ReportGenerationFailure('DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product this Template pins is not available.');
@@ -928,6 +938,8 @@ export async function generateReport(options: GenerateReportOptions): Promise<Re
     freshness_policy: { ...version.freshness_policy },
     generated_at: options.now.toISOString(),
     generated_by: options.actor.user.user_id,
+    withdrawn_at: null,
+    withdrawn_by: null,
   };
   session.state.reports.push(report);
   session.audit({
@@ -973,12 +985,53 @@ export function reportView(report: ReportRecord): Record<string, unknown> {
     freshness_policy: { ...report.freshness_policy },
     generated_at: report.generated_at,
     generated_by: report.generated_by,
+    withdrawn_at: report.withdrawn_at,
+    withdrawn_by: report.withdrawn_by,
   };
 }
 
 /** How old a stocked Report is at the instant the caller asks. */
 export function reportAgeMinutes(report: ReportRecord, now: Date): number {
   return Math.max(0, (now.getTime() - Date.parse(report.generated_at)) / 60_000);
+}
+
+/**
+ * The exact stock a Template Version may reuse for one reader right now, under
+ * the complete current security context. Scheduled runs use the same rule as
+ * interactive reuse, so an unchanged input never executes a second query.
+ */
+export function freshStockReport(options: {
+  session: PlatformSession;
+  reader: GrantReader;
+  template: ReportTemplateArtifact;
+  version: ReportTemplateVersion;
+  now: Date;
+}): { report: ReportRecord; scope: GrantScope; serving: ServingContract } | null {
+  const { session, reader, template, version, now } = options;
+  const product = findDataProduct(session.state.data_products, version.data_product_id);
+  if (!product || product.workspace_id !== template.workspace_id) return null;
+  const serving = servingContract(session, product, version.contract_major);
+  if (serving === null) return null;
+  const scope = reader.scopeOf(product, serving.contract);
+  if (scope === null) return null;
+  const candidates = session.state.reports.filter(
+    (report) => report.workspace_id === template.workspace_id
+      && report.template.report_template_id === template.report_template_id
+      && report.template.version === version.version
+      && report.data_product.data_product_id === product.data_product_id
+      && report.withdrawn_at === null,
+  );
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const report = candidates[index]!;
+    if (report.data_product.data_product_release !== serving.release.release) continue;
+    if (report.template.content_hash !== version.content_hash) continue;
+    if (report.normalized_question !== version.normalized_question) continue;
+    if (canonicalDigest(report.parameters) !== canonicalDigest(version.parameters)) continue;
+    if (report.security.scope_fingerprint !== scope.fingerprint) continue;
+    if (reportAgeMinutes(report, now) > version.freshness_policy.max_age_minutes) continue;
+    return { report, scope, serving };
+  }
+  return null;
 }
 
 /** One part of the effective authorization a response discloses. */
@@ -1069,6 +1122,7 @@ export async function reuseReport(options: ReuseRequest): Promise<ReportReuse> {
   for (const template of templates) {
     const version = findReportTemplateVersion(template, template.published_version ?? 0);
     if (version === undefined) continue;
+    if (version.withdrawn_at !== null) continue;
     if (options.dataProductId !== undefined && version.data_product_id !== options.dataProductId) continue;
     const product = findDataProduct(options.session.state.data_products, version.data_product_id);
     if (!product || product.workspace_id !== options.workspaceId) continue;
@@ -1080,7 +1134,8 @@ export async function reuseReport(options: ReuseRequest): Promise<ReportReuse> {
       (report) => report.workspace_id === options.workspaceId
         && report.template.report_template_id === template.report_template_id
         && report.template.version === version.version
-        && report.data_product.data_product_id === product.data_product_id,
+        && report.data_product.data_product_id === product.data_product_id
+        && report.withdrawn_at === null,
     );
     for (let index = candidates.length - 1; index >= 0; index -= 1) {
       const report = candidates[index]!;
@@ -1185,6 +1240,15 @@ export async function generateTemplateReport(options: {
       'The Report Template has no published Version to generate from.',
     );
   }
+  if (version.withdrawn_at !== null) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      { ...context, workspace_id: template.workspace_id },
+      'REPORT_TEMPLATE_WITHDRAWN',
+      'The Report Template Version has been withdrawn and generates no new Reports.',
+    );
+  }
   const role = workspaceRoleOf(session.state, actor.user.user_id, template.workspace_id);
   const reader = memberReader(session, actor.user, role);
   const now = options.now ?? new Date();
@@ -1272,6 +1336,23 @@ export function showReport(options: {
   if (role === null) {
     deny(session, actorLabel(actor.user), context, 'REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
   }
+  // A candidate Report is review evidence until an administrator approves its
+  // Template and Report together; ordinary retrieval never exposes it early.
+  const ownerTemplate = findReportTemplate(session.state.report_templates, report.template.report_template_id);
+  if (ownerTemplate === undefined || ownerTemplate.published_version !== report.template.version) {
+    deny(session, actorLabel(actor.user), context, 'REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
+  }
+  // A withdrawn Report leaves ordinary retrieval; only an administrator keeps
+  // reading it as governed history, and nothing about it is erased.
+  if (report.withdrawn_at !== null && role !== 'Workspace Administrator') {
+    deny(
+      session,
+      actorLabel(actor.user),
+      context,
+      'REPORT_WITHDRAWN',
+      'The Report has been withdrawn from ordinary retrieval and is preserved as governed history.',
+    );
+  }
   const scope = currentReportScope(session, actor.user, role, report);
   if (scope === null) {
     deny(session, actorLabel(actor.user), context, 'REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
@@ -1283,7 +1364,8 @@ export function showReport(options: {
   const ageMinutes = reportAgeMinutes(report, now);
   const product = findDataProduct(session.state.data_products, report.data_product.data_product_id);
   const serving = product === undefined ? null : servingContract(session, product);
-  const fresh = serving !== null
+  const fresh = report.withdrawn_at === null
+    && serving !== null
     && report.data_product.data_product_release === serving.release.release
     && ageMinutes <= report.freshness_policy.max_age_minutes
     && scope.fingerprint === report.security.scope_fingerprint;
@@ -1297,12 +1379,16 @@ export function showReport(options: {
       template_version: report.template.version,
       fresh,
       regenerated: false,
+      withdrawn: report.withdrawn_at !== null,
     },
   });
   return {
     origin: 'stock',
-    summary: '本次读取直接返回已入库的不可变报告，未重新执行查询，也未调用模型。',
+    summary: report.withdrawn_at === null
+      ? '本次读取直接返回已入库的不可变报告，未重新执行查询，也未调用模型。'
+      : '该报告已撤回，不再参与普通复用与检索，仅按治理历史保留；本次读取未重新执行查询，也未调用模型。',
     report: reportView(report),
+    withdrawn: report.withdrawn_at !== null,
     stock: {
       report_id: report.report_id,
       reused: false,
@@ -1325,6 +1411,8 @@ export function listReports(options: {
   masterKey: string;
   token: string;
   workspaceId: string;
+  /** Administrators may list withdrawn Reports as governed history. */
+  includeWithdrawn?: boolean;
   now?: Date;
 }): Record<string, unknown> {
   const session = openPlatform(options.root, options.masterKey);
@@ -1335,11 +1423,17 @@ export function listReports(options: {
   };
   const actor = resolveActor(session, options.token, context);
   const role = memberRole(session, actor, options.workspaceId, context);
+  const includeWithdrawn = options.includeWithdrawn === true && role === 'Workspace Administrator';
   const now = options.now ?? new Date();
   const parts: AuthorizationPart[] = [];
   const reports = session.state.reports
     .filter((report) => report.workspace_id === options.workspaceId)
     .flatMap((report) => {
+      // Only an approved (published) Template exposes its Report as stock; a
+      // candidate Report stays review evidence until Approval publishes both.
+      const ownerTemplate = findReportTemplate(session.state.report_templates, report.template.report_template_id);
+      if (ownerTemplate === undefined || ownerTemplate.published_version !== report.template.version) return [];
+      if (report.withdrawn_at !== null && !includeWithdrawn) return [];
       const scope = currentReportScope(session, actor.user, role, report);
       if (scope === null) return [];
       if (role !== 'Workspace Administrator' && scope.fingerprint !== report.security.scope_fingerprint) return [];
@@ -1358,9 +1452,11 @@ export function listReports(options: {
         question: report.question,
         generated_at: report.generated_at,
         completion: { ...report.completion, limitations: [...report.completion.limitations] },
+        withdrawn_at: report.withdrawn_at,
         age_minutes: Math.round(ageMinutes * 1000) / 1000,
         max_age_minutes: report.freshness_policy.max_age_minutes,
-        fresh: serving !== null
+        fresh: report.withdrawn_at === null
+          && serving !== null
           && report.data_product.data_product_release === serving.release.release
           && ageMinutes <= report.freshness_policy.max_age_minutes
           && scope.fingerprint === report.security.scope_fingerprint,
@@ -1377,5 +1473,123 @@ export function listReports(options: {
     workspace_id: options.workspaceId,
     reports,
     authorization: authorizationView(options.workspaceId, role, parts),
+  };
+}
+
+/**
+ * Withdraws one exact Report. Withdrawal is a lifecycle fact, not a deletion:
+ * the Report leaves stock reuse and ordinary retrieval, while its content,
+ * Provenance, and Approval history remain readable by administrators.
+ */
+export function withdrawReport(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  reportId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'report_withdrawal',
+    scope: 'workspace',
+    target: options.reportId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  const report = findReport(session.state.reports, options.reportId);
+  if (!report) {
+    deny(session, actorLabel(actor.user), context, 'REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
+  }
+  requireWorkspaceAdministrator(session, actor, { ...context, workspace_id: report.workspace_id }, report.workspace_id);
+  if (report.withdrawn_at !== null) {
+    return {
+      summary: '该报告此前已撤回，治理历史保持不变。',
+      report_id: report.report_id,
+      withdrawn_at: report.withdrawn_at,
+      already_withdrawn: true,
+    };
+  }
+  report.withdrawn_at = new Date().toISOString();
+  report.withdrawn_by = actor.user.user_id;
+  session.audit({
+    ...context,
+    workspace_id: report.workspace_id,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: {
+      report_template_id: report.template.report_template_id,
+      template_version: report.template.version,
+      withdrawn_at: report.withdrawn_at,
+    },
+  });
+  session.save();
+  return {
+    summary: '已撤回该报告：它不再参与库存复用和普通检索，治理历史与来源信息完整保留。',
+    report_id: report.report_id,
+    withdrawn_at: report.withdrawn_at,
+    already_withdrawn: false,
+  };
+}
+
+/**
+ * Withdraws one exact Report Template Version. Withdrawal stops future matching
+ * and generation from that Version; Reports already generated from it stay
+ * readable, so governed history is preserved rather than erased.
+ */
+export function withdrawReportTemplate(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  reportTemplateId: string;
+  version: number;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'report_template_withdrawal',
+    scope: 'workspace',
+    target: options.reportTemplateId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  const template = findReportTemplate(session.state.report_templates, options.reportTemplateId);
+  if (!template) {
+    deny(session, actorLabel(actor.user), context, 'REPORT_TEMPLATE_NOT_AVAILABLE', 'The Report Template is not available to this actor.');
+  }
+  requireWorkspaceAdministrator(session, actor, { ...context, workspace_id: template.workspace_id }, template.workspace_id);
+  const version = findReportTemplateVersion(template, options.version);
+  if (!version) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      { ...context, workspace_id: template.workspace_id },
+      'REPORT_TEMPLATE_VERSION_NOT_FOUND',
+      'The requested Report Template Version does not exist.',
+    );
+  }
+  if (version.withdrawn_at !== null) {
+    return {
+      summary: '该模板版本此前已撤回，治理历史保持不变。',
+      report_template_id: template.report_template_id,
+      template_version: version.version,
+      withdrawn_at: version.withdrawn_at,
+      already_withdrawn: true,
+    };
+  }
+  version.withdrawn_at = new Date().toISOString();
+  version.withdrawn_by = actor.user.user_id;
+  session.audit({
+    ...context,
+    workspace_id: template.workspace_id,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: {
+      template_version: version.version,
+      withdrawn_at: version.withdrawn_at,
+    },
+  });
+  session.save();
+  return {
+    summary: '已撤回该模板版本：它不再匹配库存或生成新报告，已生成的报告仍按治理历史保留。',
+    report_template_id: template.report_template_id,
+    template_version: version.version,
+    withdrawn_at: version.withdrawn_at,
+    already_withdrawn: false,
   };
 }

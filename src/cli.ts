@@ -47,7 +47,21 @@ import {
   publishReportTemplate,
   showReport,
   showReportTemplate,
+  withdrawReport,
+  withdrawReportTemplate,
 } from './reports.js';
+import {
+  approveReportCandidate,
+  listReportCandidates,
+  rejectReportCandidate,
+  reopenReportCandidate,
+  showReportCandidate,
+} from './report-review.js';
+import {
+  createReportSchedule,
+  listReportSchedules,
+  tickReportSchedules,
+} from './report-schedule.js';
 import { listDataProductReleases, listDataProducts, publishDataProduct, withdrawDataProductVersion } from './products.js';
 import {
   adoptProposal,
@@ -97,6 +111,7 @@ const GROUPED_COMMANDS = new Set([
 ]);
 const BOOLEAN_FLAGS = new Set([
   'admin-password-stdin', 'password-stdin', 'deployment-administrator', 'credential-stdin',
+  'include-withdrawn',
 ]);
 
 interface Invocation {
@@ -572,7 +587,67 @@ async function main(): Promise<void> {
     emit(listReports({
       ...governed(options),
       workspaceId: required(options, 'workspace'),
+      includeWithdrawn: options.get('include-withdrawn') === 'true',
       ...(at === undefined ? {} : { now: at }),
+    }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'withdraw') {
+    emit(withdrawReport({ ...governed(options), reportId: required(options, 'report') }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'template-withdraw') {
+    emit(withdrawReportTemplate({
+      ...governed(options),
+      reportTemplateId: required(options, 'template'),
+      version: Number(required(options, 'version')),
+    }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'candidate-list') {
+    emit(listReportCandidates({ ...governed(options), workspaceId: required(options, 'workspace') }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'candidate-show') {
+    emit(showReportCandidate({ ...governed(options), candidateId: required(options, 'candidate') }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'candidate-approve') {
+    emit(approveReportCandidate({ ...governed(options), candidateId: required(options, 'candidate') }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'candidate-reject') {
+    emit(rejectReportCandidate({
+      ...governed(options),
+      candidateId: required(options, 'candidate'),
+      ...(options.has('reason') ? { reason: required(options, 'reason') } : {}),
+    }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'candidate-reopen') {
+    emit(reopenReportCandidate({ ...governed(options), candidateId: required(options, 'candidate') }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'schedule-create') {
+    emit(createReportSchedule({
+      ...governed(options),
+      reportTemplateId: required(options, 'template'),
+      consumerUsername: required(options, 'consumer'),
+      intervalMinutes: Number(required(options, 'interval-minutes')),
+      ...(options.has('start-at') ? { startAt: required(options, 'start-at') } : {}),
+    }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'schedule-list') {
+    emit(listReportSchedules({ ...governed(options), workspaceId: required(options, 'workspace') }));
+    return;
+  }
+  if (command === 'report' && subcommand === 'schedule-tick') {
+    emit(await tickReportSchedules({
+      ...governed(options),
+      workspaceId: required(options, 'workspace'),
+      ...(options.has('schedule') ? { scheduleId: required(options, 'schedule') } : {}),
+      ...(options.has('at') ? { at: required(options, 'at') } : {}),
     }));
     return;
   }
