@@ -330,6 +330,10 @@ export function LifecycleScreen({ onSessionLost }: LifecycleScreenProps) {
     void consoleApi.verify().then((result) => {
       setBusy(null);
       if (!result.ok) {
+        if (result.status === 401 && result.error.code === 'OPERATOR_SESSION_INVALID') {
+          onSessionLost();
+          return;
+        }
         setNotice({
           tone: 'error',
           text: `${t('lifecycle.verify.failed')} ${failureText(result.error, '')}`.trim(),
@@ -402,6 +406,10 @@ export function LifecycleScreen({ onSessionLost }: LifecycleScreenProps) {
   const running = job?.state === 'running';
   const windowOpen = lifecycle?.rollback_window?.open === true;
   const verified = upgrade?.verification?.passed === true;
+  const finalizedAt = finalizeResult?.finalization.finalized_at ?? upgrade?.finalization?.finalized_at ?? null;
+  const previousRemoved = finalizeResult?.cleanup.removed
+    ?? upgrade?.finalization?.previous_release_removed
+    ?? false;
   const canVerify = upgrade !== null && (upgrade.status === 'upgraded' || upgrade.status === 'verified') && !running;
   const canFinalize = windowOpen && verified && !running;
   const canRollback = windowOpen && lifecycle?.rollback_window?.eligible === true && !running;
@@ -689,17 +697,18 @@ export function LifecycleScreen({ onSessionLost }: LifecycleScreenProps) {
           </Panel>
 
           <Panel title={t('lifecycle.finalize.title')} description={t('lifecycle.finalize.description')}>
-            {finalizeResult === null ? null : (
+            {finalizedAt === null ? null : (
               <p className="empty">
                 {message('lifecycle.record.finalized', {
-                  at: formatInstant(finalizeResult.finalization.finalized_at),
-                  removed: yesNo(finalizeResult.cleanup.removed),
+                  at: formatInstant(finalizedAt),
+                  removed: yesNo(previousRemoved),
                 })}
               </p>
             )}
-            {!canFinalize ? (
+            {!canFinalize && finalizedAt === null ? (
               <p className="empty">{t('lifecycle.finalize.notReady')}</p>
-            ) : (
+            ) : null}
+            {canFinalize ? (
               <>
                 <DefinitionList
                   rows={[
@@ -724,7 +733,7 @@ export function LifecycleScreen({ onSessionLost }: LifecycleScreenProps) {
                   onSubmit={runFinalize}
                 />
               </>
-            )}
+            ) : null}
           </Panel>
 
           <Panel title={t('lifecycle.rollback.title')} description={t('lifecycle.rollback.description')}>
