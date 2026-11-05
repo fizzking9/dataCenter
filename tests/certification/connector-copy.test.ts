@@ -54,9 +54,11 @@ test('every status this ticket introduces reads in Simplified Chinese while gove
   assert.deepEqual(englishOnly, [], 'Simplified Chinese, not an untranslated English label');
 
   // No English-only copy anywhere in the catalog, and no translated identifier:
-  // the keys are the governed values the API and the CLI speak, so they stay ASCII.
+  // the keys are the governed values the API and the CLI speak, so they stay
+  // ASCII. A governed value may itself carry a colon (`mcp:read`,
+  // `contract:valid`), which is part of the identifier rather than a translation.
   const untranslated = [...entries].filter(([, value]) => !CJK.test(value)).map(([key]) => key);
   assert.deepEqual(untranslated, [], 'no English-only user-facing copy remains');
-  const translated = [...entries.keys()].filter((key) => !/^[A-Za-z0-9_.]+$/u.test(key));
+  const translated = [...entries.keys()].filter((key) => !/^[A-Za-z0-9_.:]+$/u.test(key));
   assert.deepEqual(translated, [], 'identifiers and governed values are never translated');
 });

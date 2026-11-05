@@ -466,6 +466,7 @@ export function WorkspaceRetention({ workspaceId, onSessionLost }: WorkspaceView
   const [confirmingPurge, setConfirmingPurge] = useState(false);
   const [stepPassword, setStepPassword] = useState('');
   const [stepTotp, setStepTotp] = useState('');
+  const [stepRecovery, setStepRecovery] = useState('');
   const [outcome, setOutcome] = useState<PurgeOutcomeView | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
@@ -602,6 +603,7 @@ export function WorkspaceRetention({ workspaceId, onSessionLost }: WorkspaceView
     void platformApi.requestPurge(scopeOfDraft(workspaceId, purgeDraft), {
       password: stepPassword,
       ...(stepTotp.trim() === '' ? {} : { totp: stepTotp.trim() }),
+      ...(stepTotp.trim() !== '' || stepRecovery.trim() === '' ? {} : { recovery_code: stepRecovery.trim() }),
     }).then(async (result) => {
       if (!result.ok) {
         // A refused re-authentication is not a lost session: the standing
@@ -621,6 +623,7 @@ export function WorkspaceRetention({ workspaceId, onSessionLost }: WorkspaceView
       setConfirmingPurge(false);
       setStepPassword('');
       setStepTotp('');
+      setStepRecovery('');
       setOutcome(result.data);
       setNotice({
         tone: 'info',
@@ -667,6 +670,7 @@ export function WorkspaceRetention({ workspaceId, onSessionLost }: WorkspaceView
             rows={[
               { term: t('workspace.retention.policyVersion'), value: String(retention.policy_version) },
               { term: t('workspace.retention.overrideVersion'), value: retention.override_version === null ? '—' : String(retention.override_version) },
+              { term: t('workspace.retention.policy.scope'), value: t('value.retentionScope.workspace') },
               { term: t('workspace.retention.effect'), value: t('workspace.retention.effectExisting') },
             ]}
           />
@@ -925,6 +929,14 @@ export function WorkspaceRetention({ workspaceId, onSessionLost }: WorkspaceView
                 inputMode="numeric"
                 maxLength={6}
               />
+              <Field
+                id="retention-purge-recovery"
+                label={t('workspace.retention.purge.recovery')}
+                value={stepRecovery}
+                onChange={setStepRecovery}
+                hint={t('workspace.retention.purge.recoveryHint')}
+                mono
+              />
             </Panel>
             <div className="form__actions">
               <Button busy={busy} onClick={requestPurge}>
@@ -942,7 +954,7 @@ export function WorkspaceRetention({ workspaceId, onSessionLost }: WorkspaceView
               { term: t('workspace.retention.purge.jobs.id'), value: outcome.purge_id ?? '—', mono: true },
               { term: t('workspace.retention.purge.jobs.revokedAt'), value: formatInstant(outcome.access_revoked_at ?? undefined) },
               {
-                term: t('workspace.retention.purge.dependencies'),
+                term: t('workspace.retention.purge.consequence'),
                 value: message('workspace.retention.purge.planSummary', {
                   eligible: String(outcome.eligible_count),
                   blocked: String(outcome.blocked_count),
@@ -1186,6 +1198,7 @@ export function DeploymentRetention({ onSessionLost }: DeploymentRetentionProps)
                 ...(policy.content_hash === null
                   ? []
                   : [{ term: t('deployment.retention.policy.contentHash'), value: policy.content_hash, mono: true }]),
+                { term: t('workspace.retention.policy.scope'), value: t('value.retentionScope.deployment') },
                 { term: t('workspace.retention.effect'), value: t('workspace.retention.effectExisting') },
               ]}
             />
@@ -1307,8 +1320,9 @@ export function DeploymentRetention({ onSessionLost }: DeploymentRetentionProps)
           <DefinitionList
             rows={[
               { term: t('deployment.retention.tick.health'), value: optional(`value.retentionHealth.${ticked.health}`) ?? ticked.health },
-              { term: t('workspace.retention.evaluate.eligible'), value: String(ticked.created_jobs.length) },
-              { term: t('workspace.retention.purge.jobs.purged'), value: String(ticked.ledger.length) },
+              { term: t('deployment.retention.tick.created'), value: String(ticked.created_jobs.length) },
+              { term: t('deployment.retention.tick.executed'), value: String(ticked.jobs.length) },
+              { term: t('deployment.retention.tick.ledger'), value: String(ticked.ledger.length) },
             ]}
           />
         )}
