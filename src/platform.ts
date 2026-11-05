@@ -126,9 +126,25 @@ export interface OAuthClientRecord {
 }
 
 /**
+ * One User's consent for one Agent Identity to act on their behalf inside one
+ * Workspace. The delegated authority a token carries is never more than the
+ * intersection of the Agent Identity's and the User's own permissions, and the
+ * consent is revalidated on every request.
+ */
+export interface AgentDelegationRecord {
+  delegation_id: string;
+  workspace_id: string;
+  agent_identity_id: string;
+  user_id: string;
+  created_at: string;
+  created_by: string;
+  revoked_at: string | null;
+}
+
+/**
  * One access token the Deployment minted for itself. The claims are stored, not
  * only the hash, because every request re-proves the exact issuer, resource,
- * audience, client, and redirect the token was issued under.
+ * audience, client, redirect, and delegated consent the token was issued under.
  */
 export interface AccessTokenRecord {
   token_hash: string;
@@ -142,6 +158,9 @@ export interface AccessTokenRecord {
   issued_at: string;
   expires_at: string;
   revoked_at: string | null;
+  /** Present only while the token acts under a delegated User's consent. */
+  delegation_id?: string | null;
+  delegated_user_id?: string | null;
 }
 
 export interface ContextEntry {
@@ -179,6 +198,7 @@ export interface PlatformState {
   schema_version: number;
   users: UserRecord[];
   agent_identities: AgentIdentityRecord[];
+  agent_delegations: AgentDelegationRecord[];
   service_identities: ServiceIdentityRecord[];
   oauth_clients: OAuthClientRecord[];
   access_tokens: AccessTokenRecord[];
@@ -240,6 +260,7 @@ export function readPlatform(root: string): PlatformState {
         schema_version: CURRENT_SCHEMA_VERSION,
         users: [],
         agent_identities: [],
+        agent_delegations: [],
         service_identities: [],
         oauth_clients: [],
         access_tokens: [],
@@ -279,6 +300,7 @@ export function readPlatform(root: string): PlatformState {
   // Collections start empty rather than failing the read closed.
   state.schema_version = CURRENT_SCHEMA_VERSION;
   state.agent_identities ??= [];
+  state.agent_delegations ??= [];
   // A Deployment written before Service Identities existed has none, and every
   // one it does have keeps exactly the bindings it was created with.
   state.service_identities ??= [];

@@ -31,6 +31,8 @@ test('MCP exposes generic discovery, Contract, and direct-query tools narrowed t
       'discover_data_products',
       'read_data_product_contract',
       'query_data_product',
+      'discover_reports',
+      'read_report',
     ]);
     for (const tool of tools) {
       assert.equal((tool['inputSchema'] as Record<string, unknown>)['type'], 'object');
@@ -105,13 +107,18 @@ test('MCP exposes generic discovery, Contract, and direct-query tools narrowed t
     assert.equal(mcpResult(elsewhere)['isError'], true);
     assert.equal(toolFailure(elsewhere).code, 'WORKSPACE_ACCESS_DENIED');
 
-    // An Agent holding only the Natural-Language Query scope sees no tool at all.
+    // An Agent holding only the Natural-Language Query scope sees exactly the
+    // Natural-Language Query tools, and no Data Product read: the two scopes are
+    // distinct capability ceilings, never one replacing the other.
     const nlqAgent = createAgent(fixture, deploymentAdministratorToken, workspaceId, 'mcp:nlq', 'nlq-agent');
     const nlqClient = registerAgentClient(fixture, deploymentAdministratorToken, nlqAgent, NLQ_CLIENT, 'nlq-client');
     const nlqToken = await issueAgentToken(console.url, nlqClient, 'mcp:nlq');
     const nlqListed = await listTools(console.url, nlqToken);
     assert.equal(nlqListed.status, 200, nlqListed.text);
-    assert.deepEqual(mcpResult(nlqListed)['tools'], []);
+    assert.deepEqual(
+      (mcpResult(nlqListed)['tools'] as Array<Record<string, unknown>>).map((tool) => tool['name']),
+      ['ask_natural_language_query', 'continue_natural_language_query'],
+    );
 
     const nlqDenied = await callTool(console.url, nlqToken, 'query_data_product', {
       workspace_id: workspaceId,
@@ -120,6 +127,18 @@ test('MCP exposes generic discovery, Contract, and direct-query tools narrowed t
     });
     assert.equal(nlqDenied.status, 403);
     assert.equal(nlqDenied.body['code'], 'MCP_SCOPE_REQUIRED');
+
+    // Reading Reports is a read ceiling: an mcp:nlq token may not read one, and
+    // an mcp:read token may not ask a question.
+    const reportReadDenied = await callTool(console.url, nlqToken, 'discover_reports', { workspace_id: workspaceId });
+    assert.equal(reportReadDenied.status, 403);
+    assert.equal(reportReadDenied.body['code'], 'MCP_SCOPE_REQUIRED');
+    const askDenied = await callTool(console.url, token, 'ask_natural_language_query', {
+      workspace_id: workspaceId,
+      question: '2026 年 1 月的处理量合计是多少？',
+    });
+    assert.equal(askDenied.status, 403);
+    assert.equal(askDenied.body['code'], 'MCP_SCOPE_REQUIRED');
   } finally {
     await console.stop();
   }

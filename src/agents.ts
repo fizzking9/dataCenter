@@ -1,16 +1,20 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { resolveActor } from './auth.js';
-import { actorLabel, reject, requireDeploymentAdministrator, type ActionContext } from './authz.js';
+import { actorLabel, deny, reject, requireDeploymentAdministrator, type ActionContext } from './authz.js';
 import { isRecord, readJsonDocument } from './documents.js';
 import type { Fail } from './errors.js';
 import {
   findAgentIdentity,
   findOAuthClient,
+  findUserById,
   findWorkspace,
+  workspaceRoleOf,
   type AccessTokenRecord,
+  type AgentDelegationRecord,
   type AgentIdentityRecord,
   type OAuthClientRecord,
   type PlatformState,
+  type UserRecord,
 } from './platform.js';
 import { openPlatform } from './session.js';
 import { constantTimeEquals, hashToken } from './tokens.js';
@@ -144,6 +148,127 @@ export function revokeAgentIdentity(options: {
   session.audit({ ...context, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { name: agent.name } });
   session.save();
   return { agent_identity_id: agent.agent_identity_id, status: agent.status, revoked_at: agent.revoked_at };
+}
+
+/**
+ * Records one User's consent for one Agent Identity to act on their behalf
+ * inside one Workspace. Consent never expands either party: the effective
+ * authority is always the intersection of the Agent Identity's Grants and the
+ * User's own permissions, revalidated on every request.
+ */
+export function createAgentDelegation(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  agentIdentityId: string;
+  workspaceId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'agent_delegation',
+    scope: 'workspace',
+    workspace_id: options.workspaceId,
+    target: options.agentIdentityId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  const agent = findAgentIdentity(session.state, options.agentIdentityId);
+  if (!agent || agent.status !== 'active' || !agent.workspace_ids.includes(options.workspaceId)) {
+    reject(
+      session,
+      actorLabel(actor.user),
+      context,
+      'AGENT_NOT_FOUND',
+      'An active Agent Identity bound to this Workspace must be named.',
+    );
+  }
+  if (!findWorkspace(session.state, options.workspaceId)
+    || workspaceRoleOf(session.state, actor.user.user_id, options.workspaceId) === null) {
+    deny(session, actorLabel(actor.user), context, 'WORKSPACE_ACCESS_DENIED', 'The Workspace is not available to this actor.');
+  }
+  const existing = session.state.agent_delegations.find(
+    (delegation) => delegation.agent_identity_id === agent.agent_identity_id
+      && delegation.user_id === actor.user.user_id
+      && delegation.workspace_id === options.workspaceId
+      && delegation.revoked_at === null,
+  );
+  if (existing !== undefined) {
+    return delegationView(session, existing, true);
+  }
+  const delegation: AgentDelegationRecord = {
+    delegation_id: randomUUID(),
+    workspace_id: options.workspaceId,
+    agent_identity_id: agent.agent_identity_id,
+    user_id: actor.user.user_id,
+    created_at: new Date().toISOString(),
+    created_by: actor.user.user_id,
+    revoked_at: null,
+  };
+  session.state.agent_delegations.push(delegation);
+  session.audit({
+    ...context,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: {
+      delegation_id: delegation.delegation_id,
+      agent_identity_id: agent.agent_identity_id,
+      delegated_user_id: actor.user.user_id,
+    },
+  });
+  session.save();
+  return delegationView(session, delegation, false);
+}
+
+/** Withdraws one delegated consent; every token acting under it stops at once. */
+export function revokeAgentDelegation(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  delegationId: string;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = { action: 'agent_delegation_revocation', scope: 'workspace', target: options.delegationId };
+  const actor = resolveActor(session, options.token, context);
+  const delegation = session.state.agent_delegations.find(
+    (candidate) => candidate.delegation_id === options.delegationId,
+  );
+  const role = delegation === undefined
+    ? null
+    : workspaceRoleOf(session.state, actor.user.user_id, delegation.workspace_id);
+  if (!delegation || (delegation.user_id !== actor.user.user_id && role !== 'Workspace Administrator')) {
+    deny(session, actorLabel(actor.user), context, 'DELEGATION_NOT_AVAILABLE', 'The delegated consent is not available to this actor.');
+  }
+  const scoped: ActionContext = { ...context, workspace_id: delegation.workspace_id };
+  if (delegation.revoked_at !== null) {
+    return { delegation_id: delegation.delegation_id, revoked_at: delegation.revoked_at, already_revoked: true };
+  }
+  delegation.revoked_at = new Date().toISOString();
+  session.audit({
+    ...scoped,
+    actor: actorLabel(actor.user),
+    outcome: 'succeeded',
+    detail: { agent_identity_id: delegation.agent_identity_id, delegated_user_id: delegation.user_id },
+  });
+  session.save();
+  return { delegation_id: delegation.delegation_id, revoked_at: delegation.revoked_at };
+}
+
+function delegationView(
+  session: { state: PlatformState },
+  delegation: AgentDelegationRecord,
+  alreadyExisting: boolean,
+): Record<string, unknown> {
+  return {
+    delegation_id: delegation.delegation_id,
+    workspace_id: delegation.workspace_id,
+    agent_identity_id: delegation.agent_identity_id,
+    user: {
+      user_id: delegation.user_id,
+      username: findUserById(session.state, delegation.user_id)?.username ?? null,
+    },
+    created_at: delegation.created_at,
+    revoked_at: delegation.revoked_at,
+    ...(alreadyExisting ? { already_existing: true } : {}),
+  };
 }
 
 /**
@@ -340,6 +465,7 @@ export function issueAccessToken(options: {
   if (redirectUri !== undefined && !client.redirect_uris.includes(redirectUri)) {
     throw new OAuthError(400, 'OAUTH_REDIRECT_URI_INVALID', 'The redirect_uri is not one this client registered.');
   }
+  const delegation = readDelegation(session.state, options.form['delegation_id'], agent.agent_identity_id);
   const now = Date.now();
   const record: AccessTokenRecord = {
     token_hash: '',
@@ -353,6 +479,8 @@ export function issueAccessToken(options: {
     issued_at: new Date(now).toISOString(),
     expires_at: new Date(now + ACCESS_TOKEN_LIFETIME_MS).toISOString(),
     revoked_at: null,
+    delegation_id: delegation?.delegation_id ?? null,
+    delegated_user_id: delegation?.user_id ?? null,
   };
   const token = randomBytes(32).toString('base64url');
   record.token_hash = hashToken(token);
@@ -379,11 +507,19 @@ export function issueAccessToken(options: {
   };
 }
 
+/** The exact delegated consent one token acts under, revalidated on every request. */
+export interface DelegatedAuthority {
+  delegation: AgentDelegationRecord;
+  user: UserRecord;
+}
+
 export interface AccessTokenGrant {
   kind: 'granted';
   agent: AgentIdentityRecord;
   client: OAuthClientRecord;
   scopes: string[];
+  /** The delegated User's authority this token is intersected with, or nothing. */
+  delegation: DelegatedAuthority | null;
 }
 
 export interface AccessTokenRejection {
@@ -433,5 +569,67 @@ export function resolveAccessToken(
   if (!agent || agent.status !== 'active') {
     return { kind: 'rejected', code: 'MCP_AGENT_REVOKED', message: 'The Agent Identity this token acts for is revoked.' };
   }
-  return { kind: 'granted', agent, client, scopes: [...record.scopes] };
+  const delegated = record.delegation_id === undefined || record.delegation_id === null
+    ? null
+    : currentDelegation(state, record, agent);
+  if (record.delegation_id !== undefined && record.delegation_id !== null && delegated === null) {
+    // Revocation during a conversation or pagination takes effect on the very
+    // next call, exactly like an expired token.
+    return {
+      kind: 'rejected',
+      code: 'MCP_DELEGATION_REVOKED',
+      message: 'The delegated authority this token acts under is no longer in force.',
+    };
+  }
+  return { kind: 'granted', agent, client, scopes: [...record.scopes], delegation: delegated };
+}
+
+/**
+ * Re-proves the delegated consent a token was minted under: the exact consent,
+ * the Agent Identity, the User's status, and their current Workspace membership.
+ * Any change answers null, so the token stops working immediately.
+ */
+function currentDelegation(
+  state: PlatformState,
+  record: AccessTokenRecord,
+  agent: AgentIdentityRecord,
+): DelegatedAuthority | null {
+  const delegation = state.agent_delegations.find(
+    (candidate) => candidate.delegation_id === record.delegation_id,
+  );
+  const user = delegation === undefined ? undefined : findUserById(state, delegation.user_id);
+  if (!delegation
+    || delegation.revoked_at !== null
+    || delegation.agent_identity_id !== agent.agent_identity_id
+    || delegation.user_id !== record.delegated_user_id
+    || !user
+    || user.status !== 'active'
+    || workspaceRoleOf(state, user.user_id, delegation.workspace_id) === null) {
+    return null;
+  }
+  return { delegation, user };
+}
+
+/** Reads the consent a token request names, refusing one that is not in force. */
+function readDelegation(
+  state: PlatformState,
+  raw: string | undefined,
+  agentIdentityId: string,
+): AgentDelegationRecord | null {
+  if (raw === undefined || raw === '') return null;
+  const delegation = state.agent_delegations.find((candidate) => candidate.delegation_id === raw);
+  const user = delegation === undefined ? undefined : findUserById(state, delegation.user_id);
+  if (!delegation
+    || delegation.revoked_at !== null
+    || delegation.agent_identity_id !== agentIdentityId
+    || !user
+    || user.status !== 'active'
+    || workspaceRoleOf(state, user.user_id, delegation.workspace_id) === null) {
+    throw new OAuthError(
+      400,
+      'invalid_delegation',
+      'The delegation_id is not an active consent this Agent Identity acts under.',
+    );
+  }
+  return delegation;
 }

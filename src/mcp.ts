@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { issueAccessToken, OAuthError, resolveAccessToken } from './agents.js';
-import { callTool, findTool, listTools } from './mcp-tools.js';
+import { callTool, findTool, listTools, TOOL_CONTRACT_VERSION } from './mcp-tools.js';
 import { openPlatform } from './session.js';
 
 /** The one protocol revision this Deployment serves; older peers cannot fall forward into it. */
@@ -245,7 +245,13 @@ function discoverResult(): Record<string, unknown> {
     protocolVersion: MCP_PROTOCOL_VERSION,
     supportedVersions: [...SUPPORTED_VERSIONS],
     serverInfo: { ...SERVER_INFO },
-    capabilities: { tools: { listChanged: false } },
+    // Tool contracts are versioned independently of the protocol and of Data
+    // Product Artifact versions. The advertised scopes stay the public ceilings
+    // the protected-resource metadata already states.
+    capabilities: {
+      tools: { listChanged: false, contractVersion: TOOL_CONTRACT_VERSION },
+      scopes: ['mcp:read', 'mcp:nlq'],
+    },
   };
 }
 

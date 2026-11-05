@@ -42,7 +42,7 @@ import { classifyResult, freshnessOf, narrationFacts, narrativeViolation } from 
 import { memberReader, type GrantReader, type GrantScope } from './grants.js';
 import { generateGroundedNarration, promptPinsSimplifiedChinese } from './model-generation.js';
 import { pinnedForBinding } from './model-profile.js';
-import { findUserById, workspaceRoleOf, type UserRecord, type WorkspaceRole } from './platform.js';
+import { findUserById, workspaceRoleOf, type WorkspaceRole } from './platform.js';
 import { executeDataProductQuery } from './product-query.js';
 import { readQuery, readQueryTarget } from './product-query-document.js';
 import { openPlatform, type PlatformSession } from './session.js';
@@ -854,7 +854,8 @@ export function completionOf(result: Record<string, unknown>): ReportRecord['com
 
 export interface GenerateReportOptions {
   session: PlatformSession;
-  actor: { user: UserRecord };
+  /** The exact identity a generated Report attributes itself to. */
+  generatedBy: string;
   reader: GrantReader;
   template: ReportTemplateArtifact;
   version: ReportTemplateVersion;
@@ -937,7 +938,7 @@ export async function generateReport(options: GenerateReportOptions): Promise<Re
     },
     freshness_policy: { ...version.freshness_policy },
     generated_at: options.now.toISOString(),
-    generated_by: options.actor.user.user_id,
+    generated_by: options.generatedBy,
     withdrawn_at: null,
     withdrawn_by: null,
   };
@@ -956,6 +957,7 @@ export async function generateReport(options: GenerateReportOptions): Promise<Re
       report_outcome: completion.outcome,
       narrative: report.narrative !== null,
       trigger: options.trigger,
+      ...reader.auditDetail,
     },
   });
   session.save();
@@ -1089,10 +1091,10 @@ export type ReportReuse =
 
 interface ReuseRequest {
   session: PlatformSession;
-  actor: Actor;
+  generatedBy: string;
   reader: GrantReader;
   workspaceId: string;
-  role: WorkspaceRole;
+  role: WorkspaceRole | string;
   question: string;
   dataProductId?: string;
   now: Date;
@@ -1167,7 +1169,7 @@ export async function reuseReport(options: ReuseRequest): Promise<ReportReuse> {
     try {
       const report = await generateReport({
         session: options.session,
-        actor: options.actor,
+        generatedBy: options.generatedBy,
         reader: options.reader,
         template,
         version,
@@ -1199,6 +1201,7 @@ export async function reuseReport(options: ReuseRequest): Promise<ReportReuse> {
           data_product_id: version.data_product_id,
           trigger: 'stock_refresh',
           error_code: code,
+          ...options.reader.auditDetail,
         },
       });
     }
@@ -1256,7 +1259,7 @@ export async function generateTemplateReport(options: {
   try {
     report = await generateReport({
       session,
-      actor,
+      generatedBy: actor.user.user_id,
       reader,
       template,
       version,
@@ -1293,86 +1296,83 @@ export async function generateTemplateReport(options: {
   };
 }
 
+/** One refused Report retrieval, so every surface answers with the same code. */
+export class ReportAccessFailure extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+    this.name = 'ReportAccessFailure';
+  }
+}
+
 /** The current authorization one reader holds on one Report's Product, or nothing. */
-function currentReportScope(
+function reportScopeFor(
   session: PlatformSession,
-  user: UserRecord,
-  role: WorkspaceRole,
+  reader: GrantReader,
   report: ReportRecord,
-): GrantScope | null {
+): { scope: GrantScope; serving: ServingContract } | null {
   const product = findDataProduct(session.state.data_products, report.data_product.data_product_id);
   if (!product) return null;
   const serving = servingContract(session, product);
   if (serving === null) return null;
-  const reader = memberReader(session, user, role);
-  return reader.scopeOf(product, serving.contract);
+  const scope = reader.scopeOf(product, serving.contract);
+  return scope === null ? null : { scope, serving };
 }
 
 /**
- * Reads one immutable Report back, reauthorizing the complete current security
- * context. It never regenerates content: a Consumer may only read a Report
- * generated under exactly the scope they hold now, while a Workspace
+ * Reads one immutable Report back under the complete current security context.
+ * It never regenerates content and never calls a model: a reader may only read
+ * a Report generated under exactly the scope they hold now, while a Workspace
  * Administrator already reads the whole Product.
  */
-export function showReport(options: {
-  root: string;
-  masterKey: string;
-  token: string;
+export function readReportForReader(options: {
+  session: PlatformSession;
+  reader: GrantReader;
+  role: string;
   reportId: string;
+  /** The Workspace the caller named, so a Report of another Workspace never resolves. */
+  workspaceId?: string;
   now?: Date;
 }): Record<string, unknown> {
-  const session = openPlatform(options.root, options.masterKey);
-  const context: ActionContext = {
-    action: 'report_retrieval',
-    scope: 'workspace',
-    target: options.reportId,
-  };
-  const actor = resolveActor(session, options.token, context);
+  const { session, reader } = options;
   const report = findReport(session.state.reports, options.reportId);
-  if (!report) {
-    deny(session, actorLabel(actor.user), context, 'REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
-  }
-  const role = workspaceRoleOf(session.state, actor.user.user_id, report.workspace_id);
-  if (role === null) {
-    deny(session, actorLabel(actor.user), context, 'REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
+  if (!report || (options.workspaceId !== undefined && report.workspace_id !== options.workspaceId)) {
+    throw new ReportAccessFailure('REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
   }
   // A candidate Report is review evidence until an administrator approves its
   // Template and Report together; ordinary retrieval never exposes it early.
   const ownerTemplate = findReportTemplate(session.state.report_templates, report.template.report_template_id);
   if (ownerTemplate === undefined || ownerTemplate.published_version !== report.template.version) {
-    deny(session, actorLabel(actor.user), context, 'REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
+    throw new ReportAccessFailure('REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
   }
   // A withdrawn Report leaves ordinary retrieval; only an administrator keeps
   // reading it as governed history, and nothing about it is erased.
-  if (report.withdrawn_at !== null && role !== 'Workspace Administrator') {
-    deny(
-      session,
-      actorLabel(actor.user),
-      context,
+  if (report.withdrawn_at !== null && !reader.withdrawnVisible) {
+    throw new ReportAccessFailure(
       'REPORT_WITHDRAWN',
       'The Report has been withdrawn from ordinary retrieval and is preserved as governed history.',
     );
   }
-  const scope = currentReportScope(session, actor.user, role, report);
-  if (scope === null) {
-    deny(session, actorLabel(actor.user), context, 'REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
+  const current = reportScopeFor(session, reader, report);
+  if (current === null
+    || (!reader.withdrawnVisible && current.scope.fingerprint !== report.security.scope_fingerprint)) {
+    throw new ReportAccessFailure('REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
   }
-  if (role !== 'Workspace Administrator' && scope.fingerprint !== report.security.scope_fingerprint) {
-    deny(session, actorLabel(actor.user), context, 'REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
-  }
+  const { scope, serving } = current;
   const now = options.now ?? new Date();
   const ageMinutes = reportAgeMinutes(report, now);
-  const product = findDataProduct(session.state.data_products, report.data_product.data_product_id);
-  const serving = product === undefined ? null : servingContract(session, product);
   const fresh = report.withdrawn_at === null
-    && serving !== null
     && report.data_product.data_product_release === serving.release.release
     && ageMinutes <= report.freshness_policy.max_age_minutes
     && scope.fingerprint === report.security.scope_fingerprint;
   session.audit({
-    ...context,
+    action: 'report_retrieval',
+    scope: 'workspace',
     workspace_id: report.workspace_id,
-    actor: actorLabel(actor.user),
+    target: report.report_id,
+    actor: reader.label,
     outcome: 'succeeded',
     detail: {
       report_template_id: report.template.report_template_id,
@@ -1380,6 +1380,7 @@ export function showReport(options: {
       fresh,
       regenerated: false,
       withdrawn: report.withdrawn_at !== null,
+      ...reader.auditDetail,
     },
   });
   return {
@@ -1399,10 +1400,117 @@ export function showReport(options: {
     },
     authorization: authorizationView(
       report.workspace_id,
-      role,
+      options.role,
       [scopeAuthorization(report.data_product.data_product_id, scope)],
     ),
   };
+}
+
+/**
+ * Lists the stocked Reports one reader's current authorization may retrieve.
+ * Listing is a pure read of stored facts: it generates nothing and never calls
+ * a model.
+ */
+export function listReportsForReader(options: {
+  session: PlatformSession;
+  reader: GrantReader;
+  role: string;
+  workspaceId: string;
+  /** Administrators may list withdrawn Reports as governed history. */
+  includeWithdrawn?: boolean;
+  now?: Date;
+}): Record<string, unknown> {
+  const { session, reader } = options;
+  const includeWithdrawn = options.includeWithdrawn === true && reader.withdrawnVisible;
+  const now = options.now ?? new Date();
+  const parts: AuthorizationPart[] = [];
+  const reports = session.state.reports
+    .filter((report) => report.workspace_id === options.workspaceId)
+    .flatMap((report) => {
+      // Only an approved (published) Template exposes its Report as stock; a
+      // candidate Report stays review evidence until Approval publishes both.
+      const ownerTemplate = findReportTemplate(session.state.report_templates, report.template.report_template_id);
+      if (ownerTemplate === undefined || ownerTemplate.published_version !== report.template.version) return [];
+      if (report.withdrawn_at !== null && !includeWithdrawn) return [];
+      const current = reportScopeFor(session, reader, report);
+      if (current === null) return [];
+      const { scope, serving } = current;
+      if (!reader.withdrawnVisible && scope.fingerprint !== report.security.scope_fingerprint) return [];
+      const authorization = scopeAuthorization(report.data_product.data_product_id, scope);
+      if (!parts.some((part) => part.data_product_id === authorization.data_product_id
+        && part.scope_fingerprint === authorization.scope_fingerprint)) {
+        parts.push(authorization);
+      }
+      const ageMinutes = reportAgeMinutes(report, now);
+      return [{
+        report_id: report.report_id,
+        template: { ...report.template },
+        data_product: { ...report.data_product },
+        question: report.question,
+        generated_at: report.generated_at,
+        completion: { ...report.completion, limitations: [...report.completion.limitations] },
+        withdrawn_at: report.withdrawn_at,
+        age_minutes: Math.round(ageMinutes * 1000) / 1000,
+        max_age_minutes: report.freshness_policy.max_age_minutes,
+        fresh: report.withdrawn_at === null
+          && report.data_product.data_product_release === serving.release.release
+          && ageMinutes <= report.freshness_policy.max_age_minutes
+          && scope.fingerprint === report.security.scope_fingerprint,
+      }];
+    });
+  session.audit({
+    action: 'report_listing',
+    scope: 'workspace',
+    workspace_id: options.workspaceId,
+    actor: reader.label,
+    outcome: 'succeeded',
+    detail: { reports_returned: reports.length, ...reader.auditDetail },
+  });
+  return {
+    origin: 'stock',
+    workspace_id: options.workspaceId,
+    reports,
+    authorization: authorizationView(options.workspaceId, options.role, parts),
+  };
+}
+
+/** Reads one immutable Report back through the member surface. */
+export function showReport(options: {
+  root: string;
+  masterKey: string;
+  token: string;
+  reportId: string;
+  now?: Date;
+}): Record<string, unknown> {
+  const session = openPlatform(options.root, options.masterKey);
+  const context: ActionContext = {
+    action: 'report_retrieval',
+    scope: 'workspace',
+    target: options.reportId,
+  };
+  const actor = resolveActor(session, options.token, context);
+  const report = findReport(session.state.reports, options.reportId);
+  const role = report === undefined
+    ? null
+    : workspaceRoleOf(session.state, actor.user.user_id, report.workspace_id);
+  if (!report || role === null) {
+    deny(session, actorLabel(actor.user), context, 'REPORT_NOT_AVAILABLE', 'The Report is not available to this actor.');
+  }
+  const reader = memberReader(session, actor.user, role);
+  try {
+    return readReportForReader({
+      session,
+      reader,
+      role,
+      reportId: options.reportId,
+      ...(options.now === undefined ? {} : { now: options.now }),
+    });
+  } catch (error) {
+    if (error instanceof ReportAccessFailure) {
+      deny(session, actorLabel(actor.user), { ...context, workspace_id: report.workspace_id }, error.code, error.message);
+    }
+    throw error;
+  }
 }
 
 /** Lists the stocked Reports one actor's current authorization may retrieve. */
@@ -1423,57 +1531,14 @@ export function listReports(options: {
   };
   const actor = resolveActor(session, options.token, context);
   const role = memberRole(session, actor, options.workspaceId, context);
-  const includeWithdrawn = options.includeWithdrawn === true && role === 'Workspace Administrator';
-  const now = options.now ?? new Date();
-  const parts: AuthorizationPart[] = [];
-  const reports = session.state.reports
-    .filter((report) => report.workspace_id === options.workspaceId)
-    .flatMap((report) => {
-      // Only an approved (published) Template exposes its Report as stock; a
-      // candidate Report stays review evidence until Approval publishes both.
-      const ownerTemplate = findReportTemplate(session.state.report_templates, report.template.report_template_id);
-      if (ownerTemplate === undefined || ownerTemplate.published_version !== report.template.version) return [];
-      if (report.withdrawn_at !== null && !includeWithdrawn) return [];
-      const scope = currentReportScope(session, actor.user, role, report);
-      if (scope === null) return [];
-      if (role !== 'Workspace Administrator' && scope.fingerprint !== report.security.scope_fingerprint) return [];
-      const authorization = scopeAuthorization(report.data_product.data_product_id, scope);
-      if (!parts.some((part) => part.data_product_id === authorization.data_product_id
-        && part.scope_fingerprint === authorization.scope_fingerprint)) {
-        parts.push(authorization);
-      }
-      const ageMinutes = reportAgeMinutes(report, now);
-      const product = findDataProduct(session.state.data_products, report.data_product.data_product_id);
-      const serving = product === undefined ? null : servingContract(session, product);
-      return [{
-        report_id: report.report_id,
-        template: { ...report.template },
-        data_product: { ...report.data_product },
-        question: report.question,
-        generated_at: report.generated_at,
-        completion: { ...report.completion, limitations: [...report.completion.limitations] },
-        withdrawn_at: report.withdrawn_at,
-        age_minutes: Math.round(ageMinutes * 1000) / 1000,
-        max_age_minutes: report.freshness_policy.max_age_minutes,
-        fresh: report.withdrawn_at === null
-          && serving !== null
-          && report.data_product.data_product_release === serving.release.release
-          && ageMinutes <= report.freshness_policy.max_age_minutes
-          && scope.fingerprint === report.security.scope_fingerprint,
-      }];
-    });
-  session.audit({
-    ...context,
-    actor: actorLabel(actor.user),
-    outcome: 'succeeded',
-    detail: { reports_returned: reports.length },
+  return listReportsForReader({
+    session,
+    reader: memberReader(session, actor.user, role),
+    role,
+    workspaceId: options.workspaceId,
+    includeWithdrawn: options.includeWithdrawn === true,
+    ...(options.now === undefined ? {} : { now: options.now }),
   });
-  return {
-    origin: 'stock',
-    workspace_id: options.workspaceId,
-    reports,
-    authorization: authorizationView(options.workspaceId, role, parts),
-  };
 }
 
 /**

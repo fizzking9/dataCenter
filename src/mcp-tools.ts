@@ -6,11 +6,21 @@ import {
   latestDataProductVersion,
   type DataProductArtifact,
 } from './catalog.js';
-import type { Fail } from './errors.js';
-import { agentReader, type GrantReader } from './grants.js';
+import { OperatorError, type Fail } from './errors.js';
+import { agentReader, delegatedReader, type GrantReader } from './grants.js';
+import { askNaturalLanguageQueryForAgent } from './natural-language-query.js';
+import { workspaceRoleOf } from './platform.js';
 import { executeDataProductQuery } from './product-query.js';
 import { contractView, describeDataProduct, productIdentity } from './products.js';
+import {
+  listReportsForReader,
+  readReportForReader,
+  ReportAccessFailure,
+} from './reports.js';
 import type { PlatformSession } from './session.js';
+
+/** The version of every tool's input and output contract this Deployment serves. */
+export const TOOL_CONTRACT_VERSION = '1.0.0';
 
 /**
  * The generic read-only tools this Deployment publishes. They are driven by the
@@ -22,6 +32,7 @@ export interface McpTool {
   title: string;
   description: string;
   scopes: string[];
+  contractVersion: string;
   inputSchema: Record<string, unknown>;
 }
 
@@ -31,6 +42,7 @@ export const MCP_TOOLS: McpTool[] = [
     title: 'Discover Data Products',
     description: 'Lists the published Data Products in one Workspace that this Agent Identity may read, with the fields, metrics, and filters its Grants permit.',
     scopes: ['mcp:read'],
+    contractVersion: TOOL_CONTRACT_VERSION,
     inputSchema: {
       type: 'object',
       properties: { workspace_id: { type: 'string', description: 'The Workspace whose Data Products to discover.' } },
@@ -43,6 +55,7 @@ export const MCP_TOOLS: McpTool[] = [
     title: 'Read Data Product Contract',
     description: 'Reads the Contract of one published Data Product in one Workspace: its fields, dimensions, metrics, grain, time, filters, and limits, narrowed to what this Agent Identity may read.',
     scopes: ['mcp:read'],
+    contractVersion: TOOL_CONTRACT_VERSION,
     inputSchema: {
       type: 'object',
       properties: {
@@ -58,6 +71,7 @@ export const MCP_TOOLS: McpTool[] = [
     title: 'Query Data Product',
     description: 'Answers one Data Product Query against the pinned Release, with the same records, cursors, Provenance, and errors the Data Product API answers.',
     scopes: ['mcp:read'],
+    contractVersion: TOOL_CONTRACT_VERSION,
     inputSchema: {
       type: 'object',
       properties: {
@@ -66,6 +80,73 @@ export const MCP_TOOLS: McpTool[] = [
         query: { type: 'object', description: 'The Data Product Query document, exactly as the Data Product API accepts it.' },
       },
       required: ['workspace_id', 'data_product_id', 'query'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'discover_reports',
+    title: 'Discover Published Reports',
+    description: 'Lists the published Reports in one Workspace that this Agent Identity may read, without generating a Report or calling a model.',
+    scopes: ['mcp:read'],
+    contractVersion: TOOL_CONTRACT_VERSION,
+    inputSchema: {
+      type: 'object',
+      properties: { workspace_id: { type: 'string', description: 'The Workspace whose Reports to discover.' } },
+      required: ['workspace_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'read_report',
+    title: 'Read Published Report',
+    description: 'Reads one immutable published Report in one Workspace exactly as stored, without generating a Report or calling a model.',
+    scopes: ['mcp:read'],
+    contractVersion: TOOL_CONTRACT_VERSION,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspace_id: { type: 'string', description: 'The Workspace the Report belongs to.' },
+        report_id: { type: 'string', description: 'The Report to read.' },
+      },
+      required: ['workspace_id', 'report_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'ask_natural_language_query',
+    title: 'Ask Natural-Language Query',
+    description: 'Answers one Chinese Natural-Language Query in one Workspace, with structured clarification, governed numbers, Provenance, freshness, and a follow-up conversation handle, exactly as the Natural-Language Query surface answers.',
+    scopes: ['mcp:nlq'],
+    contractVersion: TOOL_CONTRACT_VERSION,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspace_id: { type: 'string', description: 'The Workspace the question runs in.' },
+        data_product_id: { type: 'string', description: 'The one Data Product to ask about; omitted asks across the Workspace.' },
+        question: { type: 'string', description: 'The business question, written in Chinese.' },
+        clarification: { type: 'string', description: 'The answer to a previous structured clarification.' },
+        binding_id: { type: 'string', description: 'The Workspace Model Binding to plan and narrate with; omitted uses the first permitted one.' },
+      },
+      required: ['workspace_id', 'question'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'continue_natural_language_query',
+    title: 'Continue Natural-Language Query',
+    description: 'Continues a Chinese Natural-Language Query conversation with the security-bound handle the previous turn returned. The handle is never authority: the turn is normalized and reauthorized from current state.',
+    scopes: ['mcp:nlq'],
+    contractVersion: TOOL_CONTRACT_VERSION,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspace_id: { type: 'string', description: 'The Workspace the conversation belongs to.' },
+        conversation: { type: 'string', description: 'The opaque handle the previous turn returned.' },
+        question: { type: 'string', description: 'The follow-up question, written in Chinese.' },
+        clarification: { type: 'string', description: 'The answer to a previous structured clarification.' },
+        binding_id: { type: 'string', description: 'The Workspace Model Binding to plan and narrate with; omitted uses the first permitted one.' },
+      },
+      required: ['workspace_id', 'conversation', 'question'],
       additionalProperties: false,
     },
   },
@@ -79,7 +160,13 @@ export function findTool(name: string): McpTool | undefined {
 export function listTools(scopes: Set<string>): Record<string, unknown>[] {
   return MCP_TOOLS
     .filter((tool) => tool.scopes.every((scope) => scopes.has(scope)))
-    .map((tool) => ({ name: tool.name, title: tool.title, description: tool.description, inputSchema: tool.inputSchema }));
+    .map((tool) => ({
+      name: tool.name,
+      title: tool.title,
+      description: tool.description,
+      contractVersion: tool.contractVersion,
+      inputSchema: tool.inputSchema,
+    }));
 }
 
 /** One structured tool failure: either an argument the tool could not act on, or a refused read. */
@@ -95,32 +182,54 @@ class ToolError extends Error {
 }
 
 /** Codes that answer "you may not see this" rather than "this request was malformed". */
-const DENIED_CODES = new Set(['WORKSPACE_ACCESS_DENIED', 'DATA_PRODUCT_NOT_AVAILABLE']);
+const DENIED_CODES = new Set([
+  'WORKSPACE_ACCESS_DENIED',
+  'DATA_PRODUCT_NOT_AVAILABLE',
+  'REPORT_NOT_AVAILABLE',
+  'REPORT_WITHDRAWN',
+]);
+
+/** Everything about who a tool call reads for, resolved on every invocation. */
+interface ToolPrincipal {
+  reader: GrantReader;
+  role: string;
+  subject: string;
+  attributedUserId: string | null;
+  generatedBy: string;
+}
 
 /**
  * Invokes one tool for one authenticated Agent Identity. Every outcome is a tool
  * result the caller can read, and every invocation appends one Audit Event naming
- * the Agent, the OAuth client, the target, and the outcome.
+ * the Agent, the delegated User where present, the OAuth client, the target, and
+ * the outcome.
  */
-export function callTool(
+export async function callTool(
   session: PlatformSession,
   grant: AccessTokenGrant,
   tool: McpTool,
   rawArguments: unknown,
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const actor = `agent:${grant.agent.name}`;
   const context: ActionContext = { action: 'mcp_tool_call', scope: 'workspace' };
   const target = declaredTarget(tool, rawArguments);
   if (target !== undefined) context.target = target;
   const detail = {
     tool: tool.name,
+    tool_contract_version: tool.contractVersion,
     agent_identity_id: grant.agent.agent_identity_id,
     oauth_client_id: grant.client.client_id,
+    ...(grant.delegation === null
+      ? {}
+      : {
+        delegated_user_id: grant.delegation.user.user_id,
+        delegated_username: grant.delegation.user.username,
+      }),
   };
   try {
     const args = readArguments(tool, rawArguments);
-    const reader = agentReader(session, grant.agent.agent_identity_id, actor);
-    const payload = invoke(session, grant, reader, tool, args, context);
+    const principal = principalFor(session, grant);
+    const payload = await invoke(session, grant, principal, tool, args, context);
     session.audit({ ...context, actor, outcome: 'succeeded', detail });
     return toolResult(session, payload);
   } catch (error) {
@@ -135,25 +244,62 @@ export function callTool(
   }
 }
 
+/** Resolves the exact reading authority a token acts under on this invocation. */
+function principalFor(session: PlatformSession, grant: AccessTokenGrant): ToolPrincipal {
+  const label = `agent:${grant.agent.name}`;
+  if (grant.delegation === null) {
+    return {
+      reader: agentReader(session, grant.agent.agent_identity_id, label),
+      role: 'Agent Identity',
+      subject: grant.agent.agent_identity_id,
+      attributedUserId: null,
+      generatedBy: label,
+    };
+  }
+  const user = grant.delegation.user;
+  const role = workspaceRoleOf(session.state, user.user_id, grant.delegation.delegation.workspace_id);
+  if (role === null) {
+    // Membership is rechecked on every call, so a change fails closed now.
+    throw new ToolError('WORKSPACE_ACCESS_DENIED', 'The Workspace is not available to this Agent Identity.');
+  }
+  return {
+    reader: delegatedReader(session, grant.agent.agent_identity_id, user, role, label),
+    role,
+    subject: `${grant.agent.agent_identity_id}|${user.user_id}`,
+    attributedUserId: user.user_id,
+    generatedBy: user.user_id,
+  };
+}
+
 /** The identifier an invocation names before any lookup, so a refused call is still audited. */
 function declaredTarget(tool: McpTool, rawArguments: unknown): string | undefined {
   if (rawArguments === null || typeof rawArguments !== 'object' || Array.isArray(rawArguments)) return undefined;
-  const name = tool.name === 'discover_data_products' ? 'workspace_id' : 'data_product_id';
-  const value = (rawArguments as Record<string, unknown>)[name];
+  const args = rawArguments as Record<string, unknown>;
+  const name = tool.name === 'discover_data_products' || tool.name === 'discover_reports'
+    ? 'workspace_id'
+    : tool.name === 'read_report'
+      ? 'report_id'
+      : tool.name === 'ask_natural_language_query' || tool.name === 'continue_natural_language_query'
+        ? (typeof args['data_product_id'] === 'string' ? 'data_product_id' : 'workspace_id')
+        : 'data_product_id';
+  const value = args[name];
   return typeof value === 'string' && value !== '' ? value : undefined;
 }
 
-function invoke(
+async function invoke(
   session: PlatformSession,
   grant: AccessTokenGrant,
-  reader: GrantReader,
+  principal: ToolPrincipal,
   tool: McpTool,
   args: Record<string, unknown>,
   context: ActionContext,
-): Record<string, unknown> {
-  if (tool.name === 'discover_data_products') return discover(session, grant, reader, args, context);
-  if (tool.name === 'read_data_product_contract') return readContract(session, grant, reader, args, context);
-  return query(session, grant, reader, args, context);
+): Promise<Record<string, unknown>> {
+  if (tool.name === 'discover_data_products') return discover(session, grant, principal.reader, args, context);
+  if (tool.name === 'read_data_product_contract') return readContract(session, grant, principal.reader, args, context);
+  if (tool.name === 'query_data_product') return query(session, grant, principal.reader, args, context);
+  if (tool.name === 'discover_reports') return discoverReports(session, grant, principal, args, context);
+  if (tool.name === 'read_report') return readReport(session, grant, principal, args, context);
+  return ask(session, grant, principal, tool, args, context);
 }
 
 /** Discovery is the Workspace listing, narrowed exactly the way a read is. */
@@ -167,9 +313,7 @@ function discover(
   const workspaceId = requireText(args, 'workspace_id');
   context.workspace_id = workspaceId;
   context.target = workspaceId;
-  if (!grant.agent.workspace_ids.includes(workspaceId)) {
-    throw new ToolError('WORKSPACE_ACCESS_DENIED', 'The Workspace is not available to this Agent Identity.');
-  }
+  requireWorkspace(grant, workspaceId);
   const dataProducts = session.state.data_products
     .filter((product) => product.workspace_id === workspaceId && product.releases.length > 0)
     .flatMap((product) => {
@@ -243,6 +387,116 @@ function query(
   });
 }
 
+/** Published-Report discovery: stored facts only, never a generation. */
+function discoverReports(
+  session: PlatformSession,
+  grant: AccessTokenGrant,
+  principal: ToolPrincipal,
+  args: Record<string, unknown>,
+  context: ActionContext,
+): Record<string, unknown> {
+  const workspaceId = requireText(args, 'workspace_id');
+  context.workspace_id = workspaceId;
+  context.target = workspaceId;
+  requireWorkspace(grant, workspaceId);
+  return listReportsForReader({
+    session,
+    reader: principal.reader,
+    role: principal.role,
+    workspaceId,
+  });
+}
+
+/** Published-Report retrieval: the exact stored Report, never a regenerated one. */
+function readReport(
+  session: PlatformSession,
+  grant: AccessTokenGrant,
+  principal: ToolPrincipal,
+  args: Record<string, unknown>,
+  context: ActionContext,
+): Record<string, unknown> {
+  const workspaceId = requireText(args, 'workspace_id');
+  const reportId = requireText(args, 'report_id');
+  context.workspace_id = workspaceId;
+  context.target = reportId;
+  requireWorkspace(grant, workspaceId);
+  try {
+    return readReportForReader({
+      session,
+      reader: principal.reader,
+      role: principal.role,
+      reportId,
+      workspaceId,
+    });
+  } catch (error) {
+    if (error instanceof ReportAccessFailure) throw new ToolError(error.code, error.message);
+    throw error;
+  }
+}
+
+/**
+ * Natural-Language Query over MCP: the same turn engine the CLI answers with,
+ * under this Agent Identity's own or delegated authority. Clarification is a
+ * structured response and a follow-up presents a security-bound handle that is
+ * never authority in itself.
+ */
+async function ask(
+  session: PlatformSession,
+  grant: AccessTokenGrant,
+  principal: ToolPrincipal,
+  tool: McpTool,
+  args: Record<string, unknown>,
+  context: ActionContext,
+): Promise<Record<string, unknown>> {
+  const workspaceId = requireText(args, 'workspace_id');
+  context.workspace_id = workspaceId;
+  requireWorkspace(grant, workspaceId);
+  const dataProductId = optionalText(args, 'data_product_id');
+  context.target = dataProductId ?? workspaceId;
+  const conversation = tool.name === 'continue_natural_language_query'
+    ? requireText(args, 'conversation')
+    : optionalText(args, 'conversation');
+  const clarification = optionalText(args, 'clarification');
+  const bindingId = optionalText(args, 'binding_id');
+  try {
+    return await askNaturalLanguageQueryForAgent({
+      session,
+      reader: principal.reader,
+      role: principal.role,
+      subject: principal.subject,
+      attributedUserId: principal.attributedUserId,
+      generatedBy: principal.generatedBy,
+      workspaceId,
+      ...(dataProductId === undefined ? {} : { dataProductId }),
+      question: requireText(args, 'question'),
+      ...(clarification === undefined ? {} : { clarification }),
+      ...(conversation === undefined ? {} : { conversation }),
+      ...(bindingId === undefined ? {} : { bindingId }),
+    });
+  } catch (error) {
+    // The engine publishes its own refusal codes through OperatorError; the MCP
+    // surface answers the same code as a structured tool failure.
+    if (error instanceof OperatorError) throw new ToolError(error.code, error.message, { nextStep: error.nextStep });
+    throw error;
+  }
+}
+
+/**
+ * A delegated token acts only inside the consenting Workspace; an autonomous
+ * token acts inside any Workspace its Agent Identity is bound to.
+ */
+function requireWorkspace(grant: AccessTokenGrant, workspaceId: string): void {
+  if (grant.delegation !== null) {
+    if (workspaceId !== grant.delegation.delegation.workspace_id) {
+      throw new ToolError('WORKSPACE_ACCESS_DENIED', 'The Workspace is not available to this Agent Identity.');
+    }
+    return;
+  }
+  if (!grant.agent.workspace_ids.includes(workspaceId)) {
+    throw new ToolError('WORKSPACE_ACCESS_DENIED', 'The Workspace is not available to this Agent Identity.');
+  }
+}
+
 /**
  * Resolves a Data Product this Agent Identity may read in the Workspace the call
  * names. An Agent Identity is not a Workspace member, so a Workspace it is not
@@ -257,9 +511,7 @@ function requireAgentProduct(
   context: ActionContext,
 ): DataProductArtifact {
   context.workspace_id = workspaceId;
-  if (!grant.agent.workspace_ids.includes(workspaceId)) {
-    throw new ToolError('WORKSPACE_ACCESS_DENIED', 'The Workspace is not available to this Agent Identity.');
-  }
+  requireWorkspace(grant, workspaceId);
   const product = findDataProduct(session.state.data_products, dataProductId);
   if (!product || product.workspace_id !== workspaceId) {
     throw new ToolError('DATA_PRODUCT_NOT_AVAILABLE', 'The Data Product is not available to this Agent Identity.');
@@ -273,6 +525,16 @@ function requireText(args: Record<string, unknown>, name: string): string {
   const value = args[name];
   if (typeof value !== 'string' || value.trim() === '') {
     throw new ToolError('MCP_ARGUMENT_INVALID', `The ${name} argument must name one identifier.`, { field: name });
+  }
+  return value;
+}
+
+/** Reads one optional argument as the single value it must be. */
+function optionalText(args: Record<string, unknown>, name: string): string | undefined {
+  const value = args[name];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new ToolError('MCP_ARGUMENT_INVALID', `The ${name} argument must name one value.`, { field: name });
   }
   return value;
 }

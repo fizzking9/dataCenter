@@ -64,11 +64,28 @@ export function grantAgent(
   );
 }
 
+/** Records one User's consent for one Agent Identity inside one Workspace. */
+export function delegateAgent(
+  fixture: PlatformFixture,
+  userToken: string,
+  agentIdentityId: string,
+  workspaceId: string,
+): { delegation_id: string } {
+  const delegated = command(
+    fixture,
+    ['agent', 'delegate', '--agent', agentIdentityId, '--workspace', workspaceId],
+    { token: userToken },
+  );
+  assert.equal(delegated.status, 0, delegated.stderr);
+  return delegated.output as unknown as { delegation_id: string };
+}
+
 /** Mints one access token for a registered client, bound to this server's own resource. */
 export async function issueAgentToken(
   url: string,
   client: { client_id: string; client_secret: string },
   scope = 'mcp:read',
+  delegationId?: string,
 ): Promise<string> {
   const issued = await requestToken(url, {
     grant_type: 'client_credentials',
@@ -76,6 +93,7 @@ export async function issueAgentToken(
     client_secret: client.client_secret,
     resource: url + '/mcp',
     scope,
+    ...(delegationId === undefined ? {} : { delegation_id: delegationId }),
   });
   assert.equal(issued.status, 200, JSON.stringify(issued.body));
   return String(issued.body['access_token']);

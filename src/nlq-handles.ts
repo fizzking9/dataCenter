@@ -27,7 +27,8 @@ const INVALID = 'NLQ_CONVERSATION_INVALID';
 /** The normalized shape a follow-up turn inherits from the turn before it. */
 export interface ConversationPayload {
   workspaceId: string;
-  userId: string;
+  /** The exact principal the conversation belongs to: the User, or Agent and User. */
+  subject: string;
   /** The normalized questions this conversation already answered. */
   questions: string[];
   /** The Data Products the previous turn planned over, never an authority. */
@@ -83,12 +84,12 @@ function stringList(value: unknown, limit: number, maxLength: number): string[] 
  */
 export function encodeProductHandle(
   dataKey: Buffer,
-  binding: { userId: string; workspaceId: string; dataProductId: string },
+  binding: { subject: string; workspaceId: string; dataProductId: string },
 ): string {
   return sealed(dataKey, {
     v: HANDLE_VERSION,
     k: PRODUCT_KIND,
-    u: binding.userId,
+    u: binding.subject,
     w: binding.workspaceId,
     p: binding.dataProductId,
   });
@@ -102,7 +103,7 @@ export function encodeConversation(
   return sealed(dataKey, {
     v: HANDLE_VERSION,
     k: CONVERSATION_KIND,
-    u: payload.userId,
+    u: payload.subject,
     w: payload.workspaceId,
     q: payload.questions.slice(-MAX_CONVERSATION_QUESTIONS)
       .map((question) => question.slice(0, MAX_QUESTION_LENGTH)),
@@ -117,14 +118,14 @@ export function encodeConversation(
  */
 export function decodeConversation(
   dataKey: Buffer,
-  binding: { userId: string; workspaceId: string },
+  binding: { subject: string; workspaceId: string },
   raw: string,
   fail: Fail,
 ): ConversationPayload {
   const payload = opened(dataKey, raw);
   if (payload === null
     || payload['k'] !== CONVERSATION_KIND
-    || payload['u'] !== binding.userId
+    || payload['u'] !== binding.subject
     || payload['w'] !== binding.workspaceId) {
     fail(INVALID, 'A conversation handle must be one this Deployment issued to this actor in this Workspace.');
   }
@@ -135,7 +136,7 @@ export function decodeConversation(
   }
   return {
     workspaceId: payload['w'] as string,
-    userId: payload['u'] as string,
+    subject: payload['u'] as string,
     questions,
     productIds,
   };
