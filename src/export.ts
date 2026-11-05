@@ -16,6 +16,7 @@ import { workspaceRoleOf } from './platform.js';
 import { queryDataProduct } from './product-query.js';
 import { releasedVersion } from './product-release.js';
 import { requireReadableProduct } from './products.js';
+import { purgeRevoked } from './retention.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
 /** A curated export is readable only through a reauthorized, short-lived download. */
@@ -299,6 +300,22 @@ export function downloadExport(options: {
   const record = session.state.exports.find(
     (candidate) => candidate.export_id === options.exportId && candidate.actor_user_id === actor.user.user_id,
   );
+  if (!record) {
+    // A purged export stays explicitly retention-expired instead of silently absent.
+    const ledger = session.state.purge_ledger.find((entry) => entry.purged.some(
+      (recorded) => recorded.record_kind === 'export' && recorded.record_id === options.exportId,
+    ));
+    if (purgeRevoked(session.state, 'export', options.exportId)) {
+      reject(
+        session,
+        actorLabel(actor.user),
+        ledger?.scope.workspace_id == null ? context : { ...context, workspace_id: ledger.scope.workspace_id },
+        'RETENTION_EXPIRED',
+        'This export has expired under the retention policy and was purged.',
+        'Produce the export again to receive a fresh short-lived download.',
+      );
+    }
+  }
   if (!record || workspaceRoleOf(session.state, actor.user.user_id, record.workspace_id) === null) {
     deny(session, actorLabel(actor.user), context, 'EXPORT_NOT_AVAILABLE', 'The export is not available to this actor.');
   }

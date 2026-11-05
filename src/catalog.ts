@@ -2164,3 +2164,186 @@ export function findReportTemplateVersion(
 export function findReport(reports: ReportRecord[], reportId: string): ReportRecord | undefined {
   return reports.find((report) => report.report_id === reportId);
 }
+
+// ---------------------------------------------------------------------------
+// Retention: versioned policies, Workspace overrides, Holds, and Purge.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every class of produced data one retention clock governs. Raw payloads,
+ * Release history, Reports, Artifact versions and lifecycle facts, Provenance,
+ * Audit Events, terminal Proposal evidence, exports, and derived data each age
+ * on their own settled rule.
+ */
+export type RetentionDataClass =
+  | 'raw_acquisition'
+  | 'dataset_release_history'
+  | 'report'
+  | 'artifact_version'
+  | 'provenance'
+  | 'audit_event'
+  | 'proposal_evidence'
+  | 'export'
+  | 'derived_data';
+
+/**
+ * One settled retention clock: a number of days from creation, an indefinite
+ * preservation, or no guarantee at all. A policy is UTC-based and applies to
+ * existing and future data alike, so this carries no instant of its own.
+ */
+export type RetentionTerm =
+  | { kind: 'days'; days: number }
+  | { kind: 'indefinite' }
+  | { kind: 'no_guarantee' };
+
+/** The finite envelope one Workspace override must stay inside. */
+export interface RetentionBounds {
+  min_days: number;
+  max_days: number;
+}
+
+/** The classes a Workspace Administrator may override within Deployment bounds. */
+export type OverridableRetentionClass = 'raw_acquisition' | 'dataset_release_history' | 'report';
+
+/** One immutable Deployment retention policy version. */
+export interface RetentionPolicyVersion {
+  version: number;
+  published_at: string;
+  published_by: string;
+  defaults: Record<RetentionDataClass, RetentionTerm>;
+  bounds: Record<OverridableRetentionClass, RetentionBounds>;
+  content_hash: string;
+}
+
+/** The Deployment retention policy Artifact and its append-only versions. */
+export interface RetentionPolicyArtifact {
+  artifact_id: 'retention-policy';
+  versions: RetentionPolicyVersion[];
+}
+
+/** One Workspace retention override revision, naming the policy it was made under. */
+export interface WorkspaceRetentionOverrideVersion {
+  version: number;
+  policy_version: number;
+  terms: Partial<Record<OverridableRetentionClass, RetentionTerm>>;
+  updated_at: string;
+  updated_by: string;
+}
+
+/** A Workspace's append-only retention overrides within Deployment bounds. */
+export interface WorkspaceRetentionOverrideArtifact {
+  workspace_id: string;
+  versions: WorkspaceRetentionOverrideVersion[];
+}
+
+/** The scope a retention Hold protects or a Purge targets. */
+export type RetentionScopeKind =
+  | 'deployment'
+  | 'workspace'
+  | 'source'
+  | 'dataset'
+  | 'release'
+  | 'proposal_evidence'
+  | 'export';
+
+/**
+ * One resolved retention scope. Every identifier is explicit, so a scope never
+ * reaches content the requesting administrator does not administer.
+ */
+export interface RetentionScope {
+  kind: RetentionScopeKind;
+  workspace_id: string | null;
+  source_id: string | null;
+  dataset_id: string | null;
+  dataset_release: number | null;
+  target_id: string | null;
+}
+
+/**
+ * One audited Retention Hold. It names an accountable administrator, the exact
+ * scope it protects, a reason, and the date its necessity must be reviewed.
+ * An active Hold blocks automatic and manual Purge until it is released.
+ */
+export interface RetentionHoldRecord {
+  hold_id: string;
+  scope: RetentionScope;
+  reason: string;
+  review_at: string;
+  created_at: string;
+  created_by: string;
+  created_by_user_id: string;
+  released_at: string | null;
+  released_by: string | null;
+  released_by_user_id: string | null;
+}
+
+/** The kind of governed record one plan entry would delete. */
+export type PurgeRecordKind =
+  | 'raw_acquisition'
+  | 'dataset_release'
+  | 'data_product_release'
+  | 'report'
+  | 'proposal_evidence'
+  | 'export';
+
+/** Why one record is, or is not, eligible for physical deletion. */
+export type PurgeEligibilityReason =
+  | 'eligible'
+  | 'within_retention'
+  | 'current'
+  | 'held'
+  | 'dependent'
+  | 'indefinite'
+  | 'no_guarantee';
+
+/** One evaluated record in a Purge plan. */
+export interface PurgePlanEntry {
+  data_class: RetentionDataClass;
+  record_kind: PurgeRecordKind;
+  /** The stable key of the record: a raw id, `<artifact>#<release>`, or an id. */
+  record_id: string;
+  workspace_id: string;
+  eligible: boolean;
+  reason: PurgeEligibilityReason;
+  /** The active Holds that keep this record ineligible. */
+  held_by: string[];
+  /** The retained or current results that still depend on this record. */
+  dependencies: string[];
+  /** Set when one execution pass deleted the record. */
+  purged?: boolean;
+  /** Set when a dependency or Hold appeared after the plan was made. */
+  deferred?: boolean;
+}
+
+/** One durable Purge request and its asynchronous deletion work. */
+export interface PurgeJobRecord {
+  purge_id: string;
+  mode: 'manual' | 'automatic';
+  scope: RetentionScope;
+  requested_at: string;
+  requested_by: string;
+  requested_by_user_id: string;
+  status: 'pending' | 'failed' | 'completed';
+  /** Logical access is revoked from this instant, before any deletion. */
+  access_revoked_at: string;
+  plan: PurgePlanEntry[];
+  attempts: number;
+  retry_at: string | null;
+  last_error: string | null;
+  completed_at: string | null;
+  ledger_sequence: number | null;
+}
+
+/** One sequenced Purge Ledger entry, the durable proof content was purged. */
+export interface PurgeLedgerEntry {
+  sequence: number;
+  purge_id: string;
+  mode: 'manual' | 'automatic';
+  recorded_at: string;
+  scope: RetentionScope;
+  purged: Array<{
+    record_kind: PurgeRecordKind;
+    record_id: string;
+    data_class: RetentionDataClass;
+  }>;
+}

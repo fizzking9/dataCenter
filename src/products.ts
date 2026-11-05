@@ -29,6 +29,7 @@ import { readContract } from './product-contract.js';
 import { nextContractVersion } from './product-version.js';
 import { readableGrantScope, type GrantReader, type GrantScope } from './grants.js';
 import { openPlatform, type PlatformSession } from './session.js';
+import { isPastRetention, purgeRevoked } from './retention.js';
 import { requireAdministeredSource } from './sources.js';
 
 const NAME_MINIMUM = 2;
@@ -715,8 +716,10 @@ export function listDataProductReleases(options: {
   const actor = resolveActor(session, options.token, context);
   const product = requireReadableProduct(session, actor, context, options.dataProductId);
   const scoped: ActionContext = { ...context, workspace_id: product.workspace_id, target: product.data_product_id };
+  const now = new Date();
   const releases = product.releases.map((release) => {
     const version = findDataProductVersion(product, release.data_product_version);
+    const current = product.lines.some((line) => line.current_release === release.release);
     return {
       release: release.release,
       data_product_version: release.data_product_version,
@@ -725,6 +728,10 @@ export function listDataProductReleases(options: {
       dataset_release: release.dataset_release,
       relationships: (release.relationships ?? []).map((binding) => ({ ...binding })),
       created_at: release.created_at,
+      current,
+      retention_expired: !current
+        && (purgeRevoked(session.state, 'data_product_release', `${product.data_product_id}#${release.release}`)
+          || isPastRetention(session.state, product.workspace_id, 'dataset_release_history', release.created_at, now)),
     };
   });
   session.audit({ ...scoped, actor: actorLabel(actor.user), outcome: 'succeeded', detail: { releases_returned: releases.length } });
