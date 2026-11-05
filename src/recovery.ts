@@ -180,7 +180,7 @@ function recordOperatorAction(
   detail: Record<string, string | number | boolean>,
 ): string {
   try {
-    const session = openPlatform(root, masterKey);
+    const session = openPlatform(root, masterKey, 'allow');
     session.audit({
       actor: `operator:${operator}`,
       action,
