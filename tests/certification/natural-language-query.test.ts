@@ -404,5 +404,61 @@ test('NLQ returns a distinct structured outcome and limitation for empty, no-evi
   }
 });
 
+test('NLQ discloses the resolved interpretation, filters, window, Release, Provenance, freshness, and partial period', async (t) => {
+  const s = await readySurface();
+  t.after(() => s.endpoint.close());
+
+  // The window runs past the Release's coverage, so the answer is partial.
+  const partial = asOutput(await ask(s, ['--question', '2026-01-01 至 2026-02-28 杭州的处理量合计是多少？']));
+  assert.equal(partial.outcome, 'answered', JSON.stringify(partial));
+  assert.equal(partial.partial_period, true, 'a window past the data is reported as partial');
+
+  // The resolved interpretation is the same one the model stated, not a rewrite.
+  const resolved = asRecord(partial.resolved);
+  assert.equal(typeof resolved['interpretation'], 'string');
+  assert.ok(String(resolved['interpretation']).length > 0, 'the resolved interpretation is stated');
+  assert.equal(resolved['interpretation'], partial.interpretation, 'the resolved interpretation is the one the model stated');
+  assert.deepEqual(resolved['metrics'], ['handled_total'], 'the resolved metric is named');
+  assert.deepEqual(resolved['dimensions'], [], 'the resolved grouping is named');
+  assert.deepEqual(resolved['filters'], [{ field: 'city', op: 'equals', value: '杭州' }], 'the resolved filter is named');
+
+  // The queried and resolved windows agree, coverage included.
+  const window = asRecord(resolved['window']);
+  assert.equal(window['start'], '2026-01-01');
+  assert.equal(window['end'], '2026-02-28');
+  assert.equal(window['partial'], true);
+  assert.equal(asRecord(window['coverage'])['end'], '2026-01-20', 'coverage names the last governed day');
+  assert.deepEqual(partial.window, window, 'the top-level window is the resolved window');
+  assert.deepEqual(asRecord(partial.result)['window'], window, 'the engine result carries the same window');
+  assert.deepEqual(resolved['defaults_applied'], partial.defaults_applied);
+
+  // Release and Provenance come from the executed read itself.
+  const release = asRecord(partial.data_product);
+  const engineResult = asRecord(partial.result);
+  assert.equal(typeof release['data_product_release'], 'number');
+  assert.equal(release['data_product_release'], engineResult['data_product_release']);
+  assert.equal(release['dataset_release'], asRecord(engineResult['provenance'])['dataset_release'], 'the Release names the Dataset Release the read used');
+  assert.equal(typeof release['contract_hash'], 'string');
+  assert.deepEqual(partial.provenance, engineResult['provenance'], 'Provenance is the executed read Provenance');
+  const provenance = asRecord(partial.provenance);
+  assert.equal(typeof provenance['released_at'], 'string');
+  assert.equal(typeof provenance['acquired_at'], 'string');
+  assert.equal(typeof provenance['integrated_at'], 'string');
+  assert.ok(String(provenance['source'] && asRecord(provenance['source'])['name']).length > 0);
+
+  // Freshness states how far the data actually reaches, and the partial status is called out.
+  const freshness = asRecord(partial.freshness);
+  assert.equal(freshness['data_through'], '2026-01-20');
+  assert.equal(freshness['released_at'], provenance['released_at']);
+  assert.ok((partial.limitations as string[]).some((line) => line.includes('部分期间')), 'the partial period is stated as a limitation');
+
+  // A window inside coverage is complete, so the partial status clears.
+  const complete = asOutput(await ask(s, ['--question', '2026-01-05 至 2026-01-20 杭州的处理量合计是多少？']));
+  assert.equal(complete.outcome, 'answered', JSON.stringify(complete));
+  assert.equal(complete.partial_period, false, 'a window inside coverage is not partial');
+  assert.equal(asRecord(complete.resolved)['partial_period'], false);
+  assert.equal((complete.limitations as string[]).some((line) => line.includes('部分期间')), false);
+});
+
 // The remaining acceptance criteria are added one at a time, each red before green.
 void EXTENDED_LEDGER_CONTRACT;
