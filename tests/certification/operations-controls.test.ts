@@ -10,6 +10,8 @@ import {
   configureOperations,
   directoryBytes,
   generateTemplateReport,
+  MEASUREMENT_WINDOWS,
+  measurementWindows,
   memoryPercent,
   observeWorkloadEnvelope,
   OPERATIONS_ASK_QUESTION,
@@ -17,9 +19,16 @@ import {
   readyOperationsSurface,
   recordWorkloadRun,
   reportWorkload,
-  runMixedWorkload,
+  runMeasurementWindow,
+  signInWorkloadUser,
   ssdFreePercent,
   usageView,
+  WORKLOAD_CONCURRENCY,
+  WORKLOAD_CONCURRENCY_MODEL,
+  WORKLOAD_CONTRACTS,
+  WORKLOAD_MIX,
+  workloadQuery,
+  type WorkloadWindowResult,
 } from '../support/operations.js';
 import { command, createWorkspace, grantRole, jsonFile, sessionFor, workspaceFixture } from '../support/platform.js';
 
@@ -298,6 +307,7 @@ interface UsageView {
   totals: { generations: number; input_tokens: number; output_tokens: number; cost_cny: number };
   by_class: Record<string, {
     generations: number;
+    operations: number;
     input_tokens: number;
     output_tokens: number;
     cost_cny: number;
@@ -452,6 +462,18 @@ test('an activation evaluation reports its consumption against the activation bu
   await surface.endpoint.close();
 });
 
+interface WorkloadLatency {
+  samples: number;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  p99_ms: number | null;
+  cold: { samples: number };
+  warm: { samples: number };
+  timeouts: number;
+  targets: Record<string, number>;
+  met: boolean;
+}
+
 interface WorkloadReport {
   workload: {
     required: Record<string, number>;
@@ -463,28 +485,23 @@ interface WorkloadReport {
     observed: Array<{
       window: string;
       run_id: string | null;
+      started_at: string | null;
+      finished_at: string | null;
       duration_seconds: number | null;
+      parameters: Record<string, unknown> | null;
       samples: number;
       cold: number;
       warm: number;
     }>;
     met: boolean;
   };
-  latency: Record<string, {
-    samples: number;
-    p50_ms: number | null;
-    p95_ms: number | null;
-    p99_ms: number | null;
-    cold: { samples: number };
-    warm: { samples: number };
-    timeouts: number;
-    met: boolean;
-  }>;
+  latency: Record<string, WorkloadLatency>;
   latency_met: boolean;
   freshness: Record<string, {
     samples: number;
     p95_seconds: number | null;
     p99_seconds: number | null;
+    targets: { p95_seconds: number | null; p99_seconds: number | null };
     met: boolean;
   }>;
   freshness_met: boolean;
@@ -501,15 +518,29 @@ interface WorkloadReport {
   met: boolean;
 }
 
-const MEASURED_WINDOWS = ['warmup', 'run_1', 'run_2', 'run_3', 'soak'] as const;
+/**
+ * The scaled window length CI exercises: two seconds per certified window, so
+ * every window really repeats its round and the cold and warm samples are both
+ * observed rather than assumed.
+ */
+const SCALED_WINDOW_SECONDS = 2;
 
 /**
- * The exact mixed load is measured through the same window sequence the release
+ * The exact mixed load is measured through the window sequence the release
  * certifies — a warm-up, three measurements, and a soak — with the windows
- * scaled down so the harness itself is exercised in seconds. The report is
- * computed from the samples the harness actually timed, not from promises.
+ * scaled down so the harness itself is exercised in seconds. Every sample is
+ * one request over a supported external contract, issued concurrently with the
+ * other nineteen and with scheduled acquisition and integration, and the report
+ * is computed from the samples the harness actually timed.
+ *
+ * The measured concurrency model is one application process, not several: the
+ * twenty requests are issued at once and reads run concurrently, while the
+ * application serializes its governed writes (Report generation, Natural-
+ * Language Query turns, scheduled acquisition) through its in-process write
+ * queue. The evidence states that model rather than claiming cross-process
+ * concurrency that was never measured.
  */
-test('the measured mixed workload reports its own observations against every target', async () => {
+test('the measured mixed workload runs concurrently through external contracts', async () => {
   const source = await startHttpSource({ replies: [{ body: pageBody(DEVICES.slice(0, 1)) }] });
   const surface = await readyOperationsSurface();
   const acquisition = await readySource(source, {
@@ -517,7 +548,13 @@ test('the measured mixed workload reports its own observations against every tar
     schedule: { every_minutes: 15, start_tolerance_seconds: 60 },
     publicationTargets: { p95_seconds: 300, p99_seconds: 600 },
   });
-  const console = await startConsole(surface.fixture);
+  // A console that cannot start must still release the fixtures opened before
+  // it, so a failed setup fails the test instead of stalling the runner.
+  const console = await startConsole(surface.fixture).catch(async (error: unknown) => {
+    await acquisition.close();
+    await surface.endpoint.close();
+    throw error;
+  });
   try {
     const { fixture } = surface;
     const deploymentToken = surface.deploymentAdministratorToken;
@@ -530,42 +567,63 @@ test('the measured mixed workload reports its own observations against every tar
     assert.equal(granted.status, 0, granted.stderr);
     const mcpToken = await issueAgentToken(console.url, client, 'mcp:read');
 
-    // The operator states the tariff it is billed at and the acquisition target
-    // its scheduled Source promises, so both are certificates of this run.
+    // The operator states the tariff it is billed at, the acquisition target
+    // its scheduled Source promises, and the Agent request ceiling this
+    // certification runs under: the measured round presents four MCP queries
+    // per round for the whole window sequence, so the default sixty-per-minute
+    // Agent ceiling would refuse the soak before its samples were taken. The
+    // exact ceiling is recorded in every window's evidence.
     configureOperations(fixture, deploymentToken, {
       prices: { input_cny_per_million_tokens: 10, output_cny_per_million_tokens: 20 },
       targets: { acquisition_run: { p95_seconds: 300, p99_seconds: 600 } },
+      limits: { agent_direct_requests_per_minute: 10_000 },
     }, 'operations-certification');
+    const certified = command(fixture, ['operations', 'show'], { token: deploymentToken });
+    assert.equal(certified.status, 0, certified.stderr);
+    const certifiedLimits = certified.output['limits'] as Record<string, unknown>;
+    assert.equal(certifiedLimits['agent_direct_requests_per_minute'], 10_000);
+
+    // The workload presents the same sessions a browser workflow presents.
+    const consumer = await signInWorkloadUser(fixture, console.url, 'analyst@example.invalid', 'analyst-consumer');
+    const administrator = await signInWorkloadUser(fixture, console.url, 'operations@example.invalid', 'operations-administrator');
+    const clients = {
+      url: console.url,
+      consumerCookie: consumer.cookie,
+      administratorCookie: administrator.cookie,
+      consumerBearer: consumer.token,
+      errors: () => console.errors(),
+      mcp: { token: mcpToken, errors: () => console.errors() },
+    };
+    // The schedule cursor advances with every round, so scheduled acquisition
+    // stays due and active throughout every window.
+    const schedule = {
+      sourceId: acquisition.sourceId,
+      at: new Date().toISOString(),
+      everySeconds: 15 * 60,
+    };
 
     const cpuStart = process.cpuUsage();
     const loopStart = Date.now();
-    for (const [index, window] of MEASURED_WINDOWS.entries()) {
-      const started = new Date();
-      // The scaled windows step fifteen minutes apart, so each one is due on
-      // the Source's real schedule instead of being skipped as not-yet-due.
-      const scheduledAt = new Date(Date.now() + index * 15 * 60_000).toISOString();
-      const samples = await runMixedWorkload(surface, {
-        cache: window === 'warmup' || window === 'run_1' ? 'cold' : 'warm',
-        mcp: {
-          url: console.url,
-          token: mcpToken,
-          workspaceId: surface.workspaceId,
-          dataProductId: surface.dataProductId,
-          errors: () => console.errors(),
-        },
-        acquisition: { sourceId: acquisition.sourceId, at: scheduledAt },
+    const measured: WorkloadWindowResult[] = [];
+    for (const [index, plan] of measurementWindows(SCALED_WINDOW_SECONDS).entries()) {
+      const result = await runMeasurementWindow(surface, plan, {
+        clients,
+        query: workloadQuery(index),
+        acquisition: schedule,
       });
-      const finished = new Date();
-      const recorded = recordWorkloadRun(fixture, deploymentToken, {
-        runId: `measured-${window}`,
-        window,
-        startedAt: started.toISOString(),
-        finishedAt: finished.toISOString(),
-        parameters: { scaled_window: true, workload: '20-operation mixed', active_acquisition: true },
-      }, samples);
-      // Twenty Consumer operations and the scheduled acquisition beside them.
-      assert.equal(recorded['samples'], 21);
+      const recorded = recordWorkloadRun(fixture, deploymentToken, result, { limits: certifiedLimits });
+      assert.equal(recorded['window'], plan.window);
+      assert.equal(recorded['samples'], result.samples.length, plan.window);
+      assert.equal(recorded['duration_seconds'], result.observed_seconds, plan.window);
+      measured.push(result);
     }
+    assert.deepEqual(
+      measured.flatMap((result) => result.samples
+        .filter((sample) => sample.outcome !== 'succeeded')
+        .map((sample) => `${result.window}:${sample.operation}:${sample.outcome}${sample.error === undefined ? '' : `:${sample.error}`}`)),
+      [],
+      'every measured operation succeeded',
+    );
 
     const elapsedMs = Date.now() - loopStart;
     const cpu = process.cpuUsage(cpuStart);
@@ -580,8 +638,9 @@ test('the measured mixed workload reports its own observations against every tar
 
     const report = reportWorkload(fixture) as unknown as WorkloadReport;
 
-    // The reported workload is the exact twenty-operation mix in every measured
-    // window, with the four Consumer classes counted by what really ran.
+    // Harness correctness: every round launched exactly the twenty-operation
+    // mix all at once, with one scheduled acquisition beside it, through the
+    // external contracts only.
     assert.deepEqual(report.workload.required, {
       consumer_operations: 20,
       direct_queries: 12,
@@ -589,50 +648,111 @@ test('the measured mixed workload reports its own observations against every tar
       natural_language_queries: 2,
       report_generations: 2,
     });
-    for (const window of ['run_1', 'run_2', 'run_3', 'soak']) {
-      assert.deepEqual(report.workload.windows[window], {
-        direct: 12,
-        stored_report_reads: 4,
-        natural_language_queries: 2,
-        report_generations: 2,
-        total: 20,
-      }, window);
+    let measuredSamples = 0;
+    let measuredRounds = 0;
+    let totalRounds = 0;
+    for (const result of measured) {
+      assert.equal(result.samples.length, result.rounds * (WORKLOAD_CONCURRENCY + 1), result.window);
+      assert.equal(
+        result.samples.filter((sample) => sample.operation_class === 'acquisition').length,
+        result.rounds,
+        result.window,
+      );
+      assert.equal(
+        result.samples.filter((sample) => sample.operation_class !== 'acquisition').length,
+        result.rounds * WORKLOAD_CONCURRENCY,
+        result.window,
+      );
+      assert.deepEqual(report.workload.windows[result.window], {
+        direct: WORKLOAD_MIX.direct_queries * result.rounds,
+        stored_report_reads: WORKLOAD_MIX.stored_report_reads * result.rounds,
+        natural_language_queries: WORKLOAD_MIX.natural_language_queries * result.rounds,
+        report_generations: WORKLOAD_MIX.report_generations * result.rounds,
+        total: WORKLOAD_CONCURRENCY * result.rounds,
+      }, result.window);
+      totalRounds += result.rounds;
+      if (result.window === 'warmup') continue;
+      measuredRounds += result.rounds;
+      measuredSamples += result.samples.length;
     }
     assert.equal(report.workload.met, true);
 
-    // Every window states the elapsed time the harness actually measured, with
-    // cold and warm caches separated by the window they were taken in.
-    assert.deepEqual(report.runs.observed.map((run) => run.window), [...MEASURED_WINDOWS]);
-    assert.equal(report.runs.observed.every((run) => run.run_id !== null && run.duration_seconds !== null), true);
-    assert.equal(report.runs.met, true);
-    assert.equal(report.runs.observed.find((run) => run.window === 'run_1')?.cold, 21);
-    assert.equal(report.runs.observed.find((run) => run.window === 'soak')?.warm, 21);
-
-    // Every measured percentile is stated against its own target and the
-    // per-class p95/p99 targets of section 15 are all met by these samples.
-    for (const operation of ['api_query', 'mcp_query', 'report_read', 'nlq', 'report_generation']) {
-      const measured = report.latency[operation];
-      assert.ok(measured !== undefined, operation);
-      assert.equal(measured.timeouts, 0, operation);
-      assert.equal(measured.met, true, `${operation} p95 ${String(measured.p95_ms)} p99 ${String(measured.p99_ms)}`);
+    // Every window's evidence states the exact configured and observed
+    // durations, concurrency, operation mix, contracts, and sample counts.
+    assert.deepEqual(report.runs.observed.map((run) => run.window), [...MEASUREMENT_WINDOWS]);
+    for (const [index, result] of measured.entries()) {
+      const run = report.runs.observed[index]!;
+      assert.equal(run.run_id, `measured-${result.window}`);
+      assert.equal(run.duration_seconds, result.observed_seconds, result.window);
+      assert.equal(run.samples, result.samples.length, result.window);
+      assert.ok(run.duration_seconds !== null && run.duration_seconds > 0, result.window);
+      const parameters = run.parameters ?? {};
+      assert.equal(parameters['window_seconds'], result.duration_seconds, result.window);
+      assert.equal(parameters['observed_seconds'], result.observed_seconds, result.window);
+      assert.equal(parameters['concurrency'], WORKLOAD_CONCURRENCY, result.window);
+      assert.deepEqual(parameters['concurrency_model'], WORKLOAD_CONCURRENCY_MODEL, result.window);
+      assert.equal(parameters['rounds'], result.rounds, result.window);
+      assert.equal(parameters['samples'], result.samples.length, result.window);
+      assert.equal(parameters['active_acquisition'], true, result.window);
+      assert.deepEqual(parameters['operation_mix'], {
+        direct_queries: WORKLOAD_MIX.direct_queries * result.rounds,
+        direct_api_queries: WORKLOAD_MIX.direct_api_queries * result.rounds,
+        direct_mcp_queries: WORKLOAD_MIX.direct_mcp_queries * result.rounds,
+        stored_report_reads: WORKLOAD_MIX.stored_report_reads * result.rounds,
+        natural_language_queries: WORKLOAD_MIX.natural_language_queries * result.rounds,
+        report_generations: WORKLOAD_MIX.report_generations * result.rounds,
+      }, result.window);
+      assert.deepEqual(parameters['external_contracts'], [...WORKLOAD_CONTRACTS], result.window);
+      assert.deepEqual(parameters['configured_limits'], certifiedLimits, result.window);
     }
-    assert.deepEqual(
-      { cold: report.latency['api_query']?.cold.samples, warm: report.latency['api_query']?.warm.samples },
-      { cold: 8, warm: 24 },
-      'run_1 is the only cold measured window; later windows are warm',
-    );
-    assert.equal(report.latency_met, true);
+    assert.equal(report.runs.met, true);
 
-    // The scheduled acquisition published inside its own freshness target.
-    assert.equal(report.freshness['acquisition_run']?.samples, 4);
-    assert.equal(report.freshness['acquisition_run']?.met, true);
+    // Every threshold the Deployment states is evaluated from those samples:
+    // a latency target has its observed p50/p95/p99, and a freshness target has
+    // its observed publication latencies.
+    const shown = command(fixture, ['operations', 'show'], { token: deploymentToken });
+    assert.equal(shown.status, 0, shown.stderr);
+    const targets = shown.output['targets'] as Record<string, Record<string, number>>;
+    for (const [name, target] of Object.entries(targets)) {
+      if (target['p95_ms'] !== undefined || target['p99_ms'] !== undefined || target['timeout_ms'] !== undefined) {
+        const latency = report.latency[name];
+        assert.ok(latency !== undefined, `${name} was not evaluated`);
+        assert.deepEqual(latency.targets, target, name);
+        assert.ok(latency.samples > 0, name);
+        assert.ok(latency.p50_ms !== null && latency.p95_ms !== null && latency.p99_ms !== null, name);
+        assert.equal(latency.timeouts, 0, name);
+        assert.equal(latency.met, true, `${name} p95 ${String(latency.p95_ms)} p99 ${String(latency.p99_ms)}`);
+      }
+      if (target['p95_seconds'] !== undefined || target['p99_seconds'] !== undefined) {
+        const freshness = report.freshness[name];
+        assert.ok(freshness !== undefined, `${name} freshness was not evaluated`);
+        assert.ok(freshness.samples > 0, `${name} freshness ${JSON.stringify(freshness)}`);
+        assert.equal(freshness.met, true, `${name} freshness ${JSON.stringify(freshness)}`);
+      }
+    }
+    assert.equal(report.latency_met, true);
     assert.equal(report.freshness_met, true);
+    assert.equal(report.freshness['acquisition_run']?.samples, measuredRounds);
+
+    // Cold and warm samples are separated by the cache state each answer
+    // reported: a first touch over a window's query really missed, and its
+    // repeats really reused the governed page.
+    for (const operation of ['api_query', 'mcp_query', 'report_read', 'nlq', 'report_generation']) {
+      const latency = report.latency[operation];
+      assert.ok(latency !== undefined, operation);
+      assert.equal(latency.cold.samples + latency.warm.samples, latency.samples, operation);
+    }
+    assert.ok((report.latency['api_query']?.cold.samples ?? 0) > 0, 'a first-touch API query is cold');
+    assert.ok((report.latency['api_query']?.warm.samples ?? 0) > 0, 'a repeated API query is warm');
+    assert.ok((report.latency['mcp_query']?.cold.samples ?? 0) > 0, 'a first-touch MCP query is cold');
+    assert.ok((report.latency['mcp_query']?.warm.samples ?? 0) > 0, 'a repeated MCP query is warm');
 
     // Unexpected failures stay below 0.1 percent, with no critical failure.
     assert.deepEqual(
       { unexpected: report.failures.unexpected, critical: report.failures.critical, met: report.failures.met },
       { unexpected: 0, critical: 0, met: true },
     );
+    assert.equal(report.failures.samples, measuredSamples);
     assert.ok(report.failures.rate < 0.001);
 
     // The observed host volumes and pressure held inside the envelope.
@@ -645,8 +765,23 @@ test('the measured mixed workload reports its own observations against every tar
     assert.equal(report.envelope.checks['total_storage_bytes']?.met, true);
     assert.equal(report.envelope.met, true);
 
-    // Certification spend and ordinary monthly operation are both priced at the
-    // configured tariff and inside their budgets.
+    // Token and CNY accounting is observed, not estimated: every window turn
+    // states the endpoint's own 1,200 input and 300 output tokens, and the
+    // certification budget prices exactly those generations at the tariff.
+    const used = usage(fixture, deploymentToken);
+    assert.equal(used.by_class['nlq']?.generations, totalRounds * 4);
+    assert.equal(used.by_class['nlq']?.operations, totalRounds * 2);
+    assert.equal(used.by_class['report']?.generations, totalRounds * 2 + 1);
+    assert.equal(used.by_class['report']?.operations, totalRounds * 2 + 1);
+    assert.equal(used.totals.generations, totalRounds * 6 + 8);
+    assert.equal(used.totals.input_tokens, (totalRounds * 6 + 8) * 1_200);
+    assert.equal(used.totals.output_tokens, (totalRounds * 6 + 8) * 300);
+    assert.ok((used.by_class['nlq']?.cost_cny ?? 0) > 0);
+    assert.ok((used.by_class['report']?.cost_cny ?? 0) > 0);
+    assert.equal(
+      report.budgets.certification.cost_cny,
+      Number((totalRounds * (2 * 0.036 + 2 * 0.018)).toFixed(6)),
+    );
     assert.equal(report.budgets.certification.ceiling_cny, 1_000);
     assert.ok(report.budgets.certification.cost_cny > 0);
     assert.equal(report.budgets.certification.met, true);

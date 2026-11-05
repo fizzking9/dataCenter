@@ -433,13 +433,47 @@ function publicJob(job: LifecycleJob | undefined): Record<string, unknown> | nul
   };
 }
 
+/**
+ * The POST routes that answer a governed read: they persist no platform state
+ * and keep running concurrently with every other read and write. A
+ * Natural-Language Query turn is not one of them: an answered turn records a
+ * Report Review Candidate, so the turn is a governed write.
+ */
+const READ_ONLY_POST_ROUTES = [
+  /^\/api\/workspace\/products\/[^/]+\/query$/u,
+  /^\/api\/workspaces\/[^/]+\/data-products\/[^/]+\/query$/u,
+];
+
+/** Whether one API request is a governed write that must not race another. */
+function isGovernedWrite(method: string, pathname: string): boolean {
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return false;
+  if (!pathname.startsWith('/api/')) return false;
+  return !READ_ONLY_POST_ROUTES.some((pattern) => pattern.test(pathname));
+}
+
+/**
+ * Every governed write is one read-modify-write of the same durable platform
+ * state. The application runs those writes one at a time, so two requests
+ * racing over that state can never persist a stale snapshot over each other's
+ * work, and the audit chain they extend stays a single sequence. Reads stay
+ * concurrent; a write's measured elapsed time still includes the queueing.
+ */
+function enqueueWrite(tail: { current: Promise<void> }, work: () => Promise<void>): Promise<void> {
+  const run = tail.current.then(work, work);
+  tail.current = run.then(() => undefined, () => undefined);
+  return run;
+}
+
 function createHandler(options: ConsoleServerOptions, assets: string, identity: McpServerIdentity) {
   const lifecycleJobs = new Map<string, LifecycleJob>();
+  const writes = { current: Promise.resolve() };
   return async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) response.setHeader(name, value);
     const url = new URL(request.url ?? '/', 'http://localhost');
     if (url.pathname.startsWith('/api/')) {
-      await handleApi(options, request, response, url.pathname, lifecycleJobs);
+      const work = (): Promise<void> => handleApi(options, request, response, url.pathname, lifecycleJobs);
+      if (isGovernedWrite(request.method ?? 'GET', url.pathname)) await enqueueWrite(writes, work);
+      else await work();
       return;
     }
     if (await handleMcpSurface({
