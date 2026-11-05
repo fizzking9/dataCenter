@@ -897,6 +897,9 @@ export interface ReportTemplateVersion {
   grounded_prompt: ReportGroundedPrompt;
   freshness_policy: ReportFreshnessPolicy;
   content_hash: string;
+  /** The lifecycle fact withdrawing this exact Version from future generation. */
+  withdrawn_at: string | null;
+  withdrawn_by: string | null;
 }
 
 /** A Workspace Artifact holding the Template Versions and the published one. */
@@ -980,6 +983,123 @@ export interface ReportRecord {
   freshness_policy: ReportFreshnessPolicy;
   generated_at: string;
   generated_by: string;
+  /** The lifecycle fact withdrawing this exact Report from stock and retrieval. */
+  withdrawn_at: string | null;
+  withdrawn_by: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// QA stock review: deduplicated administrator review of unmatched answers.
+// ---------------------------------------------------------------------------
+
+/** The settled local embedding configuration similarity nomination runs under. */
+export interface ReviewEmbeddingConfiguration {
+  model_id: string;
+  revision: string;
+  dimensions: number;
+  normalization: string;
+  metric: string;
+}
+
+/** One QA pair a candidate is nominated against, never declared equivalent. */
+export interface ReviewSimilarityNomination {
+  kind: 'report_template' | 'review_candidate';
+  target_id: string;
+  question: string;
+  /** The cosine score under the settled local embedding configuration. */
+  score: number;
+}
+
+/** The one durable notification an open review item sent its reviewer. */
+export interface ReportCandidateNotification {
+  notified_at: string;
+  reason: 'created' | 'reopened';
+}
+
+/** One Workspace Administrator decision on one exact review candidate. */
+export interface ReportCandidateDecision {
+  decided_at: string;
+  decided_by: string;
+  reason: string | null;
+}
+
+/** How a review candidate currently stands. */
+export type ReportCandidateStatus = 'open' | 'approved' | 'rejected';
+
+/**
+ * One deduplicated administrator review item for one unmatched business
+ * question. It names the exact draft Template Version and exact immutable
+ * Report a human reviews, so Approval can publish both without regenerating.
+ */
+export interface ReportCandidateRecord {
+  candidate_id: string;
+  workspace_id: string;
+  status: ReportCandidateStatus;
+  question: string;
+  normalized_question: string;
+  /** The content address of the normalized semantics this item is keyed by. */
+  semantic_hash: string;
+  data_product_id: string;
+  report_template_id: string;
+  template_version: number;
+  report_id: string;
+  /** How many times these normalized semantics arrived while this item existed. */
+  occurrences: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  requested_by: string[];
+  similarity: {
+    configuration: ReviewEmbeddingConfiguration;
+    threshold: number;
+    nominations: ReviewSimilarityNomination[];
+  };
+  notification: ReportCandidateNotification | null;
+  approval: ReportCandidateDecision | null;
+  rejection: ReportCandidateDecision | null;
+}
+
+// ---------------------------------------------------------------------------
+// Report schedules: durable facts evaluated by an explicit tick.
+// ---------------------------------------------------------------------------
+
+/** One evaluation of one due Report schedule, coalescing every due instant. */
+export interface ReportScheduleRunRecord {
+  run_id: string;
+  schedule_id: string;
+  template_version: number;
+  /** The tick instant that evaluated the schedule. */
+  triggered_at: string;
+  /** The first schedule instant this run covers. */
+  due_from: string;
+  /** How many schedule instants were coalesced into this one run. */
+  due_count: number;
+  /** Whether more than one due instant was coalesced (a catch-up). */
+  catch_up: boolean;
+  designated_user_id: string;
+  outcome: 'generated' | 'reused' | 'failed';
+  report_id: string | null;
+  reason_code: string | null;
+  limitation: string | null;
+  scope_fingerprint: string | null;
+}
+
+/**
+ * One durable schedule on one published Report Template Version. The tick
+ * revalidates the designated Consumer and its Grants on every run, never
+ * remembering an earlier authorization.
+ */
+export interface ReportScheduleRecord {
+  schedule_id: string;
+  workspace_id: string;
+  report_template_id: string;
+  template_version: number;
+  designated_user_id: string;
+  interval_minutes: number;
+  next_due_at: string;
+  created_at: string;
+  created_by: string;
+  withdrawn_at: string | null;
+  runs: ReportScheduleRunRecord[];
 }
 
 // ---------------------------------------------------------------------------

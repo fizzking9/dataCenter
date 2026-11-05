@@ -12,6 +12,7 @@ import {
   type DataProductVersion,
   type ModelProfileArtifact,
   type ModelProfileVersion,
+  type ReportNarrative,
   type ReportRecord,
   type WorkspaceModelBindingRecord,
 } from './catalog.js';
@@ -44,6 +45,10 @@ import {
 import { workspaceRoleOf } from './platform.js';
 import { executeDataProductQuery } from './product-query.js';
 import { contractView, productIdentity, requireReadableProduct } from './products.js';
+import {
+  DEFAULT_CANDIDATE_GROUNDED_PROMPT_HASH,
+  recordReviewCandidate,
+} from './report-review.js';
 import {
   authorizationView,
   reportView,
@@ -729,6 +734,7 @@ function baseResponse(question: string, workspaceId: string): Record<string, unk
     defaults_applied: [] as AppliedDefault[],
     provenance: null,
     freshness: null,
+    candidate: null as Record<string, unknown> | null,
     conversation: null as string | null,
   };
 }
@@ -915,6 +921,44 @@ function targetFor(
     scope,
     authorized: authorizedContract(version.contract, scope),
     identity: productIdentity(product, version, release),
+  };
+}
+
+/**
+ * The exact normalized query a candidate Template pins: the compiled request in
+ * the Contract's own vocabulary plus the Contract line, with governed defaults
+ * fixed so a later Release can never change what the candidate meant.
+ */
+function candidateRequest(part: Record<string, unknown>): Record<string, unknown> | null {
+  const query = objectOrNull(part['query']);
+  const identity = objectOrNull(part['data_product']);
+  if (query === null || identity === null) return null;
+  const contractVersion = objectOrNull(identity['contract_version']);
+  const request: Record<string, unknown> = {
+    ...query,
+    major: Number(contractVersion?.['major'] ?? 1),
+  };
+  if (request['kind'] === 'aggregate' && request['metrics'] === undefined) {
+    request['metrics'] = arrayOf(objectOrNull(part['result'])?.['metrics'])
+      .filter(isRecord)
+      .map((metric) => metric['name'])
+      .filter((name): name is string => typeof name === 'string');
+  }
+  return request;
+}
+
+/** The grounded narrative a candidate Report keeps beside its structured result. */
+function candidateNarrative(answer: Record<string, unknown> | null): ReportNarrative | null {
+  if (answer === null || typeof answer['narrative'] !== 'string') return null;
+  const model = objectOrNull(answer['model']);
+  return {
+    narrative: String(answer['narrative']),
+    evidence_refs: arrayOf(answer['evidence_refs'])
+      .filter(isRecord)
+      .map((reference) => ({ ...reference })),
+    grounded_answer_prompt_hash: DEFAULT_CANDIDATE_GROUNDED_PROMPT_HASH,
+    prompt_hash: model === null ? '' : String(model['prompt_hash'] ?? ''),
+    model: model === null ? {} : { ...model },
   };
 }
 
@@ -1427,6 +1471,59 @@ async function askNaturalLanguageQuery(options: TurnOptions): Promise<Record<str
           limitations.push(generationLimitation(error));
           response['reason_code'] = errorCodeOf(error);
         }
+      }
+    }
+  }
+  // An unmatched executed answer enters deduplicated administrator review: the
+  // exact draft Template Version and the exact immutable Report are recorded
+  // from what already ran, so Approval publishes them without regeneration. A
+  // repeated normalized semantic joins the one open item without a new notice.
+  const single = parts.length === 1 ? parts[0]! : null;
+  if (single !== null
+    && single['executed'] === true
+    && isSimplifiedChinese(question)
+    && (outcome === 'answered' || outcome === 'empty' || outcome === 'no_evidence')) {
+    const identity = objectOrNull(single['data_product']);
+    const result = objectOrNull(single['result']);
+    const request = candidateRequest(single);
+    const scope = identity === null
+      ? undefined
+      : targets.find((target) => target.product.data_product_id === identity['data_product_id'])?.scope;
+    if (identity !== null && result !== null && request !== null && scope !== undefined) {
+      try {
+        const review = recordReviewCandidate({
+          session,
+          workspaceId,
+          userId: actor.user.user_id,
+          question,
+          interpretation: String(single['interpretation'] ?? interpretation),
+          request,
+          identity,
+          result,
+          provenance: objectOrNull(single['provenance']) ?? {},
+          freshness: objectOrNull(single['freshness']),
+          narrative: candidateNarrative(objectOrNull(response['answer'])),
+          scope: {
+            fingerprint: scope.fingerprint,
+            restricted: scope.restricted,
+            columns: [...scope.columns],
+            row_filter_count: scope.rowFilters.length,
+          },
+          now,
+        });
+        response['candidate'] = {
+          candidate_id: review.candidate.candidate_id,
+          status: review.candidate.status,
+          pending_approval: review.candidate.status === 'open',
+        };
+        limitations.push(review.created
+          ? '该问题尚未匹配已发布的报告模板，答案已进入管理员审核；批准前不会作为库存答案复用。'
+          : review.candidate.status === 'rejected'
+            ? '相同语义的候选报告此前已被拒绝，本次不再重复通知，等待管理员重新开启或语义变化。'
+            : '相同语义的候选报告已在审核中，本次已合并到同一审核项，不重复通知。');
+      } catch {
+        // Review recording is a follow-on fact: the governed answer already
+        // stands, so a review write never turns an answer into a failure.
       }
     }
   }
