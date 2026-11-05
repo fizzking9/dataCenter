@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  modelProfileList,
   platformApi,
   type BindableModelProfile,
   type ModelBindingView,
   type ModelProfileEvaluationView,
   type ModelProfileView,
+  type ModelVocabulary,
   type WorkspaceModelBindingList,
 } from '../api.js';
 import { formatInstant } from '../format.js';
@@ -13,20 +15,22 @@ import { Button } from '../ui/Button.js';
 import { Field } from '../ui/Field.js';
 import { Alert, DefinitionList, Panel, StatusPill } from '../ui/Panel.js';
 
-/** Governed values stay ASCII; only the label a reader sees is Chinese. */
-const PURPOSES = ['integration_proposal', 'grounded_narration', 'clarification'] as const;
-const DATA_CATEGORIES = ['dataset_schema', 'cleaning_rules', 'source_mapping', 'sample_records'] as const;
-const ADAPTERS = ['hosted', 'generic_local'] as const;
-
 /**
- * The three prompts a Version pins by default. Each one names Simplified Chinese
- * outright, because a prompt that does not is refused at publication.
+ * The prompt bodies the catalog supplies by default. Each one names Simplified
+ * Chinese outright, because a prompt that does not is refused at publication;
+ * every purpose without copy here starts empty for the administrator to write.
  */
-const DEFAULT_PROMPTS: Record<string, string> = {
-  integration_proposal: '你是数据集成助手，只输出简体中文说明，并按结构化输出返回候选 Integration Configuration。',
-  grounded_narration: '只依据给定证据作答，只输出简体中文叙述，不得推测证据之外的数据。',
-  clarification: '只输出简体中文澄清问题，用于补齐缺失的业务范围。',
+const DEFAULT_PROMPT_KEYS: Record<string, MessageKey> = {
+  integration_proposal: 'model.profile.prompt.integrationProposal',
+  grounded_narration: 'model.profile.prompt.groundedNarration',
+  clarification: 'model.profile.prompt.clarification',
 };
+
+function defaultPrompts(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(DEFAULT_PROMPT_KEYS).map(([purpose, key]) => [purpose, t(key)]),
+  );
+}
 
 const CHECK_LABELS: Record<string, MessageKey> = {
   preflight: 'model.profile.check.preflight',
@@ -181,7 +185,7 @@ const INITIAL_DRAFT: ProfileDraft = {
     source_mapping: true,
     sample_records: true,
   },
-  prompts: { ...DEFAULT_PROMPTS },
+  prompts: defaultPrompts(),
 };
 
 interface ProfilePanelProps {
@@ -313,13 +317,20 @@ function ProfilePanel({ profile, onRefresh, onSessionLost }: ProfilePanelProps) 
 /** The Deployment Administrator's Model Profile surface. */
 export function DeploymentModelProfiles({ onSessionLost }: { onSessionLost: () => void }) {
   const [profiles, setProfiles] = useState<ModelProfileView[] | null>(null);
+  const [vocabulary, setVocabulary] = useState<ModelVocabulary | null>(null);
   const [failed, setFailed] = useState(false);
   const [draft, setDraft] = useState<ProfileDraft>(INITIAL_DRAFT);
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
 
+  // The server publishes the governed vocabulary; the form renders it as-is, so a
+  // new purpose, data category, or adapter appears here without a browser change.
+  const purposes = vocabulary?.purposes ?? [];
+  const dataCategories = vocabulary?.data_categories ?? [];
+  const adapters = vocabulary?.adapters ?? [];
+
   const refresh = useCallback(async (): Promise<boolean> => {
-    const result = await platformApi.modelProfiles();
+    const result = await modelProfileList();
     if (!result.ok) {
       if (result.status === 401) {
         onSessionLost();
@@ -330,12 +341,13 @@ export function DeploymentModelProfiles({ onSessionLost }: { onSessionLost: () =
     }
     setFailed(false);
     setProfiles(result.data.model_profiles);
+    setVocabulary(result.data.vocabulary);
     return true;
   }, [onSessionLost]);
 
   useEffect(() => {
     let active = true;
-    void platformApi.modelProfiles().then((result) => {
+    void modelProfileList().then((result) => {
       if (!active) return;
       if (!result.ok) {
         if (result.status === 401) {
@@ -346,6 +358,7 @@ export function DeploymentModelProfiles({ onSessionLost }: { onSessionLost: () =
         return;
       }
       setProfiles(result.data.model_profiles);
+      setVocabulary(result.data.vocabulary);
     });
     return () => {
       active = false;
@@ -356,17 +369,17 @@ export function DeploymentModelProfiles({ onSessionLost }: { onSessionLost: () =
     if (pending) return;
     setPending(true);
     setNotice(null);
-    const purposes = PURPOSES.filter((purpose) => draft.purposes[purpose] === true);
+    const selectedPurposes = purposes.filter((purpose) => draft.purposes[purpose] === true);
     const result = await platformApi.publishModelProfile({
       name: draft.name.trim(),
       adapter: draft.adapter,
       endpoint_url: draft.endpointUrl.trim(),
       model_id: draft.modelId.trim(),
-      purposes,
-      data_categories: DATA_CATEGORIES.filter((category) => draft.dataCategories[category] === true),
+      purposes: selectedPurposes,
+      data_categories: dataCategories.filter((category) => draft.dataCategories[category] === true),
       tools: draft.tools.split(',').map((tool) => tool.trim()).filter((tool) => tool !== ''),
       max_output_bytes: Number(draft.maxOutputBytes),
-      prompts: Object.fromEntries(purposes.map((purpose) => [purpose, draft.prompts[purpose] ?? ''])),
+      prompts: Object.fromEntries(selectedPurposes.map((purpose) => [purpose, draft.prompts[purpose] ?? ''])),
       ...(draft.credential.trim() === '' ? {} : { credential: draft.credential }),
     });
     if (!result.ok) {
@@ -424,7 +437,7 @@ export function DeploymentModelProfiles({ onSessionLost }: { onSessionLost: () =
                 value={draft.adapter}
                 onChange={(event) => setDraft((current) => ({ ...current, adapter: event.target.value }))}
               >
-                {ADAPTERS.map((adapter) => (
+                {adapters.map((adapter) => (
                   <option value={adapter} key={adapter}>
                     {adapterLabel(adapter)}
                   </option>
@@ -476,7 +489,7 @@ export function DeploymentModelProfiles({ onSessionLost }: { onSessionLost: () =
             id="model-profile-purpose"
             legend={t('model.profile.purposes')}
             hint={t('model.profile.purposesHint')}
-            options={PURPOSES}
+            options={purposes}
             selected={draft.purposes}
             onToggle={(value) => toggle('purposes', value)}
           />
@@ -484,14 +497,14 @@ export function DeploymentModelProfiles({ onSessionLost }: { onSessionLost: () =
             id="model-profile-category"
             legend={t('model.profile.dataCategories')}
             hint={t('model.profile.dataCategoriesHint')}
-            options={DATA_CATEGORIES}
+            options={dataCategories}
             selected={draft.dataCategories}
             onToggle={(value) => toggle('dataCategories', value)}
           />
           <fieldset className="fieldset">
             <legend className="field__label">{t('model.profile.prompts')}</legend>
             <p className="field__hint">{t('model.profile.prompt.simplifiedChineseRequired')}</p>
-            {PURPOSES.map((purpose) => (
+            {purposes.map((purpose) => (
               <div className="field" key={purpose}>
                 <label className="field__label" htmlFor={`model-profile-prompt-${purpose}`}>
                   {t('model.profile.prompts')} · {purpose}

@@ -37,7 +37,7 @@ import {
   generateGroundedNarration,
   generateProductCandidate,
 } from './model-generation.js';
-import { pinnedFor } from './model-profile.js';
+import { pinnedForBinding } from './model-profile.js';
 import {
   DEPLOYMENT_CONTEXT_ARTIFACT,
   findContextArtifact,
@@ -468,7 +468,7 @@ async function clarificationQuestion(
   if (!bound.version.purposes.includes('clarification')) return FALLBACK_CLARIFICATION;
   const profile = findModelProfile(session.state.model_profiles, bound.pin.model_profile_id)!;
   const answer = await generateClarification(
-    pinnedFor(session, profile, bound.version),
+    pinnedForBinding(session, profile, bound.version, bound.binding),
     { question: requirement.text, clarifications: requirement.clarifications, missing: ['metric_scope', 'time_range'] },
     fail,
   );
@@ -525,7 +525,7 @@ export async function generateProductProposal(options: {
 
   const bound = requireBinding(session, actorName, scoped, options.bindingId, source.workspace_id);
   const profile = findModelProfile(session.state.model_profiles, bound.pin.model_profile_id)!;
-  const pinned = pinnedFor(session, profile, bound.version);
+  const pinned = pinnedForBinding(session, profile, bound.version, bound.binding);
   const document = readRequirement(session, actorName, scoped, options.requirementPath);
   const surface = requireDataset(session, actorName, scoped, source.source_id);
   if (document.datasetId !== null && document.datasetId !== surface.dataset.dataset_id) {
@@ -992,7 +992,7 @@ async function narrativeOf(
   if (!bound.version.purposes.includes('grounded_narration')) return {};
   const profile = findModelProfile(session.state.model_profiles, bound.pin.model_profile_id)!;
   const output = await generateGroundedNarration(
-    pinnedFor(session, profile, bound.version),
+    pinnedForBinding(session, profile, bound.version, bound.binding),
     { question: proposal.requirement.text, records },
     fail,
   );

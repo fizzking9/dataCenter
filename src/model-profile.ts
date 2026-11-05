@@ -12,6 +12,7 @@ import {
   type ModelProfileVersion,
   type ModelPrompt,
   type ModelPurpose,
+  type WorkspaceModelBindingRecord,
 } from './catalog.js';
 import { canonicalDigest } from './crypto.js';
 import { isRecord, readJsonDocument } from './documents.js';
@@ -34,7 +35,7 @@ import {
 } from './model-generation.js';
 import { openPlatform, type PlatformSession } from './session.js';
 
-const ADAPTERS: ModelAdapterKind[] = ['hosted', 'generic_local'];
+export const ADAPTERS: ModelAdapterKind[] = ['hosted', 'generic_local'];
 const NAME_MINIMUM = 2;
 const NAME_MAXIMUM = 128;
 const TOOL_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
@@ -197,11 +198,16 @@ function credentialOf(session: PlatformSession, version: ModelProfileVersion): s
   return decrypt(session.dataKey, version.credential).toString('utf8');
 }
 
-/** The exact identity every generation call under this Version is pinned to. */
+/**
+ * The exact identity every generation call under this Version is pinned to. The
+ * permitted set narrows the Version's declared data categories, so a Binding's
+ * narrower permission is inherited by every path that resolves this pin.
+ */
 export function pinModelProfile(
   profile: ModelProfileArtifact,
   version: ModelProfileVersion,
   credential: string | null,
+  permitted: ModelDataCategory[] = version.data_categories,
 ): PinnedModelProfile {
   return {
     model_profile_id: profile.model_profile_id,
@@ -214,6 +220,7 @@ export function pinModelProfile(
     max_output_bytes: version.max_output_bytes,
     tools: [...version.tools],
     prompts: version.prompts.map((prompt) => ({ ...prompt })),
+    data_categories: version.data_categories.filter((category) => permitted.includes(category)),
   };
 }
 
@@ -227,6 +234,20 @@ export function pinnedFor(
   version: ModelProfileVersion,
 ): PinnedModelProfile {
   return pinModelProfile(profile, version, credentialOf(session, version));
+}
+
+/**
+ * Resolves one Binding's pin: the exact Version, narrowed to the data categories
+ * the Binding permits. Every generation path reaches the same refusal when it
+ * needs a category outside that set, so no caller restates the check.
+ */
+export function pinnedForBinding(
+  session: PlatformSession,
+  profile: ModelProfileArtifact,
+  version: ModelProfileVersion,
+  binding: WorkspaceModelBindingRecord,
+): PinnedModelProfile {
+  return pinModelProfile(profile, version, credentialOf(session, version), binding.data_categories);
 }
 
 /**
@@ -684,5 +705,14 @@ export function listModelProfiles(options: {
     (left, right) => left.created_at.localeCompare(right.created_at) || left.name.localeCompare(right.name),
   );
   session.audit({ ...context, actor: actorLabel(actor.user), outcome: 'succeeded' });
-  return { model_profiles: profiles.map((profile) => viewModelProfile(profile)) };
+  return {
+    model_profiles: profiles.map((profile) => viewModelProfile(profile)),
+    // The governed vocabulary is published once here, so the browser renders these
+    // values instead of restating them and drifting as the platform grows.
+    vocabulary: {
+      purposes: [...MODEL_PURPOSES],
+      data_categories: [...MODEL_DATA_CATEGORIES],
+      adapters: [...ADAPTERS],
+    },
+  };
 }

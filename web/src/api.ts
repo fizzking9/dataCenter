@@ -432,3 +432,24 @@ export const platformApi = {
       method: 'POST',
     }),
 };
+
+/**
+ * The governed generation vocabulary the Model Profile list publishes. The
+ * browser renders these values instead of declaring its own copy, so a new
+ * purpose, data category, or adapter is configurable without a browser change.
+ */
+export interface ModelVocabulary {
+  purposes: string[];
+  data_categories: string[];
+  adapters: string[];
+}
+
+/** The Model Profile list, with the vocabulary the server publishes beside it. */
+export interface ModelProfileListWithVocabulary extends ModelProfileList {
+  vocabulary: ModelVocabulary;
+}
+
+/** Reads the Model Profile list together with the Deployment's governed vocabulary. */
+export function modelProfileList(): Promise<ApiResult<ModelProfileListWithVocabulary>> {
+  return platformApi.modelProfiles() as Promise<ApiResult<ModelProfileListWithVocabulary>>;
+}

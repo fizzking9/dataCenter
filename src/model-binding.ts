@@ -6,7 +6,6 @@ import {
   findModelProfile,
   findModelProfileVersion,
   type ModelBindingPreflight,
-  type ModelDataCategory,
   type ModelProfileArtifact,
   type ModelProfileCheck,
   type ModelProfileVersion,
@@ -19,6 +18,7 @@ import { OperatorError } from './errors.js';
 import { modelAdapter } from './model-adapter.js';
 import {
   EVALUATION_INPUTS,
+  PURPOSE_CATEGORIES,
   generateForPurpose,
   isSimplifiedChinese,
   narrationFailure,
@@ -31,15 +31,6 @@ import { openPlatform, type PlatformSession } from './session.js';
 function digest(value: unknown): string {
   return canonicalDigest(value);
 }
-
-/** The data categories a purpose's pinned input actually carries. */
-const PURPOSE_CATEGORIES: Record<ModelPurpose, ModelDataCategory[]> = {
-  integration_proposal: ['dataset_schema', 'cleaning_rules', 'source_mapping'],
-  data_product_proposal: ['dataset_schema'],
-  grounded_narration: ['sample_records'],
-  clarification: [],
-  query_plan: ['product_contract'],
-};
 
 function readVersion(
   session: PlatformSession,

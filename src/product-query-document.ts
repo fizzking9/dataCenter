@@ -39,7 +39,7 @@ const AGGREGATE_KEYS = [
   'kind', 'group_by', 'metrics', 'filters', 'metric_filters',
   'include_totals', 'sort', 'limit', 'window', 'comparison', 'cursor', 'release', 'major',
 ];
-/** A search or a suggestion reads the same page cursor and Release a record query does. */
+/** A search reads the same page cursor and Release a record query does; a suggestion never pages. */
 const SEARCH_KEYS = ['kind', 'q', 'limit', 'cursor', 'release', 'major'];
 /** A query states the text it looks for; it never hands the platform a document to read. */
 const MAX_QUERY_LENGTH = 1024;
@@ -435,6 +435,14 @@ export function readQuery(
     }
     const limit = readLimit(parsed['limit'], contract, fail);
     if (kind === 'suggest') {
+      // Suggestions are a bounded top-N list, not a paged result: replaying a
+      // cursor would silently answer page one again, so the cursor is refused.
+      if (parsed['cursor'] !== undefined) {
+        fail(
+          'DATA_PRODUCT_QUERY_CURSOR_NOT_SUPPORTED',
+          'Suggestions are a bounded list, not a paged result, so a suggestion accepts no cursor.',
+        );
+      }
       return { kind: 'suggest', search, q: q.trim(), limit };
     }
     const terms = readSearchTerms(search, q);

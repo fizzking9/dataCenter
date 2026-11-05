@@ -368,7 +368,8 @@ export interface DataProductQueryExecution {
  * never shifts a page a Consumer already opened. The cursor is read before the
  * Release is resolved, because resolving the newest Release first would answer
  * the newest page. Naming a Release explicitly still wins — and then disagrees
- * with the cursor, which the offset check refuses.
+ * with the cursor, which the offset check refuses. A suggestion never pages, so
+ * its cursor is left to the document reader, which refuses it by name.
  */
 function pinnedToCursor(
   session: PlatformSession,
@@ -377,7 +378,7 @@ function pinnedToCursor(
   fail: Fail,
 ): QueryTarget {
   const kind = request['kind'];
-  if ((kind !== 'search' && kind !== 'suggest') || target.cursor === undefined || target.release !== undefined) {
+  if (kind !== 'search' || target.cursor === undefined || target.release !== undefined) {
     return target;
   }
   return { ...target, release: decodeCursor(session.dataKey, target.cursor, fail).release };
