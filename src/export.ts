@@ -244,14 +244,17 @@ export function createExport(options: {
   const wrapped: WrappedValue = encryptValue(session.dataKey, bytes);
   writeFileSync(absolute, `${JSON.stringify(wrapped)}\n`, { flag: 'wx', mode: 0o600 });
 
+  // The grant expires exactly one lifetime after the instant it is recorded, so
+  // the window never widens by a clock tick between the two readings.
+  const createdAt = new Date();
   const record: ExportRecord = {
     export_id: exportId,
     workspace_id: product.workspace_id,
     data_product_id: product.data_product_id,
     data_product_release: table.release,
     actor_user_id: actor.user.user_id,
-    created_at: new Date().toISOString(),
-    expires_at: new Date(Date.now() + EXPORT_LIFETIME_MS).toISOString(),
+    created_at: createdAt.toISOString(),
+    expires_at: new Date(createdAt.getTime() + EXPORT_LIFETIME_MS).toISOString(),
     row_count: table.rows.length,
     columns: [...table.header],
     row_filters: scopeOfRelease(session, actor.user.user_id, product.data_product_id, table.release, fail)
