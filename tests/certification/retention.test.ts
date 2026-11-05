@@ -234,6 +234,23 @@ test('settled retention defaults apply to existing data, current Releases never 
     dataset_release_history: { min_days: 1, max_days: 3650 },
     report: { min_days: 1, max_days: 3650 },
   });
+  // The overview states the one governed vocabulary every surface renders, so
+  // the browser never restates a data class or scope rule of its own.
+  const vocabulary = asRecord(policy['vocabulary']);
+  assert.deepEqual(vocabulary['data_classes'], [
+    'raw_acquisition',
+    'dataset_release_history',
+    'report',
+    'artifact_version',
+    'provenance',
+    'audit_event',
+    'proposal_evidence',
+    'export',
+    'derived_data',
+  ]);
+  assert.deepEqual(vocabulary['overridable_classes'], ['raw_acquisition', 'dataset_release_history', 'report']);
+  assert.deepEqual(vocabulary['hold_scopes'], ['workspace', 'source', 'dataset', 'release', 'proposal_evidence', 'export']);
+  assert.deepEqual(vocabulary['purge_scopes'], ['workspace', 'source', 'dataset', 'release', 'proposal_evidence', 'export']);
   assertChineseCopy(policy['summary']);
 
   // Existing data ages: every Release is older than the clock, and so is every

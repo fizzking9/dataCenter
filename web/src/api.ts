@@ -3162,6 +3162,14 @@ export interface RetentionPolicyVersionView {
 }
 
 /** The Deployment policy: settled defaults or one published Version. */
+/** The governed retention vocabulary the browser renders rather than restates. */
+export interface RetentionVocabularyView {
+  data_classes: RetentionClassKey[];
+  overridable_classes: OverridableRetentionClassKey[];
+  hold_scopes: Array<RetentionScopeView['kind']>;
+  purge_scopes: Array<RetentionScopeView['kind']>;
+}
+
 export interface DeploymentRetentionView {
   policy_version: number;
   source: 'settled' | 'published';
@@ -3169,6 +3177,7 @@ export interface DeploymentRetentionView {
   bounds: Record<OverridableRetentionClassKey, RetentionBoundsView>;
   content_hash: string | null;
   history: RetentionPolicyVersionView[];
+  vocabulary: RetentionVocabularyView;
   summary: string;
 }
 
@@ -3190,6 +3199,7 @@ export interface WorkspaceRetentionView {
   clamped: OverridableRetentionClassKey[];
   policy_history: RetentionPolicyVersionView[];
   override_history: WorkspaceRetentionOverrideVersionView[];
+  vocabulary: RetentionVocabularyView;
   summary: string;
 }
 
