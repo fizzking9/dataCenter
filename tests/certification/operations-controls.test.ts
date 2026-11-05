@@ -567,12 +567,21 @@ test('the measured mixed workload runs concurrently through external contracts',
     assert.equal(granted.status, 0, granted.stderr);
     const mcpToken = await issueAgentToken(console.url, client, 'mcp:read');
 
-    // The operator states the tariff it is billed at and the acquisition target
-    // its scheduled Source promises, so both are certificates of this run.
+    // The operator states the tariff it is billed at, the acquisition target
+    // its scheduled Source promises, and the Agent request ceiling this
+    // certification runs under: the measured round presents four MCP queries
+    // per round for the whole window sequence, so the default sixty-per-minute
+    // Agent ceiling would refuse the soak before its samples were taken. The
+    // exact ceiling is recorded in every window's evidence.
     configureOperations(fixture, deploymentToken, {
       prices: { input_cny_per_million_tokens: 10, output_cny_per_million_tokens: 20 },
       targets: { acquisition_run: { p95_seconds: 300, p99_seconds: 600 } },
+      limits: { agent_direct_requests_per_minute: 10_000 },
     }, 'operations-certification');
+    const certified = command(fixture, ['operations', 'show'], { token: deploymentToken });
+    assert.equal(certified.status, 0, certified.stderr);
+    const certifiedLimits = certified.output['limits'] as Record<string, unknown>;
+    assert.equal(certifiedLimits['agent_direct_requests_per_minute'], 10_000);
 
     // The workload presents the same sessions a browser workflow presents.
     const consumer = await signInWorkloadUser(fixture, console.url, 'analyst@example.invalid', 'analyst-consumer');
@@ -602,7 +611,7 @@ test('the measured mixed workload runs concurrently through external contracts',
         query: workloadQuery(index),
         acquisition: schedule,
       });
-      const recorded = recordWorkloadRun(fixture, deploymentToken, result);
+      const recorded = recordWorkloadRun(fixture, deploymentToken, result, { limits: certifiedLimits });
       assert.equal(recorded['window'], plan.window);
       assert.equal(recorded['samples'], result.samples.length, plan.window);
       assert.equal(recorded['duration_seconds'], result.observed_seconds, plan.window);
@@ -694,6 +703,7 @@ test('the measured mixed workload runs concurrently through external contracts',
         report_generations: WORKLOAD_MIX.report_generations * result.rounds,
       }, result.window);
       assert.deepEqual(parameters['external_contracts'], [...WORKLOAD_CONTRACTS], result.window);
+      assert.deepEqual(parameters['configured_limits'], certifiedLimits, result.window);
     }
     assert.equal(report.runs.met, true);
 

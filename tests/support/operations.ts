@@ -680,12 +680,14 @@ function operationMix(samples: WorkloadSample[]): Record<string, number> {
 /**
  * Records one measured window exactly as the harness observed it: the exact
  * configured and observed durations, the concurrency and operation mix it
- * launched, the external contracts it drove, and the samples it timed.
+ * launched, the external contracts it drove, the Operations configuration it
+ * certified under, and the samples it timed.
  */
 export function recordWorkloadRun(
   fixture: PlatformFixture,
   token: string,
   result: WorkloadWindowResult,
+  evidence: { limits?: Record<string, unknown> } = {},
 ): Record<string, unknown> {
   const parameters = {
     harness: 'external-contracts',
@@ -699,6 +701,7 @@ export function recordWorkloadRun(
     active_acquisition: result.samples.some((sample) => sample.operation_class === 'acquisition'),
     cache_observation: 'governed page cache state reported by each answer; uncached operations are warm',
     external_contracts: [...WORKLOAD_CONTRACTS],
+    ...(evidence.limits === undefined ? {} : { configured_limits: evidence.limits }),
   };
   const recorded = command(
     fixture,
