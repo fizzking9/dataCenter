@@ -34,8 +34,9 @@ type Pending =
   | { kind: 'register'; agent: AgentIdentityView; clientId: string; clientName: string; redirectUris: string[] }
   | { kind: 'revokeClient'; client: AgentClientView };
 
+/** The governed scope id picks the Chinese label; the id itself never becomes a catalog key. */
 function scopeLabel(scope: string): string {
-  return optional(`value.mcpScope.${scope}`) ?? scope;
+  return optional(`value.mcpScope.${scope.replace(/:/gu, '.')}`) ?? scope;
 }
 
 function scopesLabel(scopes: string[]): string {

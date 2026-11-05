@@ -1314,8 +1314,8 @@ export const catalog = {
   'value.identityStatus.revoked': '已撤销',
 
   // MCP scope ceilings stay machine identifiers; only their meaning is Chinese.
-  'value.mcpScope.mcp:read': '读取治理数据',
-  'value.mcpScope.mcp:nlq': '自然语言问答',
+  'value.mcpScope.mcp.read': '读取治理数据',
+  'value.mcpScope.mcp.nlq': '自然语言问答',
 
   // Every consequential administrative change states its exact target, scope,
   // and consequence before the one confirmation that performs it.
