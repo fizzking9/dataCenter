@@ -3,6 +3,12 @@ export class OperatorError extends Error {
     readonly code: string,
     message: string,
     readonly nextStep?: string,
+    /**
+     * A surface may distinguish two refusals that share one code: a member of a
+     * Workspace who lacks administration is forbidden, while a non-member sees
+     * the same answer as an identifier that names nothing.
+     */
+    readonly status?: number,
   ) {
     super(message);
     this.name = 'OperatorError';
