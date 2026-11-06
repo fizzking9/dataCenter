@@ -221,8 +221,24 @@ test('a prompt-injected question and plan cannot widen a Grant, and prompts, que
     assert.equal(answer['executed'], false, 'an injected plan executes nothing');
     assert.equal(answer['result'], null);
     assert.equal(answer['reason_code'], 'NLQ_METRIC_NOT_PUBLISHED');
-    assert.equal(JSON.stringify(answer).includes('120.5'), false, 'a refusal carries no governed value');
-    assert.equal(JSON.stringify(answer).includes('300'), false);
+    // Identifiers are random, so judge the governed payload, not every string.
+    const parts = Array.isArray(answer['parts']) ? answer['parts'] : [];
+    const governedPayload = JSON.stringify({
+      summary: answer['summary'],
+      interpretation: answer['interpretation'],
+      limitations: answer['limitations'],
+      parts: parts.map((part) => {
+        const entry = asRecord(part);
+        return {
+          interpretation: entry['interpretation'],
+          limitations: entry['limitations'],
+          result: entry['result'],
+          query: entry['query'],
+        };
+      }),
+    });
+    assert.equal(governedPayload.includes('120.5'), false, 'a refusal carries no governed value');
+    assert.equal(governedPayload.includes('300'), false, 'a refusal carries no governed metric total');
 
     // The planner saw only the authorized Contract: neither the withheld column
     // nor any metric over it ever reached the model.
