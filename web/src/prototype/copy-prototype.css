@@ -1,0 +1,170 @@
+/**
+ * PROTOTYPE — THROWAWAY. Wayfinder ticket #82. Styles for the prototype chrome
+ * only: the switcher bar, the rules column, and the on-demand disclosures that
+ * variant C introduces. No existing class is overridden, so what is on screen
+ * behind the chrome is the real design.
+ */
+
+/* Keep the fixed bar from covering the last panel of a screen. */
+body.proto-copy-prototype {
+  padding-bottom: 7.5rem;
+}
+
+/* --- floating switcher ------------------------------------------------ */
+
+.proto-bar {
+  position: fixed;
+  bottom: 0.75rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-width: min(58rem, calc(100vw - 2rem));
+  padding: 0.55rem 0.8rem;
+  border-radius: 999px;
+  background: #101418;
+  color: #f4f6f8;
+  box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 0.35);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.proto-bar__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.proto-bar__arrow,
+.proto-bar__screen,
+.proto-bar__rules {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid rgb(255 255 255 / 0.28);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.proto-bar__arrow:hover,
+.proto-bar__screen:hover,
+.proto-bar__rules:hover {
+  background: rgb(255 255 255 / 0.14);
+}
+
+.proto-bar__screen--active {
+  background: #f4f6f8;
+  border-color: #f4f6f8;
+  color: #101418;
+  font-weight: 600;
+}
+
+.proto-bar__label {
+  min-width: 18rem;
+  text-align: center;
+}
+
+.proto-bar__metric {
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.12);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- rules column ----------------------------------------------------- */
+
+.proto-rules {
+  position: fixed;
+  right: 0.75rem;
+  bottom: 7.5rem;
+  z-index: 89;
+  width: min(22rem, calc(100vw - 1.5rem));
+  max-height: 55vh;
+  overflow: auto;
+  padding: 0.8rem 1rem;
+  border-left: 3px solid #101418;
+  border-radius: 0.4rem;
+  background: rgb(255 255 255 / 0.97);
+  box-shadow: 0 0.4rem 1.2rem rgb(0 0 0 / 0.22);
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.proto-rules__title {
+  margin: 0 0 0.25rem;
+  font-size: 0.85rem;
+}
+
+.proto-rules__claim {
+  margin: 0 0 0.5rem;
+  color: #4a5560;
+}
+
+.proto-rules__list {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.proto-rules__note {
+  margin: 0.6rem 0 0;
+  padding: 0.4rem 0.55rem;
+  border-radius: 0.3rem;
+  background: #fff6e0;
+  color: #6b4d00;
+}
+
+/* --- variant C: on-demand disclosure ---------------------------------- */
+
+.proto-disclosure {
+  display: inline-block;
+  margin-top: 0.2rem;
+}
+
+.proto-disclosure__summary {
+  display: inline-block;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid #c3ccd4;
+  border-radius: 999px;
+  color: #4a5560;
+  font-size: 0.72rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.proto-disclosure__summary::-webkit-details-marker {
+  display: none;
+}
+
+.proto-disclosure__summary:hover {
+  background: #eef2f5;
+}
+
+.proto-disclosure__body {
+  max-width: 34rem;
+  margin-top: 0.3rem;
+}
+
+/* Keep the label and its disclosure toggle on one line. */
+.proto-field__labelrow {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+/* --- empty state with a named way out (variant D) ---------------------- */
+
+.proto-empty__action {
+  margin-left: 0.5rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}

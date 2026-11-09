@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:web": "vite build --config web/vite.config.ts",
+    "prototype:copy": "vite --config web/vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json",
     "test": "npm run build && npm run build:web && node --test \"dist/tests/**/*.test.js\"",
     "certify": "npm run build && npm run build:web && node --test --test-concurrency=1 \"dist/tests/certification/**/*.test.js\""

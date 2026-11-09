@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { consoleApi, type SessionView } from './api.js';
 import { t } from './i18n/zh-CN.js';
 import { PlatformApp } from './PlatformApp.js';
+import { CopyPrototype } from './prototype/CopyPrototype.js';
 import { ConsoleScreen } from './screens/ConsoleScreen.js';
 import { EnrollmentScreen } from './screens/EnrollmentScreen.js';
 import { LicenseScreen } from './screens/LicenseScreen.js';
@@ -31,6 +32,9 @@ function fragmentSecret(): string {
  */
 export function App() {
   const pathname = window.location.pathname.replace(/\/+$/u, '');
+  // PROTOTYPE, throwaway (wayfinder ticket #82): development builds only, and
+  // this branch is never merged. See web/src/prototype/.
+  if (__DEV__ && pathname.startsWith('/prototype/copy')) return <CopyPrototype />;
   return pathname === '/app' || pathname.startsWith('/app/') ? <PlatformApp /> : <OperatorApp />;
 }
 
