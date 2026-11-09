@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PROTOTYPE — one-command seeded development workflow</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #ffffff; --ink: #1c1c1a; --muted: #6d6d66;
+    --line: #e3e3dd; --accent: #1f6f5c; --accent-soft: #e8f2ef;
+    --fail: #a4342a; --fail-soft: #fbecea; --warn: #8a6212; --warn-soft: #fdf4e3;
+    --ok: #2f6b32; --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 24px 96px; background: var(--bg); color: var(--ink);
+    font: 15px/1.6 -apple-system, "Segoe UI", "Noto Sans", sans-serif;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 12px; }
+  .tag {
+    display: inline-block; font: 600 11px/1 var(--mono); letter-spacing: 0.06em;
+    color: var(--warn); background: var(--warn-soft); border: 1px solid #eddcb8;
+    padding: 5px 8px; border-radius: 4px; margin-bottom: 12px;
+  }
+  .lede { color: var(--muted); max-width: 78ch; margin: 0 0 16px; }
+  .question {
+    background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    border-radius: 6px; padding: 14px 16px; margin: 0 0 24px; max-width: 92ch;
+  }
+  .question strong { color: var(--accent); }
+  .grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr); gap: 20px; align-items: start; }
+  @media (max-width: 1000px) { .grid { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; margin-bottom: 20px; }
+  .phase {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    font: 600 17px/1.3 var(--mono); color: var(--accent); margin-bottom: 14px;
+  }
+  .phase .hint { font: 400 13px/1.5 -apple-system, "Segoe UI", sans-serif; color: var(--muted); }
+  .rows { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .card { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; background: #fdfdfc; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin: 0 0 8px; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 13px; }
+  .kv dt { color: var(--muted); white-space: nowrap; }
+  .kv dd { margin: 0; font-family: var(--mono); font-size: 12.5px; text-align: right; word-break: break-all; }
+  .yes { color: var(--ok); } .no { color: var(--muted); } .bad { color: var(--fail); font-weight: 600; }
+  .gate { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+  .gate li { display: flex; gap: 8px; padding: 2px 0; align-items: baseline; }
+  .gate .n { font: 600 11px/1.6 var(--mono); color: var(--muted); width: 14px; flex: none; }
+  .gate .mark { width: 16px; flex: none; font-family: var(--mono); }
+  .users { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .users th { text-align: left; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line); padding: 3px 8px 3px 0; }
+  .users td { border-bottom: 1px solid #f0f0ec; padding: 4px 8px 4px 0; font-family: var(--mono); }
+  .term {
+    background: #16181a; color: #dfe3e2; border-radius: 6px; padding: 14px;
+    font: 12.5px/1.65 var(--mono); max-height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  .term .cmd { color: #8fd3c0; font-weight: 600; }
+  .term .ok { color: #a9d6a5; } .term .info { color: #b9c2c0; }
+  .term .warn { color: #e8cf94; } .term .fail { color: #f0a79c; }
+  .term .dim { color: #7b8583; }
+  .failure { background: var(--fail-soft); border: 1px solid #eccfca; border-radius: 6px; padding: 12px 14px; margin-bottom: 16px; }
+  .failure h3 { margin: 0 0 6px; font-size: 13px; color: var(--fail); text-transform: uppercase; letter-spacing: 0.06em; }
+  .failure .cause { font-family: var(--mono); font-size: 12.5px; color: var(--fail); margin-bottom: 8px; }
+  .failure .remedy { font-size: 13.5px; }
+  .failure code, .remedy code, .walk p code, .note code { font-family: var(--mono); font-size: 12.5px; background: #f2f2ee; padding: 1px 4px; border-radius: 3px; }
+  .btns { display: flex; flex-wrap: wrap; gap: 8px; }
+  .group { margin-bottom: 14px; }
+  .group > h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 7px; }
+  button {
+    font: 500 13px/1 -apple-system, "Segoe UI", sans-serif; color: var(--ink);
+    background: #fff; border: 1px solid var(--line); border-radius: 5px; padding: 8px 11px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button:disabled:hover { border-color: var(--line); color: var(--ink); background: #fff; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover { background: #175647; color: #fff; }
+  button.danger:hover { border-color: var(--fail); color: var(--fail); background: var(--fail-soft); }
+  button.next { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .tabs button[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .walk { display: none; } .walk.on { display: block; }
+  .walk p { color: var(--muted); font-size: 13.5px; margin: 0 0 12px; max-width: 82ch; }
+  .walk ol { list-style: none; counter-reset: s; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .walk li { counter-increment: s; display: flex; align-items: center; gap: 10px; }
+  .walk li::before {
+    content: counter(s); flex: none; width: 20px; height: 20px; border-radius: 50%;
+    background: #f0f0ec; color: var(--muted); font: 600 11px/20px var(--mono); text-align: center;
+  }
+  .walk li.done::before { background: var(--accent); color: #fff; }
+  .walk li.done button { opacity: 0.5; }
+  .walk .watch { font-size: 12.5px; color: var(--muted); font-style: italic; }
+  .legal { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .chip { font: 11.5px/1 var(--mono); padding: 5px 7px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); background: #fdfdfc; }
+  .chip.on { color: var(--accent); border-color: #bcd8d0; background: var(--accent-soft); }
+  .note { font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 12px; margin-top: 4px; }
+  .note ul { margin: 6px 0 0; padding-left: 18px; } .note li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="tag">PROTOTYPE — THROWAWAY. Not production code. Do not fold the page in; the module behind it is the bit worth keeping.</div>
+  <h1>One-command seeded development workflow</h1>
+  <p class="lede">
+    Drive the lifecycle of a single <code>npm run dev</code> over real PostgreSQL and MinIO. Press anything in any
+    order: legal actions advance the workflow, illegal ones are refused with the message a developer would actually
+    see. Then run the walkthroughs for the awkward cases.
+  </p>
+  <div class="question">
+    <strong>Question being prototyped:</strong> what concrete one-command development workflow makes the corrected
+    baseline immediately testable end to end through a browser? This models the command shape around the seed and
+    reset contract and the five-step readiness gate settled in
+    <em>Define the real PostgreSQL and MinIO persistence baseline</em>, replacing the undocumented
+    <code>.scratch/dev/dev.mjs</code> harness flagged by AUD-05.
+    <br /><br />
+    <strong>Three assumptions to push back on:</strong> (1) the dev server is <em>single-origin</em> — one build watch,
+    one URL, no Vite HMR server on a second port, because split origins complicate session cookies; (2) disposable dev
+    passwords are <em>fixed and printed</em> rather than random per seed, so a tester's notes stay valid across resets;
+    (3) a second <code>npm run dev</code> — even with <code>--reset</code> — is <em>refused</em> while one is serving
+    rather than allowed to kill another terminal's foreground process.
+    <br /><br />
+    <strong>Settled while prototyping:</strong> <code>npm run dev</code> <em>auto-enrolls the Operator</em> with a fixed
+    dev password, so all four actors are sign-in-able straight from the banner with no one-time URL step. This is a
+    dev-seed shortcut only: the Operator stays a host-level actor with its own Operator Console session, and CLI
+    revoke/re-enroll recovery is unchanged — try the revoke button.
+    Terminal copy is English here; whether the real banner is Simplified Chinese is open.
+  </div>
+
+  <div class="grid">
+    <div>
+      <section>
+        <h2>Current state</h2>
+        <div class="phase"><span id="phase"></span><span class="hint" id="phaseHint"></span></div>
+        <div id="failure"></div>
+        <div class="rows" id="state"></div>
+        <div style="margin-top:14px">
+          <h2 style="margin-bottom:6px">Legal right now</h2>
+          <div class="legal" id="legal"></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Free play</h2>
+        <div id="freeplay"></div>
+      </section>
+    </div>
+
+    <div>
+      <section>
+        <h2>What the command printed</h2>
+        <div class="term" id="term"></div>
+      </section>
+
+      <section>
+        <h2>Guided walkthroughs</h2>
+        <div class="tabs" id="tabs"></div>
+        <div id="walks"></div>
+        <p class="note">
+          Each walkthrough resets to a known state first, so it runs the same way every time. The interesting reactions
+          are <em>"wait, that shouldn't be possible"</em> and <em>"I assumed X would be different"</em> — those are bugs
+          in the workflow idea, which is the point.
+        </p>
+      </section>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* =====================================================================
+   PURE MODULE — DevWorkflow
+   A state machine over the one-command development workflow. No DOM, no
+   document, no handlers reaching in. The page calls `reduce`; nothing
+   flows the other way. This is the liftable half: once the shape is
+   agreed it becomes the real dev entrypoint's step ordering and guards.
+   ===================================================================== */
+const DevWorkflow = (() => {
+
+  // Migrations shipped by the checked-out source: migrations/0001..00NN.
+  const HEAD = 14;
+  const BUCKETS = ['raw', 'documents', 'bundles', 'exports', 'backups'];
+  const PORT = 8787;
+
+  // Disposable dev identities. The Operator is not a platform User: it is a
+  // host-level actor with its own Operator Console credential (#79), enrolled
+  // once through a printed one-time URL.
+  const DEV_USERS = [
+    { actor: 'Deployment Administrator', username: 'admin@dev.invalid', password: 'dev-admin-password' },
+    { actor: 'Workspace Administrator', username: 'ws-admin@dev.invalid', password: 'dev-workspace-password' },
+    { actor: 'Consumer', username: 'consumer@dev.invalid', password: 'dev-consumer-password' },
+  ];
+
+  // The Operator is a host-level actor, not a platform User: its own credential and
+  // its own Operator Console session. Dev auto-enrolls it so all four actors are
+  // sign-in-able straight from the banner; CLI revoke/re-enroll recovery stays intact.
+  const DEV_OPERATOR = { actor: 'Operator', username: 'operator@dev.invalid', password: 'dev-operator-password' };
+
+  const PHASE_HINT = {
+    nothing: 'fresh clone: no services, no schema, no Deployment',
+    blocked: 'the one command refused before creating anything',
+    'services-up': 'Postgres and MinIO are healthy; nothing installed yet',
+    'schema-ready': 'schema at head; no Deployment installed',
+    failed: 'a step failed; the remedy below is the next move',
+    refusing: 'the readiness gate failed, so the app refuses to serve',
+    serving: 'ready — the printed URLs work in a browser now',
+    stopped: 'Ctrl+C: the app is down but the data and services persist',
+    down: 'containers stopped on purpose; the volumes are intact',
+  };
+
+  function createState() {
+    return {
+      phase: 'nothing',
+      host: { docker: true, dbPortFree: true, dbPort: 5432, appPortFree: true, appPort: PORT },
+      postgres: { running: false, accepting: false, volume: false, schemaHead: 0, rows: 0 },
+      minio: { running: false, reachable: false, versioning: false, buckets: 0 },
+      binaryHead: HEAD,
+      breaks: { migration: false, keyMounted: true, legacyJson: false },
+      deployment: { config: false, installed: false, licensed: false, workload: false, workloadRows: 0, workspace: null },
+      seeds: 0,
+      users: [],
+      operator: { ...DEV_OPERATOR, enrolled: false },
+      build: { backend: false, web: false, watching: false, rebuilds: 0 },
+      app: { listeners: false, workers: false, ready: false, gate: [false, false, false, false, false] },
+      transcript: [],
+      failure: null,
+      runs: 0,
+      restarts: 0,
+      browserOpened: 0,
+      signedIn: 0,
+    };
+  }
+
+  /* ---- transcript helpers (operate on a draft) ---- */
+  const line = (s, kind, text) => s.transcript.push({ kind, text });
+  const cmd = (s, text) => line(s, 'cmd', `$ ${text}`);
+  const ok = (s, text) => line(s, 'ok', text);
+  const info = (s, text) => line(s, 'info', text);
+  const warn = (s, text) => line(s, 'warn', text);
+  const dim = (s, text) => line(s, 'dim', text);
+
+  function halt(s, step, cause, remedy) {
+    s.failure = { step, cause, remedy };
+    // Only the readiness gate "refuses to serve"; anything earlier never got far
+    // enough to have a Deployment to refuse with.
+    s.phase = step === 'Dependencies' ? 'blocked' : (step === 'Readiness gate' ? 'refusing' : 'failed');
+    line(s, 'fail', `✗ ${step} — ${cause}`);
+    line(s, 'fail', `  → ${remedy}`);
+  }
+
+  /* ---- the pipeline: one command, ordered steps, each gating the next ---- */
+
+  function stepDependencies(s, o) {
+    if (!s.host.docker) {
+      return halt(s, 'Dependencies', 'Docker is not running; `docker compose` cannot be reached.',
+        'Start Docker Desktop (or the Docker daemon), then re-run `npm run dev`. Nothing was created.');
+    }
+    if (!s.host.dbPortFree && o.dbPort === undefined) {
+      return halt(s, 'Dependencies', 'Port 5432 is already in use, so Postgres cannot bind.',
+        'Free the port, or run `npm run dev -- --db-port 5433` to move the stack. Nothing was created.');
+    }
+    if (!s.host.appPortFree) {
+      return halt(s, 'Dependencies', `Port ${o.port} is already in use, so the app cannot bind.`,
+        `Another \`npm run dev\` is holding it: Ctrl+C there first, or run \`npm run dev -- --port 9000\`.`);
+    }
+    if (s.breaks.legacyJson) {
+      return halt(s, 'Dependencies', 'dev/deployment/state/platform.json exists at the Deployment root.',
+        'This is the JSON/file store the corrected baseline removed. It is disposable: delete the `dev/` directory '
+        + '(or run `npm run dev -- --reset`) and re-run. Refusing prevents a half-migrated Deployment.');
+    }
+    // Drift must be detected here, before migrations run: applying migrations to a
+    // database you are about to declare drifted hides the real cause.
+    if (s.deployment.config && !s.postgres.volume) {
+      return halt(s, 'Dependencies',
+        'dev/deployment.json exists but the Postgres volume is gone and no buckets remain.',
+        'The host stores were wiped behind the workflow (e.g. `docker compose down -v`) while local config survived. '
+        + 'Run `npm run dev -- --reset` to discard the stale config and install fresh; the workflow will not silently '
+        + 're-mint a master key over wrapped DEKs it can no longer read.');
+    }
+    if (!s.host.dbPortFree && o.dbPort !== undefined) {
+      s.host.dbPort = o.dbPort;
+      warn(s, `! 5432 is occupied; Postgres will bind ${o.dbPort} for this stack instead`);
+    }
+    ok(s, `✓ Dependencies — docker compose v2.29, node v22, postgres :${s.host.dbPort}, minio :9000, app :${o.port} free`);
+    return true;
+  }
+
+  function stepServices(s, o) {
+    if (s.postgres.running && s.minio.running) {
+      info(s, '• Services — postgres and minio already healthy (reused, not recreated)');
+      return true;
+    }
+    dim(s, '> docker compose -f docker-compose.dev.yml up -d postgres minio');
+    s.postgres.running = true; s.postgres.accepting = true; s.minio.running = true; s.minio.reachable = true;
+    if (!s.postgres.volume) { s.postgres.volume = true; dim(s, '> created volume dev_pgdata (first run only)'); }
+    ok(s, '✓ Services — pgvector/pgvector:pg17 accepts connections as dev; minio RELEASE.2025-04-22 reachable');
+    return true;
+  }
+
+  function stepBuild(s, o) {
+    const first = !s.build.backend;
+    s.build.backend = true; s.build.web = true; s.build.watching = true;
+    if (first) {
+      dim(s, '> tsc -p tsconfig.json && vite build --config web/vite.config.ts');
+      dim(s, '> watching: tsc --watch, vite build --watch');
+      ok(s, '✓ Build — dist/ and dist/web/ current; watching for edits');
+    } else {
+      info(s, '• Build — dist/ current; watch already running');
+    }
+    return true;
+  }
+
+  function stepMigrations(s, o) {
+    if (s.breaks.migration) {
+      const lastGood = 8;
+      dim(s, '> pg_advisory_lock(dev_migration) acquired');
+      dim(s, `> applying 0001..${HEAD} — stamped through 000${lastGood}`);
+      s.postgres.schemaHead = lastGood;
+      warn(s, '> released pg_advisory_lock; schema_migrations left at 000' + lastGood);
+      return halt(s, 'Migrations', `migrations/0009_job_outbox.sql failed: relation "operations_jobs" already exists`,
+        'Fix that file, then re-run `npm run dev`: it resumes from 0009. The advisory lock was released and '
+        + 'nothing downstream (install, seed, serve) was attempted.');
+    }
+    if (s.postgres.schemaHead >= s.binaryHead) {
+      info(s, `• Migrations — schema_migrations already at head 00${s.postgres.schemaHead} (skipped)`);
+      return true;
+    }
+    dim(s, '> pg_advisory_lock(dev_migration) acquired');
+    const from = s.postgres.schemaHead + 1;
+    dim(s, `> applying ${String(from).padStart(4, '0')}..00${s.binaryHead} under one advisory lock`);
+    s.postgres.schemaHead = s.binaryHead;
+    ok(s, `✓ Migrations — head 00${s.binaryHead}; vector and pg_trgm extensions present`);
+    return true;
+  }
+
+  function enrollOperator(s) {
+    s.operator.enrolled = true;
+    dim(s, `> auto-enrolled the Operator Console credential ${s.operator.username} (dev password; no one-time URL step)`);
+  }
+
+  function stepInstall(s, o) {
+    // The store is the truth, not the config file: if install believes a Deployment
+    // exists but its buckets do not, say so rather than serving a hollow Deployment.
+    if (s.deployment.installed && s.minio.buckets !== BUCKETS.length) {
+      return halt(s, 'Install',
+        `dev/deployment.json records an installed Deployment, but MinIO holds ${s.minio.buckets} of ${BUCKETS.length} buckets.`,
+        'Run `npm run dev -- --reset`. Bucket creation belongs to install and is deliberately not retried '
+        + 'piecemeal, so a partially present Deployment is never served as a whole one.');
+    }
+    if (s.deployment.installed) {
+      if (!s.operator.enrolled) enrollOperator(s);
+      info(s, '• Install — Deployment already installed and licensed (reused, not re-seeded)');
+      return true;
+    }
+    dim(s, '> minio: mb --with-lock raw documents bundles exports backups; versioning on');
+    s.minio.buckets = BUCKETS.length; s.minio.versioning = true;
+    dim(s, '> wrote dev/deployment.json (bucket names, pool size, expected head, workload flag)');
+    s.deployment.config = true;
+    dim(s, '> generated 32-byte master key -> dev/master-key (mode 0600); MASTER_KEY_PATH exported for this run');
+    s.breaks.keyMounted = true;
+    dim(s, '> activated development Deployment License (730 days, no vendor service contacted)');
+    s.deployment.licensed = true;
+    dim(s, '> created bootstrap Deployment Administrator, Workspace 运营分析, Workspace Administrator, Consumer');
+    s.deployment.installed = true;
+    s.deployment.workspace = '运营分析';
+    s.seeds += 1;
+    s.users = DEV_USERS.map((u) => ({ ...u }));
+    s.postgres.rows = 41;
+    enrollOperator(s);
+    ok(s, '✓ Install — 5 versioned buckets, licensed Deployment, 3 disposable platform Users, 1 Workspace, Operator enrolled');
+    return true;
+  }
+
+  function stepWorkload(s, o) {
+    if (!o.workload) {
+      if (s.deployment.workload) { info(s, '• Reference Workload — already loaded (kept)'); return true; }
+      info(s, '• Reference Workload — not requested; the Deployment holds only its disposable seed');
+      dim(s, '  (add `--with-reference-workload` to load the real business source data and expected results)');
+      return true;
+    }
+    if (s.deployment.workload) { info(s, '• Reference Workload — already loaded (skipped)'); return true; }
+    dim(s, '> pg_advisory_lock(dev_reference_workload) acquired');
+    dim(s, '> loading Reference Workload: sources, acquisitions, Integration Batches, Dataset Releases,');
+    dim(s, '>   Data Product Releases, Grants, Report Templates and their expected governed results');
+    s.deployment.workload = true;
+    s.deployment.workloadRows = 128460;
+    s.postgres.rows += 128460;
+    ok(s, '✓ Reference Workload — 128,460 rows across 1 Workspace; expected results pinned for comparison');
+    return true;
+  }
+
+  function stepGate(s, o) {
+    const g = [false, false, false, false, false];
+    g[0] = s.postgres.running && s.postgres.accepting;
+    if (!g[0]) return gateFail(s, g, 1, 'Postgres is not accepting connections as the dev role.',
+      'Re-run `npm run dev`; if it persists, check `docker compose logs postgres`.');
+    g[1] = s.minio.reachable && s.minio.buckets === BUCKETS.length && s.minio.versioning;
+    if (!g[1]) return gateFail(s, g, 2,
+      `MinIO reports ${s.minio.buckets} of ${BUCKETS.length} buckets, versioning ${s.minio.versioning ? 'on' : 'off'}.`,
+      'Run `npm run dev -- --reset`; bucket creation is part of install and is not retried piecemeal.');
+    g[2] = s.postgres.schemaHead === s.binaryHead;
+    if (!g[2]) return gateFail(s, g, 3,
+      `schema_migrations head is 00${s.postgres.schemaHead} but this binary expects 00${s.binaryHead}.`,
+      s.postgres.schemaHead > s.binaryHead
+        ? 'The schema is ahead of your checkout — you switched to an older branch. `git switch main && npm run dev`, '
+          + 'or run `dc-operator upgrade` from the newer release. The app refuses to serve rather than misbehave.'
+        : 'Run `dc-operator upgrade` (or just re-run `npm run dev`) to bring the schema to head.');
+    g[3] = s.breaks.keyMounted;
+    if (!g[3]) return gateFail(s, g, 4, 'MASTER_KEY_PATH is not set, so wrapped DEKs cannot be decrypted.',
+      'Re-run `npm run dev` — it generates dev/master-key and exports the variable for the process it starts.');
+    s.app.gate = g;
+    ok(s, '✓ Readiness gate — Postgres, MinIO buckets, migration head, master key all verified');
+    return true;
+  }
+
+  function gateFail(s, g, n, cause, remedy) {
+    s.app.gate = g; s.app.ready = false; s.app.listeners = false; s.app.workers = false;
+    return halt(s, 'Readiness gate', `step ${n} of 5 failed — ${cause}`, remedy);
+  }
+
+  function stepServe(s, o) {
+    s.app.listeners = true; s.app.workers = true; s.app.ready = true;
+    s.app.gate = [true, true, true, true, true];
+    s.host.appPortFree = false;
+    s.host.appPort = o.port;
+    s.phase = 'serving';
+    ok(s, `✓ Serving — listeners on :${o.port}, workers polling jobs, /readyz 200`);
+    return true;
+  }
+
+  function stepBanner(s, o) {
+    line(s, 'info', '');
+    line(s, 'ok', `  Operator Console      http://127.0.0.1:${o.port}/`);
+    line(s, 'ok', `  Platform application  http://127.0.0.1:${o.port}/app`);
+    line(s, 'ok', `  Health / metrics      http://127.0.0.1:${o.port}/healthz  /readyz  /metrics`);
+    line(s, 'info', '');
+    line(s, 'warn', '  Operator — host-level; signs in to the Operator Console, not a platform User');
+    line(s, 'warn', `    ${s.operator.username}  /  ${s.operator.password}   (auto-enrolled by npm run dev)`);
+    s.users.forEach((u) => {
+      line(s, 'info', `  ${u.actor}`);
+      line(s, 'info', `    ${u.username}  /  ${u.password}`);
+    });
+    line(s, 'info', '');
+    line(s, 'dim', s.deployment.workload
+      ? '  Reference Workload loaded. All passwords are development-only and printed on every run.'
+      : '  No Reference Workload: re-run with --with-reference-workload to load it into this same Deployment.');
+    line(s, 'dim', '  Ctrl+C stops the app and the watch. Postgres, MinIO and the Deployment persist.');
+    return true;
+  }
+
+  const STEPS = [
+    ['Dependencies', stepDependencies],
+    ['Services', stepServices],
+    ['Build', stepBuild],
+    ['Migrations', stepMigrations],
+    ['Install', stepInstall],
+    ['Reference Workload', stepWorkload],
+    ['Readiness gate', stepGate],
+    ['Serve', stepServe],
+    ['Banner', stepBanner],
+  ];
+
+  function runPipeline(s, o) {
+    s.failure = null;
+    for (const [, step] of STEPS) {
+      if (step(s, o) !== true) return false;
+    }
+    return true;
+  }
+
+  function doReset(s, o) {
+    dim(s, '> stopping the app and the watch');
+    s.app = { listeners: false, workers: false, ready: false, gate: [false, false, false, false, false] };
+    s.build = { backend: false, web: false, watching: false, rebuilds: 0 };
+    dim(s, '> drop database dev; create database dev;  (not TRUNCATE: sequences and FK order would survive)');
+    dim(s, '> minio: rm -r --force raw documents bundles exports backups; mb; versioning re-enabled');
+    s.postgres.schemaHead = 0; s.postgres.rows = 0;
+    s.minio.buckets = 0; s.minio.versioning = false;
+    s.deployment = { config: false, installed: false, licensed: false, workload: false, workloadRows: 0, workspace: null };
+    // `seeds` deliberately survives: it is the evidence that a re-seed happened.
+    s.users = []; s.operator.enrolled = false; s.breaks.legacyJson = false; s.host.appPortFree = true;
+    ok(s, '✓ Reset — database dropped and recreated, 5 buckets recreated with versioning, local config discarded');
+  }
+
+  /* ---- events ---- */
+
+  function reduce(state, event) {
+    const s = structuredClone(state);
+    const { type } = event;
+    const port = event.port ?? PORT;
+
+    if (type === 'RUN_DEV') {
+      const o = { workload: !!event.workload, reset: !!event.reset, port, dbPort: event.dbPort };
+      s.runs += 1;
+      if (s.phase === 'serving') {
+        warn(s, `$ npm run dev   (already serving on :${port})`);
+        warn(s, '! This port is held by the app this command already started.');
+        s.failure = { step: 'Dependencies',
+          cause: `port ${port} is held by the running dev app`,
+          remedy: 'Ctrl+C in the serving terminal first — including for `--reset` and `--with-reference-workload`, '
+            + 'which are refused rather than allowed to kill another terminal’s foreground process. '
+            + 'For a genuinely second stack, use `npm run dev -- --port 9000 --db-port 5433`.' };
+        line(s, 'fail', '  → Ctrl+C there first, or run a second stack on --port 9000 --db-port 5433');
+        return s;
+      }
+      cmd(s, 'npm run dev' + (o.reset ? ' -- --reset' : '') + (o.workload ? ' -- --with-reference-workload' : '')
+        + (port !== PORT ? ` -- --port ${port}` : '') + (o.dbPort ? ` -- --db-port ${o.dbPort}` : ''));
+      if (s.phase === 'stopped') s.restarts += 1;
+      if (o.reset) doReset(s, o);
+      const resumed = s.phase === 'failed' || s.phase === 'refusing';
+      if (resumed) dim(s, '> resuming after the previous failure; completed steps are detected and skipped');
+      runPipeline(s, o);
+      return s;
+    }
+
+    if (type === 'CTRL_C') {
+      if (s.phase !== 'serving') {
+        warn(s, '! Nothing is serving, so there is nothing to interrupt.');
+        return s;
+      }
+      cmd(s, 'Ctrl+C');
+      s.app = { listeners: false, workers: false, ready: false, gate: [false, false, false, false, false] };
+      s.build.watching = false;
+      s.host.appPortFree = true;
+      s.phase = 'stopped';
+      ok(s, '✓ Stopped — app and watch down. Postgres, MinIO, the Deployment and every seeded row are untouched.');
+      return s;
+    }
+
+    if (type === 'DOWN') {
+      cmd(s, 'npm run dev -- --down');
+      if (s.phase === 'serving') { s.app.listeners = false; s.app.workers = false; s.app.ready = false; s.build.watching = false; }
+      s.postgres.running = false; s.postgres.accepting = false;
+      s.minio.running = false; s.minio.reachable = false;
+      s.host.appPortFree = true;
+      s.phase = 'down';
+      ok(s, '✓ Down — containers stopped, volumes kept. Deployment data survives; `npm run dev` brings it back.');
+      return s;
+    }
+
+    if (type === 'EDIT_BACKEND') {
+      if (!s.build.watching) { warn(s, '! The watch is not running; edit after `npm run dev`.'); return s; }
+      dim(s, '> save src/product-query.ts');
+      s.build.rebuilds += 1;
+      dim(s, '> tsc --watch recompiled; restarting the app in place');
+      const held = { gate: s.app.gate, listeners: s.app.listeners, workers: s.app.workers, ready: s.app.ready };
+      s.app.listeners = false; s.app.workers = false; s.app.ready = false;
+      s.app.gate = [false, false, false, false, false];
+      s.app = { ...s.app, ...held };
+      ok(s, '✓ Rebuilt — readiness gate re-passed in 0.4s; no data touched, browser session survives');
+      return s;
+    }
+
+    if (type === 'EDIT_WEB') {
+      if (!s.build.watching) { warn(s, '! The watch is not running; edit after `npm run dev`.'); return s; }
+      dim(s, '> save web/src/views/Products.tsx');
+      s.build.rebuilds += 1;
+      ok(s, '✓ Rebuilt — vite build --watch emitted dist/web/; refresh the browser (no app restart)');
+      return s;
+    }
+
+    if (type === 'OPEN_BROWSER') {
+      const url = `http://127.0.0.1:${s.host.appPort}${event.surface === 'console' ? '/' : '/app'}`;
+      if (s.phase !== 'serving') {
+        warn(s, `! Cannot open ${url} — the app is not serving (phase: ${s.phase}).`);
+        warn(s, '  Run `npm run dev` and wait for the ✓ Serving line.');
+        return s;
+      }
+      s.browserOpened += 1;
+      ok(s, `✓ Opened ${url} — ${event.surface === 'console' ? 'Operator Console sign-in' : 'Platform sign-in'}`);
+      return s;
+    }
+
+    if (type === 'SIGN_IN') {
+      if (s.phase !== 'serving') { warn(s, `! Cannot sign in — the app is not serving (phase: ${s.phase}).`); return s; }
+      if (event.actor === 'Operator') {
+        if (!s.operator.enrolled) {
+          warn(s, '! The Operator credential is revoked, so the Operator Console refuses this sign-in.');
+          warn(s, '  Recovery: `dc-operator console enroll` prints a one-time URL, or re-run `npm run dev`.');
+          return s;
+        }
+        s.signedIn += 1;
+        ok(s, `✓ Signed in to the Operator Console as ${s.operator.username} — password only, dev auto-enrolled.`);
+        dim(s, '  Operator sessions stay separate from platform User sessions; revoke/re-enroll is a CLI recovery path.');
+        return s;
+      }
+      const u = s.users.find((x) => x.actor === event.actor);
+      if (!u) { warn(s, `! No disposable ${event.actor} is seeded.`); return s; }
+      s.signedIn += 1;
+      ok(s, `✓ Signed in as ${u.username} (${u.actor}) — password only, no second factor.`);
+      dim(s, '  Session expires in 15 minutes; 5 failed attempts lock the account for 15 minutes.');
+      return s;
+    }
+
+    if (type === 'REVOKE_OPERATOR') {
+      cmd(s, `dc-operator console revoke --operator ${s.operator.username}`);
+      s.operator.enrolled = false;
+      warn(s, '! Operator credential revoked; every Operator Console session is dead.');
+      dim(s, '  Recovery: `dc-operator console enroll` for a one-time URL, or `npm run dev` re-enrolls the dev credential.');
+      return s;
+    }
+
+    /* ---- host and stack breaks, so the failure paths can be felt ---- */
+
+    if (type === 'BREAK') {
+      const label = { dockerOff: 'Docker stopped', dockerOn: 'Docker started', portTake: 'port 5432 taken',
+        portFree: 'port 5432 freed', migBreak: 'migration 0009 broken', migFix: 'migration 0009 fixed',
+        older: 'checked out an older release', head: 'back on main', keyOff: 'MASTER_KEY_PATH unset',
+        keyOn: 'MASTER_KEY_PATH restored', wipe: 'docker compose down -v (host stores wiped)',
+        legacy: 'legacy state/platform.json restored' }[event.what];
+      warn(s, `! ${label}`);
+      switch (event.what) {
+        case 'dockerOff': s.host.docker = false; break;
+        case 'dockerOn': s.host.docker = true; break;
+        case 'portTake': s.host.dbPortFree = false; break;
+        case 'portFree': s.host.dbPortFree = true; break;
+        case 'migBreak': s.breaks.migration = true; break;
+        case 'migFix': s.breaks.migration = false; break;
+        case 'older': s.binaryHead = 12; break;
+        case 'head': s.binaryHead = HEAD; break;
+        case 'keyOff': s.breaks.keyMounted = false; break;
+        case 'keyOn': s.breaks.keyMounted = true; break;
+        case 'wipe':
+          s.postgres.running = false; s.postgres.accepting = false; s.postgres.volume = false;
+          s.postgres.schemaHead = 0; s.postgres.rows = 0;
+          s.minio.running = false; s.minio.reachable = false; s.minio.buckets = 0; s.minio.versioning = false;
+          if (s.phase === 'serving' || s.phase === 'stopped') s.phase = 'down';
+          break;
+        case 'legacy': s.breaks.legacyJson = true; break;
+      }
+      return s;
+    }
+
+    return s;
+  }
+
+  /* ---- legality, so the machine's shape is visible without reading code ---- */
+  function legalActions(s) {
+    const serving = s.phase === 'serving';
+    return [
+      { key: 'run', label: 'npm run dev', legal: !serving, why: serving ? 'already serving on this port' : '' },
+      { key: 'reset', label: '--reset', legal: true, why: '' },
+      { key: 'workload', label: '--with-reference-workload', legal: !s.deployment.workload, why: 'already loaded' },
+      { key: 'stop', label: 'Ctrl+C', legal: serving, why: 'nothing is serving' },
+      { key: 'down', label: '--down', legal: s.postgres.running, why: 'containers are not up' },
+      { key: 'edit', label: 'edit a source file', legal: s.build.watching, why: 'the watch is not running' },
+      { key: 'browse', label: 'open the browser', legal: serving, why: 'the app is not serving' },
+      { key: 'signin', label: 'sign in', legal: serving, why: 'the app is not serving' },
+    ];
+  }
+
+  return { createState, reduce, legalActions, HEAD, BUCKETS, PORT, DEV_USERS, PHASE_HINT };
+})();
+</script>
+<script>
+/* =====================================================================
+   THROWAWAY PAGE SHELL — renders the module above. Not worth keeping.
+   ===================================================================== */
+const $ = (id) => document.getElementById(id);
+let state = DevWorkflow.createState();
+
+const GATE_LABELS = [
+  'Postgres reachable; dev role has expected privileges',
+  'MinIO reachable; 5 buckets exist with versioning enabled',
+  'schema_migrations matches the binary’s expected head',
+  'Master key mounted; DEK round-trip and audit HMAC verify',
+  'Listeners up; workers polling the durable job queue',
+];
+
+const yn = (v) => v ? '<span class="yes">yes</span>' : '<span class="no">no</span>';
+
+function render() {
+  const s = state;
+  $('phase').textContent = s.phase;
+  $('phaseHint').textContent = DevWorkflow.PHASE_HINT[s.phase] ?? '';
+
+  $('failure').innerHTML = s.failure
+    ? `<div class="failure"><h3>Actionable failure — ${s.failure.step}</h3>`
+      + `<div class="cause">${s.failure.cause}</div><div class="remedy">${s.failure.remedy}</div></div>`
+    : '';
+
+  const head = s.postgres.schemaHead, want = s.binaryHead;
+  const headCell = head === want ? `<span class="yes">00${head}</span>`
+    : `<span class="bad">00${head} ≠ 00${want}</span>`;
+
+  $('state').innerHTML = `
+    <div class="card"><h3>Host</h3><dl class="kv">
+      <dt>Docker</dt><dd>${yn(s.host.docker)}</dd>
+      <dt>port 5432 free</dt><dd>${yn(s.host.dbPortFree)}</dd>
+      <dt>postgres bound</dt><dd>:${s.host.dbPort}</dd>
+      <dt>port ${DevWorkflow.PORT} free</dt><dd>${yn(s.host.appPortFree)}</dd>
+      <dt>app bound</dt><dd>:${s.host.appPort}</dd>
+      <dt>legacy JSON present</dt><dd>${s.breaks.legacyJson ? '<span class="bad">yes</span>' : '<span class="no">no</span>'}</dd>
+    </dl></div>
+    <div class="card"><h3>PostgreSQL</h3><dl class="kv">
+      <dt>accepting</dt><dd>${yn(s.postgres.accepting)}</dd>
+      <dt>schema head</dt><dd>${headCell}</dd>
+      <dt>binary expects</dt><dd>00${want}</dd>
+      <dt>volume</dt><dd>${yn(s.postgres.volume)}</dd>
+      <dt>rows</dt><dd>${s.postgres.rows.toLocaleString('en-US')}</dd>
+    </dl></div>
+    <div class="card"><h3>MinIO</h3><dl class="kv">
+      <dt>reachable</dt><dd>${yn(s.minio.reachable)}</dd>
+      <dt>buckets</dt><dd>${s.minio.buckets} / ${DevWorkflow.BUCKETS.length}</dd>
+      <dt>versioning</dt><dd>${s.minio.versioning ? '<span class="yes">on</span>' : '<span class="no">off</span>'}</dd>
+    </dl></div>
+    <div class="card"><h3>Deployment</h3><dl class="kv">
+      <dt>config on disk</dt><dd>${yn(s.deployment.config)}</dd>
+      <dt>installed</dt><dd>${yn(s.deployment.installed)}</dd>
+      <dt>licensed</dt><dd>${yn(s.deployment.licensed)}</dd>
+      <dt>master key</dt><dd>${s.breaks.keyMounted ? '<span class="yes">mounted</span>' : '<span class="bad">missing</span>'}</dd>
+      <dt>Workspace</dt><dd>${s.deployment.workspace ?? '—'}</dd>
+      <dt>times seeded</dt><dd>${s.seeds}</dd>
+      <dt>Reference Workload</dt><dd>${s.deployment.workload ? `<span class="yes">${s.deployment.workloadRows.toLocaleString('en-US')}</span>` : '<span class="no">not loaded</span>'}</dd>
+    </dl></div>
+    <div class="card"><h3>Build and app</h3><dl class="kv">
+      <dt>backend built</dt><dd>${yn(s.build.backend)}</dd>
+      <dt>web built</dt><dd>${yn(s.build.web)}</dd>
+      <dt>watching</dt><dd>${yn(s.build.watching)}</dd>
+      <dt>rebuilds</dt><dd>${s.build.rebuilds}</dd>
+      <dt>listeners</dt><dd>${yn(s.app.listeners)}</dd>
+      <dt>workers polling</dt><dd>${yn(s.app.workers)}</dd>
+    </dl></div>
+    <div class="card"><h3>This session</h3><dl class="kv">
+      <dt>npm run dev</dt><dd>${s.runs}</dd>
+      <dt>warm restarts</dt><dd>${s.restarts}</dd>
+      <dt>browser opened</dt><dd>${s.browserOpened}</dd>
+      <dt>sign-ins</dt><dd>${s.signedIn}</dd>
+    </dl></div>
+    <div class="card" style="grid-column:1/-1"><h3>Readiness gate — /readyz answers 200 only when all five pass</h3>
+      <ol class="gate">${s.app.gate.map((v, i) =>
+        `<li><span class="n">${i + 1}</span><span class="mark ${v ? 'yes' : 'no'}">${v ? '✓' : '○'}</span><span>${GATE_LABELS[i]}</span></li>`).join('')}
+      </ol></div>
+    <div class="card" style="grid-column:1/-1"><h3>Disposable identities — printed on every run, wiped by --reset</h3>
+      ${s.users.length
+        ? `<table class="users"><thead><tr><th>Actor</th><th>Username</th><th>Password</th><th>Second factor</th></tr></thead><tbody>`
+          + s.users.map((u) => `<tr><td>${u.actor}</td><td>${u.username}</td><td>${u.password}</td><td>none — password only</td></tr>`).join('')
+          + `<tr><td>Operator (host-level)</td><td>${s.operator.username}</td><td>${s.operator.password}</td>`
+          + `<td>${s.operator.enrolled ? 'none — auto-enrolled by dev' : '<span class="bad">revoked</span>'}</td></tr>`
+          + `</tbody></table>`
+        : '<p style="margin:0;color:var(--muted);font-size:13px">nothing is seeded yet</p>'}
+    </div>`;
+
+  $('legal').innerHTML = DevWorkflow.legalActions(s).map((a) =>
+    `<span class="chip ${a.legal ? 'on' : ''}" title="${a.legal ? 'legal in this phase' : 'refused: ' + a.why}">${a.legal ? '✓' : '✗'} ${a.label}</span>`).join('');
+
+  const term = $('term');
+  term.textContent = '';
+  if (!s.transcript.length) {
+    const p = document.createElement('div');
+    p.className = 'dim';
+    p.textContent = 'nothing has run yet. A fresh clone: no services, no schema, no Deployment.';
+    term.appendChild(p);
+  }
+  for (const l of s.transcript) {
+    const div = document.createElement('div');
+    div.className = l.kind;
+    div.textContent = l.text;
+    term.appendChild(div);
+  }
+  term.scrollTop = term.scrollHeight;
+  renderWalkStep();
+}
+
+/* ---- free play ---- */
+const FREEPLAY = [
+  { group: 'The one command', buttons: [
+    { label: 'npm run dev', primary: true, event: { type: 'RUN_DEV' } },
+    { label: 'npm run dev -- --with-reference-workload', event: { type: 'RUN_DEV', workload: true } },
+    { label: 'npm run dev -- --port 9000', event: { type: 'RUN_DEV', port: 9000 } },
+    { label: 'npm run dev -- --port 9000 --db-port 5433', event: { type: 'RUN_DEV', port: 9000, dbPort: 5433 } },
+    { label: 'Ctrl+C', event: { type: 'CTRL_C' } },
+    { label: 'npm run dev -- --down', event: { type: 'DOWN' } },
+    { label: 'npm run dev -- --reset', danger: true, event: { type: 'RUN_DEV', reset: true } },
+    { label: '↺ fresh clone', event: { type: '__RESET_DEMO__' } },
+  ] },
+  { group: 'While it is serving', buttons: [
+    { label: 'edit a backend file', event: { type: 'EDIT_BACKEND' } },
+    { label: 'edit a web file', event: { type: 'EDIT_WEB' } },
+    { label: 'open Platform application', event: { type: 'OPEN_BROWSER', surface: 'app' } },
+    { label: 'open Operator Console', event: { type: 'OPEN_BROWSER', surface: 'console' } },
+    { label: 'sign in — Deployment Administrator', event: { type: 'SIGN_IN', actor: 'Deployment Administrator' } },
+    { label: 'sign in — Workspace Administrator', event: { type: 'SIGN_IN', actor: 'Workspace Administrator' } },
+    { label: 'sign in — Consumer', event: { type: 'SIGN_IN', actor: 'Consumer' } },
+    { label: 'sign in — Operator (Console)', event: { type: 'SIGN_IN', actor: 'Operator' } },
+    { label: 'revoke Operator credential (CLI)', danger: true, event: { type: 'REVOKE_OPERATOR' } },
+  ] },
+  { group: 'Break the host', buttons: [
+    { label: 'Docker stopped', danger: true, event: { type: 'BREAK', what: 'dockerOff' } },
+    { label: 'Docker started', event: { type: 'BREAK', what: 'dockerOn' } },
+    { label: 'port 5432 taken', danger: true, event: { type: 'BREAK', what: 'portTake' } },
+    { label: 'port 5432 freed', event: { type: 'BREAK', what: 'portFree' } },
+    { label: 'host stores wiped (down -v)', danger: true, event: { type: 'BREAK', what: 'wipe' } },
+    { label: 'legacy state/platform.json restored', danger: true, event: { type: 'BREAK', what: 'legacy' } },
+  ] },
+  { group: 'Break the stack', buttons: [
+    { label: 'migration 0009 broken', danger: true, event: { type: 'BREAK', what: 'migBreak' } },
+    { label: 'migration 0009 fixed', event: { type: 'BREAK', what: 'migFix' } },
+    { label: 'check out an older release', danger: true, event: { type: 'BREAK', what: 'older' } },
+    { label: 'back on main', event: { type: 'BREAK', what: 'head' } },
+    { label: 'MASTER_KEY_PATH unset', danger: true, event: { type: 'BREAK', what: 'keyOff' } },
+    { label: 'MASTER_KEY_PATH restored', event: { type: 'BREAK', what: 'keyOn' } },
+  ] },
+];
+
+function dispatch(event) {
+  if (event.type === '__RESET_DEMO__') { state = DevWorkflow.createState(); render(); return; }
+  state = DevWorkflow.reduce(state, event);
+  render();
+}
+
+$('freeplay').innerHTML = FREEPLAY.map((g, gi) =>
+  `<div class="group"><h3>${g.group}</h3><div class="btns">` + g.buttons.map((b, bi) =>
+    `<button data-g="${gi}" data-b="${bi}" class="${b.primary ? 'primary' : ''} ${b.danger ? 'danger' : ''}">${b.label}</button>`).join('')
+  + '</div></div>').join('');
+
+$('freeplay').addEventListener('click', (e) => {
+  const btn = e.target.closest('button'); if (!btn) return;
+  dispatch(FREEPLAY[Number(btn.dataset.g)].buttons[Number(btn.dataset.b)].event);
+});
+
+/* ---- guided walkthroughs ---- */
+const WALKS = [
+  { name: 'Cold start', watch: 'that one command carries a fresh clone all the way to four signed-in browser actors, with nothing read out of test code and no enrollment step in between.', steps: [
+    { label: 'npm run dev', event: { type: 'RUN_DEV' } },
+    { label: 'open Platform application', event: { type: 'OPEN_BROWSER', surface: 'app' } },
+    { label: 'sign in — Deployment Administrator', event: { type: 'SIGN_IN', actor: 'Deployment Administrator' } },
+    { label: 'sign in — Workspace Administrator', event: { type: 'SIGN_IN', actor: 'Workspace Administrator' } },
+    { label: 'sign in — Consumer', event: { type: 'SIGN_IN', actor: 'Consumer' } },
+    { label: 'open Operator Console', event: { type: 'OPEN_BROWSER', surface: 'console' } },
+    { label: 'sign in — Operator (Console)', event: { type: 'SIGN_IN', actor: 'Operator' } },
+  ] },
+  { name: 'Warm restart', watch: 'that the second run reuses services, skips migrations and install, and prints the same credentials — nothing is re-seeded, and it is visibly faster.', steps: [
+    { label: 'npm run dev', event: { type: 'RUN_DEV' } },
+    { label: 'sign in — Consumer', event: { type: 'SIGN_IN', actor: 'Consumer' } },
+    { label: 'Ctrl+C', event: { type: 'CTRL_C' } },
+    { label: 'npm run dev  (again)', event: { type: 'RUN_DEV' } },
+    { label: 'sign in — Consumer  (same password)', event: { type: 'SIGN_IN', actor: 'Consumer' } },
+  ] },
+  { name: 'Clean reset', watch: 'that reset is refused while the app is serving, then drops and recreates the database rather than truncating it, recreates all five buckets with versioning, and increments “times seeded”.', steps: [
+    { label: 'npm run dev', event: { type: 'RUN_DEV' } },
+    { label: 'npm run dev -- --reset  (refused while serving)', event: { type: 'RUN_DEV', reset: true } },
+    { label: 'Ctrl+C', event: { type: 'CTRL_C' } },
+    { label: 'npm run dev -- --reset', event: { type: 'RUN_DEV', reset: true } },
+    { label: 'sign in — Consumer', event: { type: 'SIGN_IN', actor: 'Consumer' } },
+  ] },
+  { name: 'Workload opt-in', watch: 'that the Reference Workload can be added later into the same Deployment without a reset, and that asking twice does not load it twice.', steps: [
+    { label: 'npm run dev  (no flag)', event: { type: 'RUN_DEV' } },
+    { label: 'Ctrl+C', event: { type: 'CTRL_C' } },
+    { label: 'npm run dev -- --with-reference-workload', event: { type: 'RUN_DEV', workload: true } },
+    { label: 'Ctrl+C', event: { type: 'CTRL_C' } },
+    { label: 'npm run dev -- --with-reference-workload  (again)', event: { type: 'RUN_DEV', workload: true } },
+  ] },
+  { name: 'No Docker', watch: 'that the refusal lands in the Dependencies step, before any container, volume, bucket or row exists — so there is nothing to clean up.', steps: [
+    { label: 'Docker stopped', event: { type: 'BREAK', what: 'dockerOff' } },
+    { label: 'npm run dev', event: { type: 'RUN_DEV' } },
+    { label: 'Docker started', event: { type: 'BREAK', what: 'dockerOn' } },
+    { label: 'npm run dev', event: { type: 'RUN_DEV' } },
+  ] },
+  { name: 'Port taken', watch: 'that the message names the port and offers a flag that actually resolves it, and that the stack state is untouched either way.', steps: [
+    { label: 'port 5432 taken', event: { type: 'BREAK', what: 'portTake' } },
+    { label: 'npm run dev', event: { type: 'RUN_DEV' } },
+    { label: 'npm run dev -- --port 9000 --db-port 5433', event: { type: 'RUN_DEV', port: 9000, dbPort: 5433 } },
+    { label: 'Ctrl+C', event: { type: 'CTRL_C' } },
+    { label: 'port 5432 freed', event: { type: 'BREAK', what: 'portFree' } },
+    { label: 'npm run dev', event: { type: 'RUN_DEV' } },
+  ] },
+  { name: 'Broken migration', watch: 'that the advisory lock is released, schema_migrations is left at the last good step (0008), and the fixed re-run resumes from 0009 instead of starting over.', steps: [
+    { label: 'migration 0009 broken', event: { type: 'BREAK', what: 'migBreak' } },
+    { label: 'npm run dev', event: { type: 'RUN_DEV' } },
+    { label: 'migration 0009 fixed', event: { type: 'BREAK', what: 'migFix' } },
+    { label: 'npm run dev  (resumes)', event: { type: 'RUN_DEV' } },
+  ] },
+  { name: 'Schema ahead', watch: 'that readiness step 3 refuses to serve an older checkout against a newer schema — the same gate that makes Application Rollback safe.', steps: [
+    { label: 'npm run dev', event: { type: 'RUN_DEV' } },
+    { label: 'Ctrl+C', event: { type: 'CTRL_C' } },
+    { label: 'check out an older release', event: { type: 'BREAK', what: 'older' } },
+    { label: 'npm run dev', event: { type: 'RUN_DEV' } },
+    { label: 'back on main', event: { type: 'BREAK', what: 'head' } },
+    { label: 'npm run dev', event: { type: 'RUN_DEV' } },
+  ] },
+  { name: 'Edit while serving', watch: 'that a backend edit restarts the app in place and re-passes the gate without touching data, while a web edit only needs a browser refresh.', steps: [
+    { label: 'npm run dev', event: { type: 'RUN_DEV' } },
+    { label: 'edit a backend file', event: { type: 'EDIT_BACKEND' } },
+    { label: 'edit a web file', event: { type: 'EDIT_WEB' } },
+    { label: 'open Platform application', event: { type: 'OPEN_BROWSER', surface: 'app' } },
+  ] },
+  { name: 'Wiped behind your back', watch: 'the awkward one: local config survived but the host stores did not. Drift is caught in Dependencies — before migrations are applied to a database about to be declared drifted — and refuses instead of silently re-minting a master key over wrapped DEKs it can no longer read.', steps: [
+    { label: 'npm run dev', event: { type: 'RUN_DEV' } },
+    { label: 'Ctrl+C', event: { type: 'CTRL_C' } },
+    { label: 'host stores wiped (down -v)', event: { type: 'BREAK', what: 'wipe' } },
+    { label: 'npm run dev', event: { type: 'RUN_DEV' } },
+    { label: 'npm run dev -- --reset', event: { type: 'RUN_DEV', reset: true } },
+  ] },
+];
+
+let walkIndex = 0, walkStep = 0;
+
+function buildWalks() {
+  $('tabs').innerHTML = WALKS.map((w, i) =>
+    `<button role="tab" aria-selected="${i === walkIndex}" data-i="${i}">${w.name}</button>`).join('');
+  $('walks').innerHTML = WALKS.map((w, i) =>
+    `<div class="walk ${i === walkIndex ? 'on' : ''}" data-i="${i}">`
+    + `<p><strong>Watch for:</strong> ${w.watch}</p><ol>`
+    + w.steps.map((st, j) => `<li data-j="${j}"><button data-i="${i}" data-j="${j}">${st.label}</button></li>`).join('')
+    + '</ol></div>').join('');
+}
+
+function renderWalkStep() {
+  const walk = document.querySelector(`.walk[data-i="${walkIndex}"]`);
+  if (!walk) return;
+  walk.querySelectorAll('li').forEach((li) => {
+    const j = Number(li.dataset.j);
+    li.classList.toggle('done', j < walkStep);
+    const btn = li.querySelector('button');
+    btn.classList.toggle('next', j === walkStep);
+    btn.disabled = j !== walkStep;
+  });
+}
+
+function startWalk(i) {
+  walkIndex = i; walkStep = 0;
+  state = DevWorkflow.createState();
+  buildWalks();
+  document.querySelectorAll('.walk').forEach((el) => el.classList.toggle('on', Number(el.dataset.i) === i));
+  document.querySelectorAll('#tabs button').forEach((el) => el.setAttribute('aria-selected', String(Number(el.dataset.i) === i)));
+  render();
+}
+
+$('tabs').addEventListener('click', (e) => {
+  const btn = e.target.closest('button'); if (!btn) return;
+  startWalk(Number(btn.dataset.i));
+});
+
+$('walks').addEventListener('click', (e) => {
+  const btn = e.target.closest('button'); if (!btn || btn.disabled) return;
+  const i = Number(btn.dataset.i), j = Number(btn.dataset.j);
+  if (i !== walkIndex || j !== walkStep) return;
+  dispatch(WALKS[i].steps[j].event);
+  walkStep += 1;
+  renderWalkStep();
+});
+
+buildWalks();
+render();
+</script>
+</body>
+</html>
